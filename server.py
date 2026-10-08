@@ -98,7 +98,7 @@ def check_control_auth(handler) -> bool:
 # asks the next polling client to upload a fresh one.
 _diag_lock = threading.Lock()
 _last_diagnostics = {"text": "", "time": 0.0}
-_diag_requested = False
+_diag_requested = ""
 
 
 # Upstream data cache (bus arrivals + Citi Bike status), decoupled from render.
@@ -384,11 +384,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/diag":
             # Fetch the most recent device diagnostics report. Add ?request=1 to
-            # also ask the next polling client to upload a fresh one.
-            if params.get("request", ["0"])[0] in ("1", "true", "yes"):
+            # ask the next polling client for a passive dump, or ?request=full for
+            # one that also runs the active capability probe.
+            req = params.get("request", ["0"])[0].lower()
+            if req in ("1", "true", "yes", "full"):
                 with _diag_lock:
-                    _diag_requested = True
-                print("[Diagnostics] requested a fresh dump from the next poll")
+                    _diag_requested = "full" if req == "full" else "1"
+                print(f"[Diagnostics] requested a '{_diag_requested}' dump from the next poll")
             with _diag_lock:
                 text = _last_diagnostics["text"]
                 ts = _last_diagnostics["time"]
@@ -543,10 +545,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             _exists, _mtime, bin_sha, _size = get_binary_info()
 
             # Consume a pending diagnostics request (one-shot) so the client
-            # uploads a fresh device report on this poll.
+            # uploads a fresh device report on this poll. The stored value is
+            # "" (none), "1" (passive) or "full" (passive + active probe).
             with _diag_lock:
-                diag_header = "1" if _diag_requested else ""
-                _diag_requested = False
+                diag_header = _diag_requested
+                _diag_requested = ""
 
             if self.headers.get("If-None-Match") == etag:
                 self.send_response(304)

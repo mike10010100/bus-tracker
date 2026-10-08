@@ -106,6 +106,131 @@ func GatherDiagnostics() Diagnostics {
 	return d
 }
 
+// CapabilityProbe is the result of an on-demand active probe. Unlike
+// GatherDiagnostics (passive, cheap), this runs a handful of read-only commands
+// to answer whether we can drive RTC-scheduled wake. It is only run when the
+// server explicitly asks, and every command is bounded by a timeout.
+type CapabilityProbe struct {
+	UID        string
+	Groups     string
+	Crontab    string   // crontab -l output
+	RTCDevices []string // /dev/rtc* present
+	RTCInfo    string   // listing of /sys/class/rtc/*/name etc.
+	Upstart    string   // /etc/upstart/custom-login contents
+	LipcProps  string   // relevant powerd properties
+	Notes      []string
+}
+
+// probeTimeout bounds each command run by RunActiveProbe.
+var probeTimeout = 5 * time.Second
+
+// runProbeCmd runs a command with a timeout and returns combined output, or an
+// error string. Never panics.
+func runProbeCmd(name string, args ...string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	cmd := execCommandContext(ctx, name, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return fmt.Sprintf("<error: %v>", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// RunActiveProbe performs the on-demand capability probe.
+func RunActiveProbe() CapabilityProbe {
+	p := CapabilityProbe{}
+
+	p.UID = runProbeCmd("id")
+	p.Groups = runProbeCmd("sh", "-c", "id -Gn 2>/dev/null || groups 2>/dev/null")
+	p.Crontab = runProbeCmd("crontab", "-l")
+
+	// RTC devices.
+	if matches, err := globInputs("/dev/rtc*"); err == nil {
+		p.RTCDevices = matches
+	}
+	if matches, err := globInputs("/sys/class/rtc/*"); err == nil {
+		var b strings.Builder
+		for _, d := range matches {
+			name := runProbeCmd("cat", d+"/name")
+			wake := runProbeCmd("cat", d+"/wakealarm")
+			fmt.Fprintf(&b, "%s: name=%q wakealarm=%q\n", d, name, wake)
+		}
+		p.RTCInfo = strings.TrimSpace(b.String())
+	}
+
+	// The boot persistence hook, if present and readable.
+	p.Upstart = func() string {
+		if v := readPathOrMissing("/etc/upstart/custom-login"); v != "<missing>" {
+			if len(v) > 2000 {
+				v = v[:2000] + " …[truncated]"
+			}
+			return strings.TrimSpace(v)
+		}
+		return "<missing>"
+	}()
+
+	// Powerd properties that govern sleep.
+	var lb strings.Builder
+	for _, prop := range []string{
+		"flIntensity", "schedAmberLevel", "preventScreenSaver",
+		"battLevel", "isCharging", "rtcWakeup",
+	} {
+		val := lipcGet("com.lab126.powerd", prop)
+		fmt.Fprintf(&lb, "%s=%q\n", prop, val)
+	}
+	p.LipcProps = strings.TrimSpace(lb.String())
+
+	if strings.Contains(p.UID, "uid=0") {
+		p.Notes = append(p.Notes, "running as root")
+	} else {
+		p.Notes = append(p.Notes, "NOT root: "+p.UID)
+	}
+	if len(p.RTCDevices) > 0 {
+		p.Notes = append(p.Notes, fmt.Sprintf("RTC devices: %v", p.RTCDevices))
+	} else {
+		p.Notes = append(p.Notes, "no /dev/rtc* visible")
+	}
+	return p
+}
+
+// Format renders the probe as a plain-text block.
+func (p CapabilityProbe) Format() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "=== ACTIVE PROBE v%s ===\n", Version)
+	fmt.Fprintf(&b, "--- identity ---\n  id:     %s\n  groups: %s\n", p.UID, p.Groups)
+	fmt.Fprintf(&b, "--- crontab -l ---\n%s\n", indent(p.Crontab))
+	fmt.Fprintf(&b, "--- rtc devices ---\n")
+	if len(p.RTCDevices) == 0 {
+		fmt.Fprintf(&b, "  <none>\n")
+	}
+	for _, d := range p.RTCDevices {
+		fmt.Fprintf(&b, "  %s\n", d)
+	}
+	if p.RTCInfo != "" {
+		fmt.Fprintf(&b, "--- rtc sysfs ---\n%s\n", indent(p.RTCInfo))
+	}
+	fmt.Fprintf(&b, "--- /etc/upstart/custom-login ---\n%s\n", indent(p.Upstart))
+	fmt.Fprintf(&b, "--- powerd lipc props ---\n%s\n", indent(p.LipcProps))
+	fmt.Fprintf(&b, "--- notes ---\n")
+	for _, n := range p.Notes {
+		fmt.Fprintf(&b, "  - %s\n", n)
+	}
+	fmt.Fprintf(&b, "=== END ACTIVE PROBE ===")
+	return b.String()
+}
+
+func indent(s string) string {
+	if s == "" {
+		return "  <empty>"
+	}
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = "  " + l
+	}
+	return strings.Join(lines, "\n")
+}
+
 // Format renders the report as a plain-text block suitable for POSTing to the
 // server's diagnostic endpoint.
 func (d Diagnostics) Format() string {

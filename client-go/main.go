@@ -215,9 +215,14 @@ func (tc *TrackerClient) postLog(msg string) {
 
 // postDiagnostics gathers a device report synchronously (so the probes run on
 // the caller's goroutine and don't leak past the caller's lifetime) and uploads
-// it to the server's /diag endpoint asynchronously.
-func (tc *TrackerClient) postDiagnostics() {
+// it to the server's /diag endpoint asynchronously. When active is true, it also
+// runs the heavier on-demand capability probe (identity, crontab, RTC devices,
+// boot hook) which is safe but shells out a little.
+func (tc *TrackerClient) postDiagnostics(active bool) {
 	report := GatherDiagnostics().Format()
+	if active {
+		report += "\n\n" + RunActiveProbe().Format()
+	}
 	go tc.postText("/diag", report)
 }
 
@@ -587,8 +592,9 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	serverSHA := resp.Header.Get("X-Tracker-SHA256")
 
 	// The server can ask (one-shot) for a device diagnostics dump via a header.
-	if resp.Header.Get("X-Tracker-Diag") == "1" {
-		tc.postDiagnostics()
+	// "full" additionally runs the active capability probe.
+	if diag := resp.Header.Get("X-Tracker-Diag"); diag != "" {
+		tc.postDiagnostics(diag == "full")
 	}
 
 	// HTTP 205 signals remote stop command
@@ -702,9 +708,9 @@ func run(parent context.Context) {
 		tc.logRemote(fmt.Sprintf("Input devices:\n%s", string(devData)))
 	}
 
-	// Upload a device/jailbreak capability report on every startup so the
-	// server (and we) can see what scheduling tooling exists on the device.
-	tc.postDiagnostics()
+	// Upload a device/jailbreak capability report on every startup (passive
+	// only; the active probe runs on request) so the server can track the fleet.
+	tc.postDiagnostics(false)
 
 	// Ensure Kindle stays awake while dashboard is running
 	lipcSet("com.lab126.powerd", "preventScreenSaver", "1")

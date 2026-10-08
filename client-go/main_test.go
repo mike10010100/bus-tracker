@@ -526,7 +526,7 @@ func TestPostDiagnosticsUploadsReport(t *testing.T) {
 	defer srv.Close()
 
 	tc := NewTrackerClient(srv.URL, "auto")
-	tc.postDiagnostics()
+	tc.postDiagnostics(false)
 
 	select {
 	case pair := <-got:

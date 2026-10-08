@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -166,6 +167,82 @@ func TestDiagnosticsFormat_TruncatesLargeFiles(t *testing.T) {
 	}
 	if strings.Count(out, "x") >= 5000 {
 		t.Error("expected truncated output to be shorter than input")
+	}
+}
+
+func TestRunActiveProbe_FormatsReport(t *testing.T) {
+	origGlob := globInputs
+	origCmdCtx := execCommandContext
+	t.Cleanup(func() {
+		globInputs = origGlob
+		execCommandContext = origCmdCtx
+	})
+
+	globInputs = func(pattern string) ([]string, error) {
+		switch pattern {
+		case "/dev/rtc*":
+			return []string{"/dev/rtc0", "/dev/rtc1"}, nil
+		case "/sys/class/rtc/*":
+			return []string{"/sys/class/rtc/rtc0"}, nil
+		}
+		return nil, nil
+	}
+	osReadFile = func(path string) ([]byte, error) {
+		if path == "/etc/upstart/custom-login" {
+			return []byte("#!/bin/sh\nexec /usr/bin/tracker\n"), nil
+		}
+		return nil, os.ErrNotExist
+	}
+	// Every probe command succeeds via `echo`, giving predictable stdout.
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+		_ = ctx
+		return exec.Command("echo", append([]string{name}, arg...)...)
+	}
+
+	p := RunActiveProbe()
+	out := p.Format()
+	for _, want := range []string{
+		"=== ACTIVE PROBE v",
+		"--- identity ---",
+		"--- crontab -l ---",
+		"--- rtc devices ---",
+		"/dev/rtc0",
+		"--- /etc/upstart/custom-login ---",
+		"--- powerd lipc props ---",
+		"=== END ACTIVE PROBE ===",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("probe output missing %q\n---\n%s", want, out)
+		}
+	}
+}
+
+func TestRunActiveProbe_NoRTCDevices(t *testing.T) {
+	origGlob := globInputs
+	origCmdCtx := execCommandContext
+	t.Cleanup(func() {
+		globInputs = origGlob
+		execCommandContext = origCmdCtx
+	})
+	globInputs = func(string) ([]string, error) { return nil, nil }
+	osReadFile = func(string) ([]byte, error) { return nil, os.ErrNotExist }
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+		return exec.Command("echo", name)
+	}
+
+	p := RunActiveProbe()
+	out := p.Format()
+	if !strings.Contains(out, "<none>") {
+		t.Errorf("expected '<none>' for absence of RTC devices, got:\n%s", out)
+	}
+}
+
+func TestIndent(t *testing.T) {
+	if got := indent(""); got != "  <empty>" {
+		t.Errorf("indent empty = %q", got)
+	}
+	if got := indent("a\nb"); got != "  a\n  b" {
+		t.Errorf("indent = %q", got)
 	}
 }
 
