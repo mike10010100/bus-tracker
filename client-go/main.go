@@ -77,9 +77,9 @@ func (tc *TrackerClient) handleNetworkError(ctx context.Context) {
 	errCount := tc.consecutiveErrors
 	tc.mu.Unlock()
 
-	// After 3 consecutive failed polls (~2-3 min), attempt LAN auto-discovery
-	if errCount >= 3 {
-		tc.logRemote(fmt.Sprintf("Server unreachable (%d errors). Triggering LAN auto-discovery...", errCount))
+	// If server is unreachable, immediately trigger LAN auto-discovery
+	if errCount >= 1 {
+		tc.logRemote(fmt.Sprintf("Server unreachable (error %d). Triggering LAN auto-discovery...", errCount))
 		if discovered, err := AutoDiscoverServer(ctx); err == nil && discovered != "" {
 			tc.setServerURL(discovered)
 			tc.mu.Lock()
@@ -276,6 +276,12 @@ func (tc *TrackerClient) checkOTAUpdate(ctx context.Context) bool {
 		return false
 	}
 
+	if canonical := resp.Header.Get("X-Tracker-Server"); canonical != "" && canonical != server {
+		tc.setServerURL(canonical)
+		_ = SaveServerURL(canonical)
+		server = canonical
+	}
+
 	serverVer := resp.Header.Get("X-Tracker-Version")
 	lastMod := resp.Header.Get("Last-Modified")
 	if lastMod == "" {
@@ -350,6 +356,11 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 		return
 	}
 	defer resp.Body.Close()
+
+	if canonical := resp.Header.Get("X-Tracker-Server"); canonical != "" && canonical != server {
+		tc.setServerURL(canonical)
+		_ = SaveServerURL(canonical)
+	}
 
 	// HTTP 205 signals remote stop command
 	if resp.StatusCode == 205 {

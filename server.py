@@ -233,6 +233,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(stat.st_size))
             self.send_header("Last-Modified", last_mod)
             self.send_header("X-Tracker-Version", SERVER_VERSION)
+            self.send_header("X-Tracker-Server", f"http://{get_local_ip()}:{PORT}")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
 
@@ -287,6 +288,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(img_bytes)))
             self.send_header("X-Kindle-Brightness", str(brightness))
             self.send_header("X-Kindle-Warmth", str(warmth))
+            self.send_header("X-Tracker-Server", f"http://{get_local_ip()}:{PORT}")
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.end_headers()
             self.wfile.write(img_bytes)
