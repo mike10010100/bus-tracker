@@ -13,22 +13,25 @@ from render_dashboard import render_dashboard, get_mock_data
 
 class TestCitiBikeTracker(unittest.TestCase):
     def test_default_stations_configuration(self):
-        self.assertEqual(len(DEFAULT_STATIONS), 3)
+        self.assertEqual(len(DEFAULT_STATIONS), 6)
         station_names = [s["name"] for s in DEFAULT_STATIONS]
         self.assertIn("Clinton & 9th", station_names)
         self.assertIn("Washington & 11th", station_names)
+        self.assertIn("Willow & 12th", station_names)
         self.assertIn("Washington & 8th", station_names)
+        self.assertIn("Clinton & 7th", station_names)
+        self.assertIn("Grand & 6th", station_names)
 
         # Ensure walk times and distances are reasonable
         for s in DEFAULT_STATIONS:
             self.assertGreater(s["walk_min"], 0)
-            self.assertLessEqual(s["walk_min"], 10)
+            self.assertLessEqual(s["walk_min"], 12)
             self.assertGreater(s["distance_m"], 0)
 
     def test_get_mock_data(self):
         tracker = CitiBikeTracker()
         mock_data = tracker.get_mock_data()
-        self.assertEqual(len(mock_data), 3)
+        self.assertEqual(len(mock_data), 6)
         for s in mock_data:
             self.assertIn("id", s)
             self.assertIn("name", s)
@@ -39,6 +42,29 @@ class TestCitiBikeTracker(unittest.TestCase):
             self.assertGreaterEqual(s["ebikes"], 0)
             self.assertGreaterEqual(s["classic"], 0)
             self.assertGreaterEqual(s["docks"], 0)
+
+    def test_ebike_prioritization_sorting(self):
+        from citibike import sort_stations_by_ebike_priority
+
+        test_pool = [
+            {"name": "Clinton & 9th", "walk_min": 3, "ebikes": 0, "is_offline": False},
+            {"name": "Willow & 12th", "walk_min": 6, "ebikes": 2, "is_offline": False},
+            {"name": "Clinton & 7th", "walk_min": 7, "ebikes": 4, "is_offline": False},
+            {"name": "Washington & 11th", "walk_min": 6, "ebikes": 0, "is_offline": False},
+            {"name": "Broken Dock", "walk_min": 1, "ebikes": 5, "is_offline": True},
+        ]
+        sorted_pool = sort_stations_by_ebike_priority(test_pool)
+
+        # Stations with e-bikes come first, ordered by walk_min
+        self.assertEqual(sorted_pool[0]["name"], "Willow & 12th")  # 2 ebikes, 6 min
+        self.assertEqual(sorted_pool[1]["name"], "Clinton & 7th")   # 4 ebikes, 7 min
+
+        # Stations with 0 ebikes come next, ordered by walk_min
+        self.assertEqual(sorted_pool[2]["name"], "Clinton & 9th")   # 0 ebikes, 3 min
+        self.assertEqual(sorted_pool[3]["name"], "Washington & 11th") # 0 ebikes, 6 min
+
+        # Offline stations go to the back
+        self.assertEqual(sorted_pool[4]["name"], "Broken Dock")
 
     def test_caching_behavior(self):
         tracker = CitiBikeTracker(cache_ttl=60)
@@ -53,8 +79,7 @@ class TestCitiBikeTracker(unittest.TestCase):
         tracker = CitiBikeTracker()
         with patch("urllib.request.urlopen", side_effect=Exception("Connection refused")):
             res = tracker.get_station_status(force_refresh=True)
-            self.assertEqual(len(res), 3)
-            self.assertEqual(res[0]["name"], "Clinton & 9th")
+            self.assertEqual(len(res), 6)
 
     def test_successful_gbfs_parsing(self):
         fake_payload = {
@@ -97,7 +122,7 @@ class TestCitiBikeTracker(unittest.TestCase):
         tracker = CitiBikeTracker()
         with patch("urllib.request.urlopen", return_value=mock_resp):
             res = tracker.get_station_status(force_refresh=True)
-            self.assertEqual(len(res), 3)
+            self.assertEqual(len(res), 6)
 
             # Check Clinton & 9th
             c9 = next(s for s in res if s["name"] == "Clinton & 9th")

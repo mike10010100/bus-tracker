@@ -255,7 +255,7 @@ def render_morning_view(
     if (tb[2] - tb[0]) > max_title_w:
         morning_title = "MORNING DOCKS"
     draw.text((b_x1 + 12, 15), morning_title, fill="black", font=font_title)
-    draw.text((b_x1 + 12, 39), "919 PARK AVE • CITI BIKE HERO & 126 BUS", fill="#555555", font=font_header_sub)
+    draw.text((b_x1 + 12, 39), "919 PARK AVE • E-BIKE PRIORITY & 126 BUS", fill="#555555", font=font_header_sub)
 
     date_bbox = draw.textbbox((0, 0), now_date_str, font=font_header_sub)
     date_w = date_bbox[2] - date_bbox[0]
@@ -614,24 +614,32 @@ def render_evening_view(
         draw.rounded_rectangle([cb_x0, cb_y0, cb_x1, cb_y0 + header_h], radius=10, fill="#f4f4f4", outline="black", width=2)
         draw.rectangle([cb_x0 + 1, cb_y0 + 14, cb_x1 - 1, cb_y0 + header_h], fill="#f4f4f4")
         draw.line([(cb_x0, cb_y0 + header_h), (cb_x1, cb_y0 + header_h)], fill="black", width=1)
-        draw.text((cb_x0 + 14, cb_y0 + (6 if is_tall else 5)), "CITI BIKE • CLOSEST DOCKS TO 919 PARK AVE", fill="#444444", font=font_cb_tag)
+        draw.text((cb_x0 + 14, cb_y0 + (6 if is_tall else 5)), "CITI BIKE • NEAREST E-BIKE DOCKS TO 919 PARK AVE", fill="#444444", font=font_cb_tag)
 
         body_y0 = cb_y0 + header_h
-        col_count = len(citibike_data)
+        cb_display_data = citibike_data[:3]
+        col_count = len(cb_display_data)
         col_w = (cb_x1 - cb_x0) // col_count
 
-        for i, c in enumerate(citibike_data):
+        for i, c in enumerate(cb_display_data):
             cx0 = cb_x0 + i * col_w
             cx1 = cx0 + col_w
             if i > 0:
                 draw.line([(cx0, body_y0 + 6), (cx0, cb_y1 - 6)], fill="#dddddd", width=1)
 
-            draw.text((cx0 + 14, body_y0 + (10 if is_tall else 8)), c["name"].upper(), fill="black", font=font_cb_name)
             walk_str = f"{c['walk_min']} MIN"
             wb = draw.textbbox((0, 0), walk_str, font=font_cb_walk)
             ww = wb[2] - wb[0]
-            draw.rounded_rectangle([cx1 - ww - 18, body_y0 + (8 if is_tall else 6), cx1 - 10, body_y0 + (24 if is_tall else 22)], radius=4, fill="#eeeeee", outline="black", width=1)
+            badge_x0 = cx1 - ww - 18
+            draw.rounded_rectangle([badge_x0, body_y0 + (8 if is_tall else 6), cx1 - 10, body_y0 + (24 if is_tall else 22)], radius=4, fill="#eeeeee", outline="black", width=1)
             draw.text((cx1 - ww - 14, body_y0 + (10 if is_tall else 8)), walk_str, fill="black", font=font_cb_walk)
+
+            cb_name_font = font_cb_name
+            max_name_w = badge_x0 - (cx0 + 14) - 6
+            tb = draw.textbbox((0, 0), c["name"].upper(), font=cb_name_font)
+            if (tb[2] - tb[0]) > max_name_w:
+                cb_name_font = get_font(12, bold=True)
+            draw.text((cx0 + 14, body_y0 + (10 if is_tall else 8)), c["name"].upper(), fill="black", font=cb_name_font)
 
             if c.get("is_offline"):
                 draw.text((cx0 + 14, body_y0 + (34 if is_tall else 27)), "STATION OFFLINE", fill="#777777", font=font_cb_stat)
