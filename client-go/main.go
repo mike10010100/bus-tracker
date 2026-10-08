@@ -282,8 +282,12 @@ func (tc *TrackerClient) checkOTAUpdate(ctx context.Context) bool {
 		_ = os.Rename(updatePath, BinaryPath)
 		_ = os.Chmod(BinaryPath, 0755)
 
+		_ = os.WriteFile("/tmp/tracker_server.txt", []byte(tc.serverURL), 0644)
+		_ = os.WriteFile("/mnt/us/documents/tracker_server.txt", []byte(tc.serverURL), 0644)
+
+		newArgs := []string{BinaryPath, "-server", tc.serverURL}
 		tc.logRemote("Executing updated binary via syscall.Exec...")
-		_ = syscall.Exec(BinaryPath, os.Args, os.Environ())
+		_ = syscall.Exec(BinaryPath, newArgs, os.Environ())
 		return true
 	}
 	return false
@@ -364,6 +368,8 @@ func main() {
 	defer cancel()
 
 	tc := NewTrackerClient(serverURL)
+	_ = os.WriteFile("/tmp/tracker_server.txt", []byte(serverURL), 0644)
+	_ = os.WriteFile("/mnt/us/documents/tracker_server.txt", []byte(serverURL), 0644)
 
 	// Send initial startup diagnostic
 	tc.logRemote(fmt.Sprintf("Bus Tracker v%s starting up (server: %s)...", Version, serverURL))
@@ -386,12 +392,6 @@ func main() {
 	// Start background listeners
 	tc.startInputListeners(ctx, cancel)
 	go tc.startPowerListener(ctx, cancel)
-
-	// Clear screen on initial launch
-	cmd := exec.Command("eips", "-c")
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	_ = cmd.Run()
 
 	// Initial fetch
 	tc.fetchAndDrawDashboard(ctx, cancel)

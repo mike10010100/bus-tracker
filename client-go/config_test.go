@@ -61,7 +61,7 @@ func TestResolveServerURL(t *testing.T) {
 			readFile: func(path string) ([]byte, error) {
 				return nil, errors.New("not found")
 			},
-			want: DefaultServerURL,
+			want: DefaultCandidateServers[0],
 		},
 	}
 
