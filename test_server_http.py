@@ -88,6 +88,61 @@ class TestHealthAndRoot(ServerHTTPTestBase):
         self.assertEqual(status, 200)
 
 
+class TestDiagnosticsEndpoints(ServerHTTPTestBase):
+    def setUp(self):
+        with server._diag_lock:
+            server._last_diagnostics["text"] = ""
+            server._last_diagnostics["time"] = 0.0
+            server._diag_requested = False
+
+    def tearDown(self):
+        with server._diag_lock:
+            server._last_diagnostics["text"] = ""
+            server._diag_requested = False
+
+    def test_get_diag_404_before_upload(self):
+        status, _headers, _body = _http_get(self.port, "/diag")
+        self.assertEqual(status, 404)
+
+    def test_post_then_get_diag(self):
+        report = "=== DIAGNOSTICS v1.0.0 ===\nhas_kron: true\n=== END DIAGNOSTICS ==="
+        status, _headers, _body = _http("POST", self.port, "/diag", body=report.encode("utf-8"))
+        self.assertEqual(status, 200)
+
+        status, headers, body = _http_get(self.port, "/diag")
+        self.assertEqual(status, 200)
+        self.assertIn("text/plain", headers.get("Content-Type", ""))
+        self.assertIn(b"has_kron: true", body)
+        self.assertIn(b"diagnostics captured", body)
+
+    def test_diag_request_flagged_and_consumed_by_dashboard(self):
+        # Asking for a dump arms a one-shot flag.
+        status, _headers, _body = _http_get(self.port, "/diag?request=1")
+        self.assertEqual(status, 404)  # nothing stored yet, but the flag is set
+        self.assertTrue(server._diag_requested)
+
+        # The next dashboard poll advertises it and clears the flag.
+        status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("X-Tracker-Diag"), "1")
+        self.assertFalse(server._diag_requested)
+
+        # A subsequent poll does not re-request.
+        _status, headers2, _body2 = _http_get(self.port, "/dashboard.png?mock=1")
+        self.assertIsNone(headers2.get("X-Tracker-Diag"))
+
+    def test_diag_flag_also_sent_on_304(self):
+        # Establish an ETag.
+        _status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1")
+        etag = headers.get("ETag")
+        _http_get(self.port, "/diag?request=1")
+        status, headers2, _body2 = _http_get(
+            self.port, "/dashboard.png?mock=1", headers={"If-None-Match": etag}
+        )
+        self.assertEqual(status, 304)
+        self.assertEqual(headers2.get("X-Tracker-Diag"), "1")
+
+
 class TestKeepAlive(ServerHTTPTestBase):
     def test_multiple_requests_on_one_connection(self):
         # HTTP/1.1 keep-alive: the client can reuse a connection across polls

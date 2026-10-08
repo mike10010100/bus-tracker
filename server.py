@@ -94,6 +94,13 @@ def check_control_auth(handler) -> bool:
     return is_private_address(handler.client_address[0])
 
 
+# Last device diagnostics report uploaded by a client, plus a one-shot flag that
+# asks the next polling client to upload a fresh one.
+_diag_lock = threading.Lock()
+_last_diagnostics = {"text": "", "time": 0.0}
+_diag_requested = False
+
+
 # Upstream data cache (bus arrivals + Citi Bike status), decoupled from render.
 # Keying the image cache on battery status previously forced a network refetch
 # on every battery change; now the network fetch has its own TTL and rendering
@@ -335,10 +342,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 print(f"[Server] Error reading log: {e}")
             self._send_empty(200)
             return
+        if parsed.path == "/diag":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length).decode("utf-8", errors="replace")
+                with _diag_lock:
+                    _last_diagnostics["text"] = body
+                    _last_diagnostics["time"] = time.time()
+                print(f"[Diagnostics] received {len(body)} bytes from {self.address_string()}")
+            except Exception as e:
+                print(f"[Server] Error reading diagnostics: {e}")
+            self._send_empty(200)
+            return
         self._send_empty(404)
 
     def do_GET(self):
-        global tracker_stopped
+        global tracker_stopped, _diag_requested
         parsed = urllib.parse.urlparse(self.path)
         params = urllib.parse.parse_qs(parsed.query)
 
@@ -361,6 +380,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Length", "0")
             self.end_headers()
+            return
+
+        if parsed.path == "/diag":
+            # Fetch the most recent device diagnostics report. Add ?request=1 to
+            # also ask the next polling client to upload a fresh one.
+            if params.get("request", ["0"])[0] in ("1", "true", "yes"):
+                with _diag_lock:
+                    _diag_requested = True
+                print("[Diagnostics] requested a fresh dump from the next poll")
+            with _diag_lock:
+                text = _last_diagnostics["text"]
+                ts = _last_diagnostics["time"]
+            if not text:
+                self._send_empty(404)
+                return
+            payload = f"# diagnostics captured {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))}\n{text}".encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self._write_body(payload)
             return
 
         if parsed.path == "/stop":
@@ -502,6 +542,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             poll_interval = get_target_poll_interval()
             _exists, _mtime, bin_sha, _size = get_binary_info()
 
+            # Consume a pending diagnostics request (one-shot) so the client
+            # uploads a fresh device report on this poll.
+            with _diag_lock:
+                diag_header = "1" if _diag_requested else ""
+                _diag_requested = False
+
             if self.headers.get("If-None-Match") == etag:
                 self.send_response(304)
                 self.send_header("ETag", etag)
@@ -510,6 +556,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_header("X-Kindle-Poll-Interval", str(poll_interval))
                 self.send_header("X-Tracker-Server", f"http://{get_local_ip()}:{PORT}")
                 self.send_header("X-Resolved-View", resolve_view(view_param))
+                if diag_header:
+                    self.send_header("X-Tracker-Diag", diag_header)
                 self.end_headers()
                 return
 
@@ -525,6 +573,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("X-Tracker-SHA256", bin_sha)
             self.send_header("X-Tracker-View", view_param)
             self.send_header("X-Resolved-View", resolve_view(view_param))
+            if diag_header:
+                self.send_header("X-Tracker-Diag", diag_header)
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.end_headers()
             self._write_body(img_bytes)

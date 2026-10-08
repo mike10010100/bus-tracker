@@ -210,8 +210,20 @@ func (tc *TrackerClient) startLogSender(ctx context.Context) {
 
 // postLog performs a single synchronous diagnostic POST.
 func (tc *TrackerClient) postLog(msg string) {
+	tc.postText("/log", msg)
+}
+
+// postDiagnostics gathers a device report synchronously (so the probes run on
+// the caller's goroutine and don't leak past the caller's lifetime) and uploads
+// it to the server's /diag endpoint asynchronously.
+func (tc *TrackerClient) postDiagnostics() {
+	report := GatherDiagnostics().Format()
+	go tc.postText("/diag", report)
+}
+
+func (tc *TrackerClient) postText(path, msg string) {
 	server := tc.getServerURL()
-	req, err := http.NewRequest("POST", server+"/log", strings.NewReader(msg))
+	req, err := http.NewRequest("POST", server+path, strings.NewReader(msg))
 	if err != nil {
 		return
 	}
@@ -574,6 +586,11 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	serverVer := resp.Header.Get("X-Tracker-Version")
 	serverSHA := resp.Header.Get("X-Tracker-SHA256")
 
+	// The server can ask (one-shot) for a device diagnostics dump via a header.
+	if resp.Header.Get("X-Tracker-Diag") == "1" {
+		tc.postDiagnostics()
+	}
+
 	// HTTP 205 signals remote stop command
 	if resp.StatusCode == 205 {
 		tc.logRemote("Server sent HTTP 205 Stop signal. Exiting cleanly...")
@@ -684,6 +701,10 @@ func run(parent context.Context) {
 	if devData, err := osReadFile("/proc/bus/input/devices"); err == nil {
 		tc.logRemote(fmt.Sprintf("Input devices:\n%s", string(devData)))
 	}
+
+	// Upload a device/jailbreak capability report on every startup so the
+	// server (and we) can see what scheduling tooling exists on the device.
+	tc.postDiagnostics()
 
 	// Ensure Kindle stays awake while dashboard is running
 	lipcSet("com.lab126.powerd", "preventScreenSaver", "1")

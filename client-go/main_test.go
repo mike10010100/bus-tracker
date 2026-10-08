@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -512,6 +513,74 @@ func TestLogRemoteQueueDoesNotBlockAndDropsWhenFull(t *testing.T) {
 	if len(tc.logCh) != cap(tc.logCh) {
 		t.Errorf("expected queue to fill to capacity %d, got %d", cap(tc.logCh), len(tc.logCh))
 	}
+}
+
+func TestPostDiagnosticsUploadsReport(t *testing.T) {
+	patchRuntime(t)
+	got := make(chan [2]string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got <- [2]string{r.URL.Path, string(b)}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	tc := NewTrackerClient(srv.URL, "auto")
+	tc.postDiagnostics()
+
+	select {
+	case pair := <-got:
+		if pair[0] != "/diag" {
+			t.Errorf("expected POST /diag, got %q", pair[0])
+		}
+		if !strings.Contains(pair[1], "=== DIAGNOSTICS") {
+			t.Errorf("expected diagnostics report in body, got %q", pair[1])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a diagnostics POST")
+	}
+}
+
+func TestFetchAndDrawDashboard_SendsDiagnosticsWhenRequested(t *testing.T) {
+	patchRuntime(t)
+	png := []byte{0x89, 0x50, 0x4E, 0x47}
+	diagCh := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/diag" {
+			b, _ := io.ReadAll(r.Body)
+			diagCh <- string(b)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("X-Tracker-Diag", "1")
+		w.WriteHeader(http.StatusOK)
+		w.Write(png)
+	}))
+	defer srv.Close()
+
+	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
+	osCreate = tempFileCreate(t)
+
+	tc := NewTrackerClient(srv.URL, "auto")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tc.fetchAndDrawDashboard(ctx, cancel)
+
+	select {
+	case body := <-diagCh:
+		if !strings.Contains(body, "=== DIAGNOSTICS") {
+			t.Errorf("expected diagnostics body, got %q", body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a diagnostics upload when X-Tracker-Diag is set")
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func TestLogSenderDrainsQueue(t *testing.T) {
