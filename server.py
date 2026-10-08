@@ -84,16 +84,50 @@ def format_for_kindle(base_img, orientation="landscape", rotation=90):
         # Rotate to match Kindle's portrait framebuffer
         if rotation != 0:
             canvas = canvas.rotate(rotation, expand=True)
-        return canvas
-    return base_img
+
+        # Kindle's eips expects 8-bit grayscale ('L')
+        # If given RGB, eips reads 3 bytes per pixel, squishing the image by 3x!
+        return canvas.convert("L")
+    return base_img.convert("L")
+
+
+tracker_stopped = False
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        global tracker_stopped
         parsed = urllib.parse.urlparse(self.path)
         params = urllib.parse.parse_qs(parsed.query)
 
+        if parsed.path == "/stop":
+            tracker_stopped = True
+            msg = b"<h1>Signal Sent: Kindle Tracker Stopping</h1><p>On next poll, Kindle will exit to Home Screen.</p><p><a href='/resume'>Click here to Resume / Re-enable</a></p>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(msg)))
+            self.end_headers()
+            self.wfile.write(msg)
+            return
+
+        if parsed.path == "/resume" or parsed.path == "/start":
+            tracker_stopped = False
+            msg = b"<h1>Kindle Tracker Resumed</h1><p><a href='/'>Back to Dashboard</a></p>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(msg)))
+            self.end_headers()
+            self.wfile.write(msg)
+            return
+
         if parsed.path in ["/dashboard.png", "/bus.png"]:
+            if tracker_stopped:
+                # 205 Reset Content signals the Kindle scriptlet to exit cleanly
+                self.send_response(205)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+
             use_mock = "mock" in params
             kindle_mode = params.get("kindle", [None])[0]
             rot_val = int(params.get("rotate", [90])[0])
@@ -115,6 +149,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.wfile.write(img_bytes)
 
         elif parsed.path in ["/", "/index.html"]:
+            status_badge = '<span style="color:#ff6b6b;">STOPPED</span>' if tracker_stopped else '<span style="color:#51cf66;">ACTIVE</span>'
+            toggle_link = '<a href="/resume" style="color:#51cf66;">Resume Tracker</a>' if tracker_stopped else '<a href="/stop" style="color:#ff6b6b;">Stop Kindle Tracker</a>'
             html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -137,8 +173,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             box-shadow: 0 8px 24px rgba(0,0,0,0.5);
             border-radius: 8px;
         }}
+        .status {{
+            margin-top: 12px;
+            font-size: 16px;
+        }}
         .links {{
-            margin-top: 16px;
+            margin-top: 12px;
             font-size: 14px;
         }}
         a {{ color: #4da6ff; text-decoration: none; margin: 0 8px; }}
@@ -146,6 +186,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 </head>
 <body>
     <img src="/dashboard.png?t={int(time.time())}" alt="Bus Tracker Dashboard" />
+    <div class="status">Status: {status_badge} | {toggle_link}</div>
     <div class="links">
         <a href="/dashboard.png" target="_blank">Standard (800x480)</a> |
         <a href="/dashboard.png?kindle=pw5&rotate=90" target="_blank">Kindle PW5 (Rotated 90°)</a> |
