@@ -1,5 +1,13 @@
 # Multi-architecture Dockerfile for NJ Transit Bus Tracker Server
 # Supports linux/amd64 (x86_64 PC/servers) and linux/arm64 (Raspberry Pi 3/4/5, Apple Silicon)
+
+# Stage 1: Compile static Kindle ARM client (tracker-arm)
+FROM golang:alpine AS builder
+WORKDIR /build
+COPY client-go/ .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="-s -w" -o /tracker-arm .
+
+# Stage 2: Runtime image
 FROM python:3.11-slim
 
 # Install system fonts and curl for container health checks
@@ -20,7 +28,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy server and dashboard rendering application files
-COPY bus_tracker.py citibike.py render_dashboard.py server.py tracker-arm ./
+COPY bus_tracker.py citibike.py render_dashboard.py server.py ./
+
+# Copy compiled static Kindle ARM client from builder stage
+COPY --from=builder /tracker-arm ./tracker-arm
 
 # Expose HTTP port and Auto-Discovery UDP port
 EXPOSE 8000/tcp

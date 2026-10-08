@@ -42,20 +42,7 @@ echo "======================================================================"
 echo "🚌 Deploying NJ Transit Bus Tracker (${IMAGE_TAG})"
 echo "======================================================================"
 
-# Recompile Kindle ARM client only if missing or if Go source files are newer
-NEEDS_ARM_BUILD=false
-if [[ ! -f "tracker-arm" ]]; then
-    NEEDS_ARM_BUILD=true
-elif [[ -d "client-go" ]] && find client-go -type f -newer tracker-arm | grep -q .; then
-    NEEDS_ARM_BUILD=true
-fi
-
-if [[ "${NEEDS_ARM_BUILD}" == "true" ]] && command -v go >/dev/null 2>&1 && [[ -d "client-go" ]]; then
-    echo "🔨 Building static Kindle ARM client (tracker-arm)..."
-    (cd client-go && CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="-s -w" -o ../tracker-arm .) || true
-fi
-
-# Build versioned image
+# Build versioned image (Docker multi-stage compiles tracker-arm automatically)
 export IMAGE_TAG
 ${COMPOSE_CMD} build bus-tracker
 
