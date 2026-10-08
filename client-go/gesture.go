@@ -7,27 +7,31 @@ import (
 
 // GestureDetectorConfig holds timing and threshold settings for touch recognition
 type GestureDetectorConfig struct {
-	DoubleTapWindow    time.Duration
-	SingleTapDelay     time.Duration
-	InactivityTimeout  time.Duration
-	DebounceDuration   time.Duration
-	TopRightThresholdX int32
-	TopRightThresholdY int32
-	TopLeftThresholdX  int32
-	TopLeftThresholdY  int32
+	DoubleTapWindow      time.Duration
+	SingleTapDelay       time.Duration
+	InactivityTimeout    time.Duration
+	DebounceDuration     time.Duration
+	TopRightThresholdX   int32
+	TopRightThresholdY   int32
+	TopLeftThresholdX    int32
+	TopLeftThresholdY    int32
+	BottomLeftThresholdX int32
+	BottomLeftThresholdY int32
 }
 
 // DefaultGestureConfig returns production settings tailored for Kindle Paperwhite 5
 func DefaultGestureConfig() GestureDetectorConfig {
 	return GestureDetectorConfig{
-		DoubleTapWindow:    380 * time.Millisecond,
-		SingleTapDelay:     200 * time.Millisecond,
-		InactivityTimeout:  100 * time.Millisecond,
-		DebounceDuration:   80 * time.Millisecond,
-		TopRightThresholdX: 1000,
-		TopRightThresholdY: 300,
-		TopLeftThresholdX:  300,
-		TopLeftThresholdY:  300,
+		DoubleTapWindow:      380 * time.Millisecond,
+		SingleTapDelay:       200 * time.Millisecond,
+		InactivityTimeout:    100 * time.Millisecond,
+		DebounceDuration:     80 * time.Millisecond,
+		TopRightThresholdX:   1000,
+		TopRightThresholdY:   300,
+		TopLeftThresholdX:    300,
+		TopLeftThresholdY:    300,
+		BottomLeftThresholdX: 350,
+		BottomLeftThresholdY: 1300,
 	}
 }
 
@@ -43,11 +47,12 @@ type GestureDetector struct {
 	lastTriggerTime time.Time
 	mu              sync.Mutex
 
-	OnSingleTap   func(x, y int32)
-	OnDoubleTap   func(x, y int32)
-	OnTopRightTap func(x, y int32)
-	OnTopLeftTap  func(x, y int32)
-	OnLog         func(msg string)
+	OnSingleTap     func(x, y int32)
+	OnDoubleTap     func(x, y int32)
+	OnTopRightTap   func(x, y int32)
+	OnTopLeftTap    func(x, y int32)
+	OnBottomLeftTap func(x, y int32)
+	OnLog           func(msg string)
 }
 
 // NewGestureDetector creates an initialized GestureDetector
@@ -97,6 +102,18 @@ func (gd *GestureDetector) TriggerTap(now time.Time) {
 		gd.lastTapTime = time.Time{}
 		if gd.OnTopLeftTap != nil {
 			gd.OnTopLeftTap(x, y)
+		}
+		return
+	}
+
+	// Bottom-Left Corner Tap -> Cycle View Mode (Auto -> Morning -> Evening)
+	if x < gd.cfg.BottomLeftThresholdX && y > gd.cfg.BottomLeftThresholdY {
+		if gd.singleTapTimer != nil {
+			gd.singleTapTimer.Stop()
+		}
+		gd.lastTapTime = time.Time{}
+		if gd.OnBottomLeftTap != nil {
+			gd.OnBottomLeftTap(x, y)
 		}
 		return
 	}

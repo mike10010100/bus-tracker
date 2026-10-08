@@ -32,19 +32,21 @@ cb_tracker = CitiBikeTracker(cache_ttl=30)
 
 last_batt_level = None
 last_is_charging = False
+last_view = "auto"
 
 
-def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False):
-    global cached_image_bytes, last_render_time, tracker, last_batt_level, last_is_charging
+def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False, view="auto"):
+    global cached_image_bytes, last_render_time, tracker, last_batt_level, last_is_charging, last_view
     now = time.time()
 
-    # Return cached image if fresh and battery status unchanged
+    # Return cached image if fresh and battery status/view unchanged
     if (
         cached_image_bytes
         and (now - last_render_time < CACHE_TTL)
         and not use_mock
         and (batt_level == last_batt_level)
         and (is_charging == last_is_charging)
+        and (view == last_view)
     ):
         return Image.open(io.BytesIO(cached_image_bytes))
 
@@ -92,6 +94,7 @@ def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False
         stops_data,
         citibike_data=cb_data,
         output_path=img_path,
+        view=view,
         is_mock=use_mock,
         batt_level=batt_level,
         is_charging=is_charging,
@@ -102,6 +105,7 @@ def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False
     last_render_time = now
     last_batt_level = batt_level
     last_is_charging = is_charging
+    last_view = view
 
     return Image.open(io.BytesIO(cached_image_bytes))
 
@@ -270,6 +274,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             use_mock = "mock" in params
             kindle_mode = params.get("kindle", [None])[0]
             rot_val = int(params.get("rotate", [90])[0])
+            view_param = params.get("view", [self.headers.get("X-Tracker-View", "auto")])[0]
 
             # Extract battery and charging status from query params or headers
             batt_param = params.get("batt", params.get("battery", [self.headers.get("X-Kindle-Battery")]))[0]
@@ -287,6 +292,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 use_mock=use_mock,
                 batt_level=batt_level,
                 is_charging=is_charging,
+                view=view_param,
             )
 
             if kindle_mode == "pw5" or "kindle" in params:
@@ -303,17 +309,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("X-Kindle-Brightness", str(brightness))
             self.send_header("X-Kindle-Warmth", str(warmth))
             self.send_header("X-Tracker-Server", f"http://{get_local_ip()}:{PORT}")
+            self.send_header("X-Tracker-View", view_param)
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.end_headers()
             self.wfile.write(img_bytes)
 
         elif parsed.path in ["/", "/index.html"]:
+            current_view = params.get("view", ["auto"])[0]
             status_badge = '<span style="color:#ff6b6b;">STOPPED</span>' if tracker_stopped else '<span style="color:#51cf66;">ACTIVE</span>'
             toggle_link = '<a href="/resume" style="color:#51cf66;">Resume Tracker</a>' if tracker_stopped else '<a href="/stop" style="color:#ff6b6b;">Stop Kindle Tracker</a>'
             html = f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>NJ Transit 126 Bus Tracker</title>
+    <title>NJ Transit 126 & Citi Bike Tracker</title>
     <meta http-equiv="refresh" content="30">
     <style>
         body {{
@@ -337,20 +345,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
             font-size: 16px;
         }}
         .links {{
-            margin-top: 12px;
+            margin-top: 10px;
             font-size: 14px;
         }}
         a {{ color: #4da6ff; text-decoration: none; margin: 0 8px; }}
+        a:hover {{ text-decoration: underline; }}
     </style>
 </head>
 <body>
-    <img src="/dashboard.png?t={int(time.time())}" alt="Bus Tracker Dashboard" />
+    <img src="/dashboard.png?view={current_view}&t={int(time.time())}" alt="Transit Dashboard" />
     <div class="status">Status: {status_badge} | {toggle_link}</div>
     <div class="links">
-        <a href="/dashboard.png" target="_blank">Standard (800x480)</a> |
-        <a href="/dashboard.png?kindle=pw5&rotate=90" target="_blank">Kindle PW5 (Rotated 90°)</a> |
-        <a href="/dashboard.png?kindle=pw5&rotate=270" target="_blank">Kindle PW5 (Rotated 270°)</a> |
-        <a href="/dashboard.png?mock=1" target="_blank">Mock Preview</a>
+        <strong>View Mode:</strong>
+        <a href="/?view=auto">Auto (AM Citi / PM Bus)</a> |
+        <a href="/?view=morning">Morning (Citi Bike Hero)</a> |
+        <a href="/?view=evening">Evening (Bus Hero)</a>
+    </div>
+    <div class="links">
+        <a href="/dashboard.png?view={current_view}" target="_blank">Standard (800x480)</a> |
+        <a href="/dashboard.png?kindle=pw5&rotate=90&view={current_view}" target="_blank">Kindle PW5 (Rotated 90°)</a> |
+        <a href="/dashboard.png?mock=1&view={current_view}" target="_blank">Mock Preview</a>
     </div>
 </body>
 </html>"""

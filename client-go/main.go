@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	Version            = "1.4.0"
+	Version            = "1.5.0"
 	BinaryPath         = "/tmp/tracker"
 	ImagePath          = "/tmp/dashboard.png"
 	PollInterval       = 45 * time.Second
@@ -32,16 +32,44 @@ type TrackerClient struct {
 	refreshCh         chan struct{}
 	lastBinaryMod     string
 	consecutiveErrors int
+	viewMode          string
 }
 
-func NewTrackerClient(server string) *TrackerClient {
+func NewTrackerClient(server string, initialView string) *TrackerClient {
+	if initialView == "" {
+		initialView = "auto"
+	}
 	return &TrackerClient{
 		serverURL: server,
+		viewMode:  initialView,
 		client: &http.Client{
 			Timeout: 15 * time.Second,
 		},
 		refreshCh: make(chan struct{}, 1),
 	}
+}
+
+func (tc *TrackerClient) getViewMode() string {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	if tc.viewMode == "" {
+		return "auto"
+	}
+	return tc.viewMode
+}
+
+func (tc *TrackerClient) cycleViewMode() string {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	switch tc.viewMode {
+	case "morning":
+		tc.viewMode = "evening"
+	case "evening":
+		tc.viewMode = "auto"
+	default: // "auto" or empty
+		tc.viewMode = "morning"
+	}
+	return tc.viewMode
 }
 
 func (tc *TrackerClient) getServerURL() string {
@@ -220,6 +248,15 @@ func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context
 			}
 		}
 
+		gd.OnBottomLeftTap = func(x, y int32) {
+			newMode := tc.cycleViewMode()
+			tc.logRemote(fmt.Sprintf("Bottom-Left corner tapped at (%d, %d)! View mode cycled to: %s. Refreshing...", x, y, newMode))
+			select {
+			case tc.refreshCh <- struct{}{}:
+			default:
+			}
+		}
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -324,7 +361,7 @@ func (tc *TrackerClient) checkOTAUpdate(ctx context.Context) bool {
 
 		_ = SaveServerURL(server)
 
-		newArgs := []string{BinaryPath, "-server", server}
+		newArgs := []string{BinaryPath, "-server", server, "-view", tc.getViewMode()}
 		tc.logRemote("Executing updated binary via syscall.Exec...")
 		_ = syscall.Exec(BinaryPath, newArgs, os.Environ())
 		return true
@@ -340,8 +377,9 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 		chargeVal = 1
 	}
 
+	viewMode := tc.getViewMode()
 	server := tc.getServerURL()
-	url := fmt.Sprintf("%s/dashboard.png?kindle=pw5&batt=%d&charging=%d&t=%d", server, batt.Level, chargeVal, time.Now().Unix())
+	url := fmt.Sprintf("%s/dashboard.png?kindle=pw5&batt=%d&charging=%d&view=%s&t=%d", server, batt.Level, chargeVal, viewMode, time.Now().Unix())
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		tc.handleNetworkError(ctx)
@@ -349,6 +387,7 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	}
 	req.Header.Set("X-Kindle-Battery", strconv.Itoa(batt.Level))
 	req.Header.Set("X-Kindle-Charging", strconv.Itoa(chargeVal))
+	req.Header.Set("X-Tracker-View", viewMode)
 
 	resp, err := tc.client.Do(req)
 	if err != nil {
@@ -424,15 +463,16 @@ func main() {
 	}
 
 	serverURL := GetServerURL()
+	initialView := ResolveViewMode(os.Args)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	tc := NewTrackerClient(serverURL)
+	tc := NewTrackerClient(serverURL, initialView)
 	_ = os.WriteFile("/tmp/tracker_server.txt", []byte(serverURL), 0644)
 	_ = os.WriteFile("/mnt/us/documents/tracker_server.txt", []byte(serverURL), 0644)
 
 	// Send initial startup diagnostic
-	tc.logRemote(fmt.Sprintf("Bus Tracker v%s starting up (server: %s)...", Version, serverURL))
+	tc.logRemote(fmt.Sprintf("Bus Tracker v%s starting up (server: %s, view: %s)...", Version, serverURL, initialView))
 	if devData, err := os.ReadFile("/proc/bus/input/devices"); err == nil {
 		tc.logRemote(fmt.Sprintf("Input devices:\n%s", string(devData)))
 	}

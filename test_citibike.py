@@ -127,6 +127,49 @@ class TestCitiBikeTracker(unittest.TestCase):
         img.close()
         os.remove(output_file)
 
+    def test_resolve_view_modes(self):
+        from render_dashboard import resolve_view
+
+        # Morning hours (5 AM to 11:59 AM)
+        self.assertEqual(resolve_view("auto", hour=5), "morning")
+        self.assertEqual(resolve_view("auto", hour=8), "morning")
+        self.assertEqual(resolve_view("auto", hour=11), "morning")
+
+        # Afternoon / Evening / Night hours
+        self.assertEqual(resolve_view("auto", hour=12), "evening")
+        self.assertEqual(resolve_view("auto", hour=17), "evening")
+        self.assertEqual(resolve_view("auto", hour=23), "evening")
+        self.assertEqual(resolve_view("auto", hour=2), "evening")
+
+        # Explicit overrides
+        self.assertEqual(resolve_view("morning", hour=20), "morning")
+        self.assertEqual(resolve_view("evening", hour=9), "evening")
+        self.assertEqual(resolve_view("citi", hour=18), "morning")
+        self.assertEqual(resolve_view("bus", hour=7), "evening")
+
+    def test_render_morning_and_evening_views(self):
+        stops_data = get_mock_data()
+        tracker = CitiBikeTracker()
+        cb_data = tracker.get_mock_data()
+
+        for view_mode in ["morning", "evening"]:
+            out_file = f"/tmp/test_view_{view_mode}.png"
+            render_dashboard(
+                stops_data,
+                citibike_data=cb_data,
+                output_path=out_file,
+                view=view_mode,
+                is_mock=True,
+                batt_level=90,
+                is_charging=True,
+            )
+            self.assertTrue(os.path.exists(out_file))
+            img = Image.open(out_file)
+            self.assertEqual(img.size, (800, 480))
+            img.close()
+            os.remove(out_file)
+
 
 if __name__ == "__main__":
     unittest.main()
+

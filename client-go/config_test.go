@@ -92,3 +92,56 @@ func TestResolveServerURLWithDiscoverer(t *testing.T) {
 		t.Errorf("ResolveServerURLWithDiscoverer() = %q, want %q", got, want)
 	}
 }
+
+func TestResolveViewMode(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "Default auto without flags",
+			args: []string{"/tmp/tracker"},
+			want: "auto",
+		},
+		{
+			name: "CLI flag morning with space",
+			args: []string{"/tmp/tracker", "-view", "morning"},
+			want: "morning",
+		},
+		{
+			name: "CLI flag evening with space",
+			args: []string{"/tmp/tracker", "--view", "evening"},
+			want: "evening",
+		},
+		{
+			name: "CLI flag morning with equals",
+			args: []string{"/tmp/tracker", "-view=morning"},
+			want: "morning",
+		},
+		{
+			name: "CLI flag evening with equals",
+			args: []string{"/tmp/tracker", "--view=evening"},
+			want: "evening",
+		},
+		{
+			name: "Case insensitive",
+			args: []string{"/tmp/tracker", "-view=MORNING"},
+			want: "morning",
+		},
+		{
+			name: "Unknown value falls back to auto",
+			args: []string{"/tmp/tracker", "-view=unknown"},
+			want: "auto",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveViewMode(tt.args)
+			if got != tt.want {
+				t.Errorf("ResolveViewMode() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

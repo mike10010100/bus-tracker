@@ -153,15 +153,18 @@ func TestGestureDetectorCornerTaps(t *testing.T) {
 	cfg.TopRightThresholdY = 300
 	cfg.TopLeftThresholdX = 300
 	cfg.TopLeftThresholdY = 300
+	cfg.BottomLeftThresholdX = 350
+	cfg.BottomLeftThresholdY = 1300
 	cfg.DebounceDuration = 10 * time.Millisecond
 
 	gd := NewGestureDetector(cfg)
 	defer gd.Stop()
 
 	var (
-		topRightTaps int
-		topLeftTaps  int
-		mu           sync.Mutex
+		topRightTaps   int
+		topLeftTaps    int
+		bottomLeftTaps int
+		mu             sync.Mutex
 	)
 	gd.OnTopRightTap = func(x, y int32) {
 		mu.Lock()
@@ -171,6 +174,11 @@ func TestGestureDetectorCornerTaps(t *testing.T) {
 	gd.OnTopLeftTap = func(x, y int32) {
 		mu.Lock()
 		topLeftTaps++
+		mu.Unlock()
+	}
+	gd.OnBottomLeftTap = func(x, y int32) {
+		mu.Lock()
+		bottomLeftTaps++
 		mu.Unlock()
 	}
 
@@ -186,9 +194,16 @@ func TestGestureDetectorCornerTaps(t *testing.T) {
 	t1 := t0.Add(50 * time.Millisecond)
 	gd.TriggerTap(t1)
 
+	// 3. Bottom-Left corner tap
+	gd.curX = 150
+	gd.curY = 1450
+	t2 := t1.Add(50 * time.Millisecond)
+	gd.TriggerTap(t2)
+
 	mu.Lock()
 	trCount := topRightTaps
 	tlCount := topLeftTaps
+	blCount := bottomLeftTaps
 	mu.Unlock()
 
 	if trCount != 1 {
@@ -196,6 +211,9 @@ func TestGestureDetectorCornerTaps(t *testing.T) {
 	}
 	if tlCount != 1 {
 		t.Errorf("Expected 1 top-left tap, got %d", tlCount)
+	}
+	if blCount != 1 {
+		t.Errorf("Expected 1 bottom-left tap, got %d", blCount)
 	}
 }
 

@@ -109,3 +109,24 @@ func GetServerURL() string {
 		},
 	)
 }
+
+// ResolveViewMode parses the initial view mode from command-line arguments ('morning', 'evening', 'auto').
+// Defaults to 'auto'.
+func ResolveViewMode(args []string) string {
+	for i, arg := range args {
+		if (arg == "-view" || arg == "--view") && i+1 < len(args) {
+			val := strings.ToLower(strings.TrimSpace(args[i+1]))
+			if val == "morning" || val == "evening" || val == "auto" {
+				return val
+			}
+		}
+		if strings.HasPrefix(arg, "-view=") || strings.HasPrefix(arg, "--view=") {
+			parts := strings.SplitN(arg, "=", 2)
+			val := strings.ToLower(strings.TrimSpace(parts[1]))
+			if val == "morning" || val == "evening" || val == "auto" {
+				return val
+			}
+		}
+	}
+	return "auto"
+}
