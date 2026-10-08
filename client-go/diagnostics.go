@@ -299,7 +299,7 @@ func gatherLauncherInfo() string {
 			fmt.Fprintf(&b, "--- %s (dir) ---\n%s\n", f, indent(listing))
 			continue
 		}
-		fmt.Fprintf(&b, "--- %s ---\n%s\n", f, indent(truncate(content, 3000)))
+		fmt.Fprintf(&b, "--- %s ---\n%s\n", f, indent(truncate(content, 14000)))
 	}
 
 	// The running process tree can reveal the parent of our launcher.
@@ -311,11 +311,21 @@ func gatherLauncherInfo() string {
 // schedulerProbeFiles are the concrete text files/paths worth dumping to
 // understand how the tracker is launched and how jobs are scheduled here.
 var schedulerProbeFiles = []string{
-	"/etc/crontab/root",                    // crond's actual spool file
-	"/var/local/kmc/kmc.conf",              // KMC config
-	"/var/local/kmc/run_hotfix.sh",         // KMC hotfix runner
-	"/var/local/kmc/sbin",                  // KMC helper binaries
-	"/var/local/kmc/system_patches",        // KMC patches
+	"/etc/crontab/root",             // crond's actual spool file
+	"/var/local/kmc/kmc.conf",       // KMC config
+	"/var/local/kmc/run_hotfix.sh",  // KMC hotfix runner
+	"/var/local/kmc/sbin",           // KMC helper binaries
+	"/var/local/kmc/system_patches", // KMC patches (dir listing)
+	// The KMC boot-hook scripts (these decide how the device launches things
+	// at startup, and whether KMC itself can schedule a service).
+	"/var/local/kmc/system_patches/dispatch.sh",
+	"/var/local/kmc/system_patches/patch_system.sh",
+	"/var/local/kmc/system_patches/run_patch.sh",
+	"/var/local/kmc/system_patches/kmc.conf",
+	"/var/local/kmc/sbin/kmc_reset.sh",
+	"/var/local/kmc/sbin/kmclog.sh",
+	"/var/local/kmc/sbin/kpm.sh",
+	"/var/local/kmc/kindlehf/bin",
 	"/mnt/us/documents/BusTracker.sh",      // our bootstrap launcher
 	"/mnt/us/documents/tracker_server.txt", // persisted server URL
 }
