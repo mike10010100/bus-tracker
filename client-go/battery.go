@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -54,7 +53,8 @@ func ReadBatteryInfo(
 	return BatteryInfo{Level: -1, IsCharging: false}
 }
 
-// GetBatteryInfo reads battery info using production system calls
-func GetBatteryInfo() BatteryInfo {
-	return ReadBatteryInfo(lipcGet, os.ReadFile)
+// GetBatteryInfo reads battery info using production system calls.
+// It is a variable so tests can substitute deterministic battery readings.
+var GetBatteryInfo = func() BatteryInfo {
+	return ReadBatteryInfo(lipcGet, osReadFile)
 }

@@ -1,11 +1,12 @@
 import os
-import sys
+import hmac
 import time
 import io
 import json
+import hashlib
 import urllib.parse
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import socket
 import threading
 from PIL import Image
@@ -16,73 +17,95 @@ try:
 except ImportError:
     ZEROCONF_AVAILABLE = False
 
-from bus_tracker import NJTransitBusTracker
+from bus_tracker import NJTransitBusTracker, normalize_arrival
 from citibike import CitiBikeTracker
 from render_dashboard import render_dashboard, STOPS, get_mock_data, resolve_view
+from version import VERSION
 
 PORT = int(os.environ.get("PORT", 8000))
 DISCOVERY_PORT = 8001
-SERVER_VERSION = "1.6.1"
-CACHE_TTL = 30  # Re-fetch from NJ Transit at most once every 30 seconds
-cached_image_bytes = None
-last_render_time = 0
+CACHE_TTL = 30  # Re-fetch upstream data at most once every 30 seconds
+# Optional shared secret protecting the /stop and /resume control endpoints.
+# When unset (default), control endpoints are only reachable from private
+# (RFC1918 / loopback / link-local) addresses.
+CONTROL_TOKEN = os.environ.get("TRACKER_CONTROL_TOKEN", "")
+SERVER_VERSION = VERSION
+
 tracker = None
 cb_tracker = CitiBikeTracker(cache_ttl=30)
 
 
-last_batt_level = None
-last_is_charging = False
-last_view = "auto"
-last_width = 800
-last_height = 480
+def sha256_file(path: str) -> str:
+    """Returns the lowercase hex SHA-256 digest of a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
-def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False, view="auto", width=800, height=480):
-    global cached_image_bytes, last_render_time, tracker, last_batt_level, last_is_charging, last_view, last_width, last_height
+def is_private_address(addr: str) -> bool:
+    """Returns True for loopback, link-local and RFC1918 private addresses."""
+    import ipaddress
+
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_link_local or ip.is_private
+
+
+def check_control_auth(handler) -> bool:
+    """
+    Authorizes a state-changing control request.
+    If TRACKER_CONTROL_TOKEN is set, the request must present a matching token
+    via the X-Tracker-Token header or ?token= query param. Otherwise the request
+    is only accepted from a private/loopback address.
+    """
+    if CONTROL_TOKEN:
+        supplied = handler.headers.get("X-Tracker-Token", "")
+        if not supplied:
+            supplied = urllib.parse.parse_qs(urllib.parse.urlparse(handler.path).query).get("token", [""])[0]
+        return hmac.compare_digest(supplied, CONTROL_TOKEN)
+    return is_private_address(handler.client_address[0])
+
+
+# Upstream data cache (bus arrivals + Citi Bike status), decoupled from render.
+# Keying the image cache on battery status previously forced a network refetch
+# on every battery change; now the network fetch has its own TTL and rendering
+# is cached separately by visual parameters.
+_data_lock = threading.Lock()
+_data_cache = {"time": 0.0, "stops": None, "status": {}, "cb": None}
+_render_cache = {}
+_render_lock = threading.Lock()
+
+
+def get_fresh_data(use_mock=False):
+    """
+    Returns (stops_data, stop_status, cb_data), refreshing upstream sources at
+    most once per CACHE_TTL. Shared by all render requests.
+    """
     now = time.time()
-
-    # Return cached image if fresh and battery status/view/dimensions unchanged
-    if (
-        cached_image_bytes
-        and (now - last_render_time < CACHE_TTL)
-        and not use_mock
-        and (batt_level == last_batt_level)
-        and (is_charging == last_is_charging)
-        and (view == last_view)
-        and (width == last_width)
-        and (height == last_height)
-    ):
-        return Image.open(io.BytesIO(cached_image_bytes))
+    with _data_lock:
+        fresh = _data_cache["stops"] is not None and (now - _data_cache["time"] < CACHE_TTL)
+        if fresh and not use_mock:
+            return _data_cache["stops"], _data_cache["status"], _data_cache["cb"]
 
     stops_data = {}
+    stop_status = {}
     if use_mock:
         stops_data = get_mock_data()
+        stop_status = {stop["id"]: NJTransitBusTracker.STATUS_OK for stop in STOPS}
     else:
-        try:
-            if tracker is None:
-                tracker = NJTransitBusTracker()
-            for stop in STOPS:
-                sid = stop["id"]
-                trips = tracker.get_arrivals(stop_id=sid, route="126")
-                arrivals = []
-                for t in trips:
-                    status = (t.get("departurestatus") or "").strip()
-                    dep_time = (t.get("departuretime") or "").strip()
-                    eta_str = f"{status} ({dep_time})" if status and dep_time else (status or dep_time or "Scheduled")
-                    arrivals.append({
-                        "route": t.get("public_route"),
-                        "destination": (t.get("header") or "").strip(),
-                        "eta": eta_str,
-                        "occupancy": t.get("passload"),
-                        "vehicle_id": t.get("vehicle_id"),
-                    })
-                stops_data[sid] = arrivals
-        except Exception as e:
-            print(f"[Server] API fetch error ({e}), showing offline state...")
-            stops_data = {stop["id"]: [] for stop in STOPS}
+        global tracker
+        if tracker is None:
+            tracker = NJTransitBusTracker()
+        for stop in STOPS:
+            sid = stop["id"]
+            status, trips = tracker.get_arrivals_with_status(stop_id=sid, route="126")
+            stops_data[sid] = [normalize_arrival(t) for t in trips]
+            stop_status[sid] = status
 
-    # Fetch live Citi Bike station status
-    cb_data = []
     if use_mock:
         cb_data = cb_tracker.get_mock_data()
     else:
@@ -92,11 +115,30 @@ def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False
             print(f"[Server] Citi Bike fetch error ({e}), falling back to cached/mock...")
             cb_data = cb_tracker.get_mock_data()
 
+    with _data_lock:
+        _data_cache["time"] = now
+        _data_cache["stops"] = stops_data
+        _data_cache["status"] = stop_status
+        _data_cache["cb"] = cb_data
+
+    return stops_data, stop_status, cb_data
+
+
+def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False, view="auto", width=800, height=480):
+    stops_data, stop_status, cb_data = get_fresh_data(use_mock=use_mock)
+
+    cache_key = (use_mock, view, width, height, batt_level, is_charging, _data_cache["time"])
+    with _render_lock:
+        cached = _render_cache.get(cache_key)
+        if cached is not None:
+            return Image.open(io.BytesIO(cached))
+
     # Render dashboard
-    img_path = "/tmp/server_dashboard.png"
+    img_path = f"/tmp/server_dashboard_{threading.get_ident()}.png"
     render_dashboard(
         stops_data,
         citibike_data=cb_data,
+        stop_status=stop_status,
         output_path=img_path,
         view=view,
         is_mock=use_mock,
@@ -107,15 +149,13 @@ def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False
     )
 
     with open(img_path, "rb") as f:
-        cached_image_bytes = f.read()
-    last_render_time = now
-    last_batt_level = batt_level
-    last_is_charging = is_charging
-    last_view = view
-    last_width = width
-    last_height = height
+        img_bytes = f.read()
 
-    return Image.open(io.BytesIO(cached_image_bytes))
+    with _render_lock:
+        _render_cache.clear()
+        _render_cache[cache_key] = img_bytes
+
+    return Image.open(io.BytesIO(img_bytes))
 
 
 def format_for_kindle(base_img, orientation="landscape", rotation=90):
@@ -158,11 +198,12 @@ def is_peak_commute_hours(dt=None):
     return (7.5 <= hour < 9.5) or (16.5 <= hour < 19.0)
 
 
-def get_astronomical_lighting(dt=None):
+def get_commute_lighting(dt=None):
     """
-    Returns (brightness, warmth) based on Hoboken, NJ local time.
-    Cozy ambient glow (8, 12) during peak morning & evening commute windows.
-    Off (0, 0) during off-peak and overnight hours to save battery.
+    Returns (brightness, warmth) for the Hoboken, NJ local time.
+    A cozy ambient glow (8, 12) is used during the peak morning and evening
+    commute windows; the frontlight is off (0, 0) off-peak and overnight to
+    save battery. This is a fixed schedule, not sunrise/sunset calculation.
     """
     if is_peak_commute_hours(dt=dt):
         return 8, 12
@@ -184,6 +225,14 @@ tracker_stopped = False
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
+    def _send_forbidden(self):
+        msg = b"<h1>403 Forbidden</h1><p>Control endpoint requires a token or a private-network origin.</p>"
+        self.send_response(403)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(msg)))
+        self.end_headers()
+        self.wfile.write(msg)
+
     def do_HEAD(self):
         self.do_GET()
 
@@ -230,6 +279,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/stop":
+            if not check_control_auth(self):
+                self._send_forbidden()
+                return
             tracker_stopped = True
             msg = b"<h1>Signal Sent: Kindle Tracker Stopping</h1><p>On next poll, Kindle will exit to Home Screen.</p><p><a href='/resume'>Click here to Resume / Re-enable</a></p>"
             self.send_response(200)
@@ -240,6 +292,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/resume" or parsed.path == "/start":
+            if not check_control_auth(self):
+                self._send_forbidden()
+                return
             tracker_stopped = False
             msg = b"<h1>Kindle Tracker Resumed</h1><p><a href='/'>Back to Dashboard</a></p>"
             self.send_response(200)
@@ -249,10 +304,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.wfile.write(msg)
             return
 
-        if parsed.path in ["/tracker-arm", "/client.sh"]:
-            filename = "tracker-arm" if parsed.path == "/tracker-arm" else "client.sh"
-            content_type = "application/octet-stream" if filename == "tracker-arm" else "text/x-sh"
-            file_path = os.path.join(os.path.dirname(__file__), filename)
+        if parsed.path == "/tracker-arm":
+            file_path = os.path.join(os.path.dirname(__file__), "tracker-arm")
             if not os.path.exists(file_path):
                 self.send_response(404)
                 self.end_headers()
@@ -270,11 +323,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
 
             self.send_response(200)
-            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Length", str(stat.st_size))
             self.send_header("Last-Modified", last_mod)
             self.send_header("X-Tracker-Version", SERVER_VERSION)
             self.send_header("X-Tracker-Server", f"http://{get_local_ip()}:{PORT}")
+            self.send_header("X-Tracker-SHA256", sha256_file(file_path))
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
 
@@ -331,7 +385,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             img.save(buf, format="PNG")
             img_bytes = buf.getvalue()
 
-            brightness, warmth = get_astronomical_lighting()
+            brightness, warmth = get_commute_lighting()
             poll_interval = get_target_poll_interval()
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
@@ -348,8 +402,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif parsed.path in ["/", "/index.html"]:
             current_view = params.get("view", ["auto"])[0]
+            token_qs = f"?token={urllib.parse.quote(CONTROL_TOKEN)}" if CONTROL_TOKEN else ""
             status_badge = '<span style="color:#ff6b6b;">STOPPED</span>' if tracker_stopped else '<span style="color:#51cf66;">ACTIVE</span>'
-            toggle_link = '<a href="/resume" style="color:#51cf66;">Resume Tracker</a>' if tracker_stopped else '<a href="/stop" style="color:#ff6b6b;">Stop Kindle Tracker</a>'
+            if tracker_stopped:
+                toggle_link = f'<a href="/resume{token_qs}" style="color:#51cf66;">Resume Tracker</a>'
+            else:
+                toggle_link = f'<a href="/stop{token_qs}" style="color:#ff6b6b;">Stop Kindle Tracker</a>'
             html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -428,7 +486,7 @@ def get_local_ip():
 
 def start_discovery_responder(http_port=PORT, version=SERVER_VERSION):
     """
-    Listens on UDP 8001 for BUS_TRACKER_DISCOVER broadcasts
+    Listens on UDP 8001 for TRANSIT_TRACKER_DISCOVER broadcasts
     and replies with the server URL and version.
     """
     def responder_loop():
@@ -449,9 +507,11 @@ def start_discovery_responder(http_port=PORT, version=SERVER_VERSION):
             try:
                 data, addr = sock.recvfrom(1024)
                 msg = data.decode("utf-8", errors="ignore").strip()
-                if "BUS_TRACKER_DISCOVER" in msg or "TRANSIT_TRACKER_DISCOVER" in msg:
+                # Accept the legacy BUS_TRACKER_DISCOVER probe so devices running
+                # an older binary can still locate the server and OTA-upgrade.
+                if "TRANSIT_TRACKER_DISCOVER" in msg or "BUS_TRACKER_DISCOVER" in msg:
                     resp_ip = get_local_ip()
-                    reply = f"BUS_TRACKER_OFFER http://{resp_ip}:{http_port} {version}\n".encode("utf-8")
+                    reply = f"TRANSIT_TRACKER_OFFER http://{resp_ip}:{http_port} {version}\n".encode("utf-8")
                     sock.sendto(reply, addr)
                     print(f"[Discovery] Answered probe from {addr[0]}:{addr[1]} -> http://{resp_ip}:{http_port}")
             except Exception:
@@ -464,7 +524,7 @@ def start_discovery_responder(http_port=PORT, version=SERVER_VERSION):
 
 def start_mdns_advertiser(http_port=PORT, version=SERVER_VERSION):
     """
-    Registers _bustracker._tcp.local. service with Zeroconf / mDNS.
+    Registers _transittracker._tcp.local. service with Zeroconf / mDNS.
     """
     if not ZEROCONF_AVAILABLE:
         print("[mDNS] Zeroconf library not installed; skipping mDNS advertisement.")
@@ -473,8 +533,8 @@ def start_mdns_advertiser(http_port=PORT, version=SERVER_VERSION):
     try:
         local_ip = get_local_ip()
         ip_bytes = socket.inet_aton(local_ip)
-        service_type = "_bustracker._tcp.local."
-        service_name = f"BusTracker._bustracker._tcp.local."
+        service_type = "_transittracker._tcp.local."
+        service_name = f"TransitTracker._transittracker._tcp.local."
         desc = {"version": version, "endpoint": "/dashboard.png"}
 
         info = ServiceInfo(
@@ -483,7 +543,7 @@ def start_mdns_advertiser(http_port=PORT, version=SERVER_VERSION):
             addresses=[ip_bytes],
             port=http_port,
             properties=desc,
-            server="bustracker.local.",
+            server="transittracker.local.",
         )
         zc = Zeroconf()
         zc.register_service(info)
@@ -496,13 +556,13 @@ def start_mdns_advertiser(http_port=PORT, version=SERVER_VERSION):
 
 if __name__ == "__main__":
     server_address = ("", PORT)
-    httpd = HTTPServer(server_address, DashboardHandler)
+    httpd = ThreadingHTTPServer(server_address, DashboardHandler)
     local_ip = get_local_ip()
     print(f"==================================================")
-    print(f"  Hoboken Transit Tracker Server Running on Port {PORT}")
+    print(f"  Hoboken Transit Tracker Server v{SERVER_VERSION} on Port {PORT}")
     print(f"  Local View:      http://localhost:{PORT}")
     print(f"  Kindle Endpoint: http://{local_ip}:{PORT}/dashboard.png?kindle=pw5")
-    print(f"  Auto-Discovery:  UDP Port {DISCOVERY_PORT} & mDNS (_bustracker._tcp.local)")
+    print(f"  Auto-Discovery:  UDP Port {DISCOVERY_PORT} & mDNS (_transittracker._tcp.local)")
     print(f"==================================================")
 
     start_discovery_responder(http_port=PORT, version=SERVER_VERSION)

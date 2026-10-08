@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,8 +16,12 @@ import (
 	"time"
 )
 
+// Version is the authoritative application version. It is overridden at build
+// time via -ldflags "-X main.Version=$(cat VERSION)" so that the Go client,
+// the Python server, and the Citi Bike User-Agent all share one identity.
+var Version = "0.0.0"
+
 const (
-	Version            = "1.6.1"
 	BinaryPath         = "/tmp/tracker"
 	ImagePath          = "/tmp/dashboard.png"
 	PeakPollInterval   = 45 * time.Second
@@ -163,7 +167,7 @@ func (tc *TrackerClient) handleNetworkError(ctx context.Context) {
 	// If server is unreachable, immediately trigger LAN auto-discovery
 	if errCount >= 1 {
 		tc.logRemote(fmt.Sprintf("Server unreachable (error %d). Triggering LAN auto-discovery...", errCount))
-		if discovered, err := AutoDiscoverServer(ctx); err == nil && discovered != "" {
+		if discovered, err := autoDiscover(ctx); err == nil && discovered != "" {
 			tc.setServerURL(discovered)
 			tc.mu.Lock()
 			tc.consecutiveErrors = 0
@@ -175,7 +179,7 @@ func (tc *TrackerClient) handleNetworkError(ctx context.Context) {
 
 // lipcSet executes a lipc-set-prop command, discarding output
 func lipcSet(prop, key, val string) {
-	cmd := exec.Command("lipc-set-prop", "-i", prop, key, val)
+	cmd := execCommand("lipc-set-prop", "-i", prop, key, val)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	_ = cmd.Run()
@@ -183,7 +187,7 @@ func lipcSet(prop, key, val string) {
 
 // lipcGet reads a property using lipc-get-prop
 func lipcGet(prop, key string) string {
-	cmd := exec.Command("lipc-get-prop", prop, key)
+	cmd := execCommand("lipc-get-prop", prop, key)
 	cmd.Stderr = io.Discard
 	out, err := cmd.Output()
 	if err != nil {
@@ -200,7 +204,7 @@ func (tc *TrackerClient) cleanup() {
 	lipcSet("com.lab126.powerd", "preventScreenSaver", "0")
 
 	// Clear e-ink screen so no stale bus tracker image lingers
-	cmd := exec.Command("eips", "-c")
+	cmd := execCommand("eips", "-c")
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	_ = cmd.Run()
@@ -225,9 +229,98 @@ func (tc *TrackerClient) cycleFrontlight() {
 	tc.logRemote(fmt.Sprintf("Frontlight cycled: %s -> intensity %d (warmth %d)", currStr, nextIntensity, nextWarmth))
 }
 
+// configureGestureHandlers wires every gesture callback onto the detector.
+// Extracted from startInputListeners so the callback behavior can be tested
+// without opening real input devices.
+func (tc *TrackerClient) configureGestureHandlers(gd *GestureDetector, cancel context.CancelFunc) {
+	refresh := func() {
+		select {
+		case tc.refreshCh <- struct{}{}:
+		default:
+		}
+	}
+
+	gd.OnLog = func(msg string) { tc.logRemote(msg) }
+
+	gd.OnSingleTap = func(x, y int32) {
+		tc.markManualInteraction()
+		tc.logRemote(fmt.Sprintf("Single tap recognized at (%d, %d)", x, y))
+		tc.cycleFrontlight()
+	}
+	gd.OnDoubleTap = func(x, y int32) {
+		tc.logRemote(fmt.Sprintf("Double tap recognized at (%d, %d)! Exiting cleanly...", x, y))
+		cancel()
+	}
+	gd.OnTopRightTap = func(x, y int32) {
+		tc.logRemote(fmt.Sprintf("Top-Right corner tapped at (%d, %d)! Exiting...", x, y))
+		cancel()
+	}
+	gd.OnTopLeftTap = func(x, y int32) {
+		tc.markManualInteraction()
+		tc.logRemote(fmt.Sprintf("Top-Left corner tapped at (%d, %d)! Refreshing...", x, y))
+		refresh()
+	}
+	gd.OnBottomLeftTap = func(x, y int32) {
+		tc.markManualInteraction()
+		newMode := tc.cycleViewMode()
+		tc.logRemote(fmt.Sprintf("Bottom-Left corner tapped at (%d, %d)! View mode cycled to: %s. Refreshing...", x, y, newMode))
+		refresh()
+	}
+	gd.OnBusesTap = func(x, y int32) {
+		tc.markManualInteraction()
+		newMode := tc.setExplicitViewMode("evening")
+		tc.logRemote(fmt.Sprintf("BUSES button tapped at (%d, %d)! View set to: %s. Refreshing...", x, y, newMode))
+		refresh()
+	}
+	gd.OnBikesTap = func(x, y int32) {
+		tc.markManualInteraction()
+		newMode := tc.setExplicitViewMode("morning")
+		tc.logRemote(fmt.Sprintf("CITI BIKE button tapped at (%d, %d)! View set to: %s. Refreshing...", x, y, newMode))
+		refresh()
+	}
+	gd.OnLightTap = func(x, y int32) {
+		tc.markManualInteraction()
+		tc.logRemote(fmt.Sprintf("LIGHT button tapped at (%d, %d)! Cycling frontlight...", x, y))
+		tc.cycleFrontlight()
+	}
+	gd.OnRefreshTap = func(x, y int32) {
+		tc.markManualInteraction()
+		tc.logRemote(fmt.Sprintf("REFRESH button tapped at (%d, %d)! Refreshing...", x, y))
+		refresh()
+	}
+	gd.OnExitTap = func(x, y int32) {
+		tc.logRemote(fmt.Sprintf("EXIT button tapped at (%d, %d)! Exiting cleanly...", x, y))
+		cancel()
+	}
+}
+
+// runEventLoop dispatches multiplexed input events to the gesture detector
+// until the context is cancelled.
+func (tc *TrackerClient) runEventLoop(ctx context.Context, cancel context.CancelFunc, eventCh <-chan RawEventMsg) {
+	gd := NewGestureDetector(DefaultGestureConfig())
+	defer gd.Stop()
+	tc.configureGestureHandlers(gd, cancel)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev := <-eventCh:
+			// 1. Hardware Power Button
+			if IsPowerKeyEvent(ev) {
+				tc.logRemote(fmt.Sprintf("Power button pressed on %s! Exiting...", ev.Device))
+				cancel()
+				return
+			}
+			// 2. Feed into Gesture Recognizer
+			gd.ProcessEvent(ev)
+		}
+	}
+}
+
 // startInputListeners opens ALL /dev/input/event* devices and multiplexes events into eventCh
 func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context.CancelFunc) {
-	matches, err := filepath.Glob("/dev/input/event*")
+	matches, err := globInputs("/dev/input/event*")
 	if err != nil || len(matches) == 0 {
 		matches = []string{"/dev/input/event0", "/dev/input/event1", "/dev/input/event2"}
 	}
@@ -237,7 +330,7 @@ func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context
 	eventCh := make(chan RawEventMsg, 128)
 
 	for _, devPath := range matches {
-		f, err := os.Open(devPath)
+		f, err := osOpen(devPath)
 		if err != nil {
 			continue
 		}
@@ -272,106 +365,7 @@ func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context
 	}
 
 	// Dispatcher goroutine: processes all events from all devices
-	go func() {
-		gd := NewGestureDetector(DefaultGestureConfig())
-		defer gd.Stop()
-
-		gd.OnLog = func(msg string) {
-			tc.logRemote(msg)
-		}
-
-		gd.OnSingleTap = func(x, y int32) {
-			tc.markManualInteraction()
-			tc.logRemote(fmt.Sprintf("Single tap recognized at (%d, %d)", x, y))
-			tc.cycleFrontlight()
-		}
-
-		gd.OnDoubleTap = func(x, y int32) {
-			tc.logRemote(fmt.Sprintf("Double tap recognized at (%d, %d)! Exiting cleanly...", x, y))
-			cancel()
-		}
-
-		gd.OnTopRightTap = func(x, y int32) {
-			tc.logRemote(fmt.Sprintf("Top-Right corner tapped at (%d, %d)! Exiting...", x, y))
-			cancel()
-		}
-
-		gd.OnTopLeftTap = func(x, y int32) {
-			tc.markManualInteraction()
-			tc.logRemote(fmt.Sprintf("Top-Left corner tapped at (%d, %d)! Refreshing...", x, y))
-			select {
-			case tc.refreshCh <- struct{}{}:
-			default:
-			}
-		}
-
-		gd.OnBottomLeftTap = func(x, y int32) {
-			tc.markManualInteraction()
-			newMode := tc.cycleViewMode()
-			tc.logRemote(fmt.Sprintf("Bottom-Left corner tapped at (%d, %d)! View mode cycled to: %s. Refreshing...", x, y, newMode))
-			select {
-			case tc.refreshCh <- struct{}{}:
-			default:
-			}
-		}
-
-		gd.OnBusesTap = func(x, y int32) {
-			tc.markManualInteraction()
-			newMode := tc.setExplicitViewMode("evening")
-			tc.logRemote(fmt.Sprintf("BUSES button tapped at (%d, %d)! View set to: %s. Refreshing...", x, y, newMode))
-			select {
-			case tc.refreshCh <- struct{}{}:
-			default:
-			}
-		}
-
-		gd.OnBikesTap = func(x, y int32) {
-			tc.markManualInteraction()
-			newMode := tc.setExplicitViewMode("morning")
-			tc.logRemote(fmt.Sprintf("CITI BIKE button tapped at (%d, %d)! View set to: %s. Refreshing...", x, y, newMode))
-			select {
-			case tc.refreshCh <- struct{}{}:
-			default:
-			}
-		}
-
-		gd.OnLightTap = func(x, y int32) {
-			tc.markManualInteraction()
-			tc.logRemote(fmt.Sprintf("LIGHT button tapped at (%d, %d)! Cycling frontlight...", x, y))
-			tc.cycleFrontlight()
-		}
-
-		gd.OnRefreshTap = func(x, y int32) {
-			tc.markManualInteraction()
-			tc.logRemote(fmt.Sprintf("REFRESH button tapped at (%d, %d)! Refreshing...", x, y))
-			select {
-			case tc.refreshCh <- struct{}{}:
-			default:
-			}
-		}
-
-		gd.OnExitTap = func(x, y int32) {
-			tc.logRemote(fmt.Sprintf("EXIT button tapped at (%d, %d)! Exiting cleanly...", x, y))
-			cancel()
-		}
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case ev := <-eventCh:
-				// 1. Hardware Power Button
-				if IsPowerKeyEvent(ev) {
-					tc.logRemote(fmt.Sprintf("Power button pressed on %s! Exiting...", ev.Device))
-					cancel()
-					return
-				}
-
-				// 2. Feed into Gesture Recognizer
-				gd.ProcessEvent(ev)
-			}
-		}
-	}()
+	go tc.runEventLoop(ctx, cancel, eventCh)
 }
 
 // startPowerListener watches for power button sleep events via lipc
@@ -383,7 +377,7 @@ func (tc *TrackerClient) startPowerListener(ctx context.Context, exitCancel cont
 		default:
 		}
 
-		cmd := exec.CommandContext(ctx, "lipc-wait-event", "com.lab126.powerd", "goingToScreenSaver")
+		cmd := execCommandContext(ctx, "lipc-wait-event", "com.lab126.powerd", "goingToScreenSaver")
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard
 		if err := cmd.Run(); err == nil {
@@ -412,9 +406,13 @@ func (tc *TrackerClient) checkOTAUpdate(ctx context.Context) bool {
 	}
 
 	if canonical := resp.Header.Get("X-Tracker-Server"); canonical != "" && canonical != server {
-		tc.setServerURL(canonical)
-		_ = SaveServerURL(canonical)
-		server = canonical
+		if AdoptableServerURL(canonical) {
+			tc.setServerURL(canonical)
+			_ = SaveServerURL(canonical)
+			server = canonical
+		} else {
+			tc.logRemote(fmt.Sprintf("Ignoring untrusted X-Tracker-Server header: %s", canonical))
+		}
 	}
 
 	serverVer := resp.Header.Get("X-Tracker-Version")
@@ -443,25 +441,40 @@ func (tc *TrackerClient) checkOTAUpdate(ctx context.Context) bool {
 		}
 		defer getResp.Body.Close()
 
-		out, err := os.OpenFile(updatePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+		out, err := osOpenFile(updatePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 		if err != nil {
 			return false
 		}
-		_, err = io.Copy(out, getResp.Body)
+		hasher := sha256.New()
+		_, err = io.Copy(io.MultiWriter(out, hasher), getResp.Body)
 		out.Close()
 		if err != nil {
-			os.Remove(updatePath)
+			_ = osRemove(updatePath)
 			return false
 		}
 
-		_ = os.Rename(updatePath, BinaryPath)
-		_ = os.Chmod(BinaryPath, 0755)
+		// Verify the downloaded binary against the server's advertised digest.
+		// This prevents a corrupted or tampered image from being exec'd.
+		expected := resp.Header.Get("X-Tracker-SHA256")
+		actual := hex.EncodeToString(hasher.Sum(nil))
+		if !VerifySHA256(actual, expected) {
+			if expected == "" {
+				tc.logRemote("OTA response carried no X-Tracker-SHA256; skipping update for safety.")
+			} else {
+				tc.logRemote(fmt.Sprintf("OTA checksum mismatch (expected %s, got %s). Discarding update.", expected, actual))
+			}
+			_ = osRemove(updatePath)
+			return false
+		}
+
+		_ = osRename(updatePath, BinaryPath)
+		_ = osChmod(BinaryPath, 0755)
 
 		_ = SaveServerURL(server)
 
 		newArgs := []string{BinaryPath, "-server", server, "-view", tc.getViewMode()}
 		tc.logRemote("Executing updated binary via syscall.Exec...")
-		_ = syscall.Exec(BinaryPath, newArgs, os.Environ())
+		_ = sysExec(BinaryPath, newArgs, os.Environ())
 		return true
 	}
 	return false
@@ -495,7 +508,7 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	}
 	defer resp.Body.Close()
 
-	if canonical := resp.Header.Get("X-Tracker-Server"); canonical != "" && canonical != server {
+	if canonical := resp.Header.Get("X-Tracker-Server"); canonical != "" && canonical != server && AdoptableServerURL(canonical) {
 		tc.setServerURL(canonical)
 		_ = SaveServerURL(canonical)
 	}
@@ -528,7 +541,7 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	tc.mu.Unlock()
 
 	// Write image to /tmp/dashboard.png
-	tmpFile, err := os.Create(ImagePath)
+	tmpFile, err := osCreate(ImagePath)
 	if err != nil {
 		return serverPollSec
 	}
@@ -539,7 +552,7 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	}
 
 	// Push directly to Kindle e-ink display
-	cmd := exec.Command("eips", "-f", "-g", ImagePath)
+	cmd := execCommand("eips", "-f", "-g", ImagePath)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	_ = cmd.Run()
@@ -569,22 +582,27 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 
 func main() {
 	// Silence standard error on headless Kindle
-	if nullFile, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0); err == nil {
+	if nullFile, err := osOpenFile(os.DevNull, os.O_WRONLY, 0); err == nil {
 		_ = syscall.Dup2(int(nullFile.Fd()), int(os.Stderr.Fd()))
 	}
+	run(context.Background())
+}
 
+// run performs the full startup sequence and blocks in the poll loop until ctx
+// is cancelled. Kept separate from main so it can be exercised in tests.
+func run(parent context.Context) {
 	serverURL := GetServerURL()
 	initialView := ResolveViewMode(os.Args)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
 	tc := NewTrackerClient(serverURL, initialView)
-	_ = os.WriteFile("/tmp/tracker_server.txt", []byte(serverURL), 0644)
-	_ = os.WriteFile("/mnt/us/documents/tracker_server.txt", []byte(serverURL), 0644)
+	_ = osWriteFile("/tmp/tracker_server.txt", []byte(serverURL), 0644)
+	_ = osWriteFile("/mnt/us/documents/tracker_server.txt", []byte(serverURL), 0644)
 
 	// Send initial startup diagnostic
 	tc.logRemote(fmt.Sprintf("Transit Tracker v%s starting up (server: %s, view: %s)...", Version, serverURL, initialView))
-	if devData, err := os.ReadFile("/proc/bus/input/devices"); err == nil {
+	if devData, err := osReadFile("/proc/bus/input/devices"); err == nil {
 		tc.logRemote(fmt.Sprintf("Input devices:\n%s", string(devData)))
 	}
 
@@ -606,7 +624,13 @@ func main() {
 
 	// Initial fetch
 	initialPollSec := tc.fetchAndDrawDashboard(ctx, cancel)
-	ticker := time.NewTicker(tc.getNextPollInterval(initialPollSec))
+	tc.runPollLoop(ctx, cancel, tc.getNextPollInterval(initialPollSec))
+}
+
+// runPollLoop drives the fetch/OTA cycle until ctx is cancelled. The initial
+// interval is injected so tests can run the loop at millisecond cadence.
+func (tc *TrackerClient) runPollLoop(ctx context.Context, cancel context.CancelFunc, interval time.Duration) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -618,8 +642,7 @@ func main() {
 		case <-tc.refreshCh:
 			// Forced refresh requested via screen tap
 			serverPollSec := tc.fetchAndDrawDashboard(ctx, cancel)
-			nextInterval := tc.getNextPollInterval(serverPollSec)
-			ticker.Reset(nextInterval)
+			ticker.Reset(tc.getNextPollInterval(serverPollSec))
 
 		case <-ticker.C:
 			// 1. Check for OTA binary update on server
@@ -628,8 +651,7 @@ func main() {
 			}
 			// 2. Fetch and render latest dashboard
 			serverPollSec := tc.fetchAndDrawDashboard(ctx, cancel)
-			nextInterval := tc.getNextPollInterval(serverPollSec)
-			ticker.Reset(nextInterval)
+			ticker.Reset(tc.getNextPollInterval(serverPollSec))
 		}
 	}
 }

@@ -26,10 +26,12 @@ type ServerOffer struct {
 }
 
 // ParseDiscoveryOffer parses a raw UDP payload such as:
-// "BUS_TRACKER_OFFER http://192.168.86.193:8000 1.4.0"
+// "TRANSIT_TRACKER_OFFER http://192.168.86.193:8000 1.4.0"
+// The legacy "BUS_TRACKER_OFFER" header is still accepted for compatibility
+// with older servers.
 func ParseDiscoveryOffer(raw string) (*ServerOffer, error) {
 	trimmed := strings.TrimSpace(raw)
-	if !strings.HasPrefix(trimmed, "BUS_TRACKER_OFFER") {
+	if !strings.HasPrefix(trimmed, "TRANSIT_TRACKER_OFFER") && !strings.HasPrefix(trimmed, "BUS_TRACKER_OFFER") {
 		return nil, fmt.Errorf("invalid offer header: %s", trimmed)
 	}
 
@@ -96,7 +98,7 @@ func DiscoverViaUDP(ctx context.Context, port int, timeout time.Duration) (strin
 	defer conn.Close()
 
 	destAddrs := GetBroadcastAddresses(port)
-	probeMsg := []byte("BUS_TRACKER_DISCOVER\n")
+	probeMsg := []byte("TRANSIT_TRACKER_DISCOVER\n")
 
 	for _, dest := range destAddrs {
 		udpDest, err := net.ResolveUDPAddr("udp4", dest)
@@ -123,16 +125,16 @@ func DiscoverViaUDP(ctx context.Context, port int, timeout time.Duration) (strin
 		}
 
 		offer, err := ParseDiscoveryOffer(string(buf[:n]))
-		if err == nil && offer.URL != "" {
+		if err == nil && offer.URL != "" && AdoptableServerURL(offer.URL) {
 			// Verify server reachability via quick HEAD probe
-			if verifyServer(ctx, offer.URL, 800*time.Millisecond) {
+			if verifyServerFn(ctx, offer.URL, 800*time.Millisecond) {
 				return offer.URL, nil
 			}
 			// If offer URL contains localhost or 0.0.0.0, fallback to remoteAddr IP
 			if strings.Contains(offer.URL, "localhost") || strings.Contains(offer.URL, "127.0.0.1") {
 				if udpRemote, ok := remoteAddr.(*net.UDPAddr); ok {
 					altURL := fmt.Sprintf("http://%s:%d", udpRemote.IP.String(), DefaultServerPort)
-					if verifyServer(ctx, altURL, 800*time.Millisecond) {
+					if verifyServerFn(ctx, altURL, 800*time.Millisecond) {
 						return altURL, nil
 					}
 				}
@@ -143,7 +145,7 @@ func DiscoverViaUDP(ctx context.Context, port int, timeout time.Duration) (strin
 
 // DiscoverViaSubnetSweep scans the local /24 subnet for a running bus tracker server
 func DiscoverViaSubnetSweep(ctx context.Context, httpPort int) (string, error) {
-	ifaces, err := net.Interfaces()
+	ifaces, err := netInterfaces()
 	if err != nil {
 		return "", err
 	}
@@ -192,7 +194,7 @@ func DiscoverViaSubnetSweep(ctx context.Context, httpPort int) (string, error) {
 					return
 				}
 
-				if verifyServer(sweepCtx, candidate, 400*time.Millisecond) {
+				if verifyServerFn(sweepCtx, candidate, 400*time.Millisecond) {
 					select {
 					case resultChan <- candidate:
 						cancel()
@@ -276,8 +278,8 @@ func AutoDiscoverServer(ctx context.Context) (string, error) {
 	udpCtx, cancelUDP := context.WithTimeout(ctx, 2*time.Second)
 	defer cancelUDP()
 
-	if discovered, err := DiscoverViaUDP(udpCtx, DefaultDiscoveryPort, 1500*time.Millisecond); err == nil && discovered != "" {
-		_ = SaveServerURL(discovered)
+	if discovered, err := discoverViaUDP(udpCtx, DefaultDiscoveryPort, 1500*time.Millisecond); err == nil && discovered != "" {
+		_ = saveServerURL(discovered)
 		return discovered, nil
 	}
 
@@ -285,8 +287,8 @@ func AutoDiscoverServer(ctx context.Context) (string, error) {
 	sweepCtx, cancelSweep := context.WithTimeout(ctx, 3*time.Second)
 	defer cancelSweep()
 
-	if discovered, err := DiscoverViaSubnetSweep(sweepCtx, DefaultServerPort); err == nil && discovered != "" {
-		_ = SaveServerURL(discovered)
+	if discovered, err := discoverViaSweep(sweepCtx, DefaultServerPort); err == nil && discovered != "" {
+		_ = saveServerURL(discovered)
 		return discovered, nil
 	}
 

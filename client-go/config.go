@@ -105,7 +105,7 @@ func GetServerURL() string {
 		func() (string, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			return AutoDiscoverServer(ctx)
+			return autoDiscover(ctx)
 		},
 	)
 }

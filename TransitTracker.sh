@@ -1,5 +1,5 @@
 #!/bin/sh
-# Name: 126 Bus Tracker
+# Name: Transit Tracker
 # Author: Antigravity
 # Permanent OTA Bootstrap Launcher - Downloads & launches native Go binary
 
@@ -36,9 +36,9 @@ fi
 
 # 4. If completely offline with no cache, show clean notification and exit
 eips -c
-eips 15 18 "Cannot connect to Bus Tracker server at:"
+eips 15 18 "Cannot connect to Transit Tracker server at:"
 eips 15 20 "$SERVER"
-eips 15 23 "Please start server on Mac and retry."
+eips 15 23 "Please start server and retry."
 sleep 8
 eips -c
 lipc-set-prop -i com.lab126.appmgrd start app://com.lab126.booklet.home 2>/dev/null

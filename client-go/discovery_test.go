@@ -22,23 +22,30 @@ func TestParseDiscoveryOffer(t *testing.T) {
 	}{
 		{
 			name:        "Standard offer with version",
-			input:       "BUS_TRACKER_OFFER http://192.168.86.193:8000 1.4.0\n",
+			input:       "TRANSIT_TRACKER_OFFER http://192.168.86.193:8000 1.4.0\n",
 			wantURL:     "http://192.168.86.193:8000",
 			wantVersion: "1.4.0",
 			wantErr:     false,
 		},
 		{
 			name:        "Trailing slash in offer URL gets trimmed",
-			input:       "BUS_TRACKER_OFFER http://10.0.0.5:8000/ 1.4.0",
+			input:       "TRANSIT_TRACKER_OFFER http://10.0.0.5:8000/ 1.4.0",
 			wantURL:     "http://10.0.0.5:8000",
 			wantVersion: "1.4.0",
 			wantErr:     false,
 		},
 		{
 			name:        "Offer without version",
-			input:       "BUS_TRACKER_OFFER http://192.168.1.50:8000",
+			input:       "TRANSIT_TRACKER_OFFER http://192.168.1.50:8000",
 			wantURL:     "http://192.168.1.50:8000",
 			wantVersion: "",
+			wantErr:     false,
+		},
+		{
+			name:        "Legacy BUS_TRACKER_OFFER still accepted",
+			input:       "BUS_TRACKER_OFFER http://192.168.1.60:8000 1.4.0",
+			wantURL:     "http://192.168.1.60:8000",
+			wantVersion: "1.4.0",
 			wantErr:     false,
 		},
 		{
@@ -138,8 +145,8 @@ func TestDiscoverViaUDPIntegration(t *testing.T) {
 					continue
 				}
 			}
-			if strings.Contains(string(buf[:n]), "BUS_TRACKER_DISCOVER") {
-				reply := fmt.Sprintf("BUS_TRACKER_OFFER %s 1.4.0\n", ts.URL)
+			if strings.Contains(string(buf[:n]), "TRANSIT_TRACKER_DISCOVER") {
+				reply := fmt.Sprintf("TRANSIT_TRACKER_OFFER %s 1.4.0\n", ts.URL)
 				_, _ = udpConn.WriteTo([]byte(reply), raddr)
 			}
 		}

@@ -5,7 +5,9 @@
 FROM golang:alpine AS builder
 WORKDIR /build
 COPY client-go/ .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="-s -w" -o /tracker-arm .
+COPY VERSION .
+RUN VERSION=$(cat VERSION) && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="-s -w -X main.Version=${VERSION}" -o /tracker-arm .
 
 # Stage 2: Runtime image
 FROM python:3.11-slim
@@ -27,8 +29,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy server and dashboard rendering application files
-COPY bus_tracker.py citibike.py render_dashboard.py server.py ./
+# Copy server and dashboard rendering application files.
+# VERSION must be present at runtime: server.py reports it to clients and the
+# Kindle compares it against its embedded version to decide whether to OTA.
+COPY VERSION version.py bus_tracker.py citibike.py render_dashboard.py server.py ./
 
 # Copy compiled static Kindle ARM client from builder stage
 COPY --from=builder /tracker-arm ./tracker-arm

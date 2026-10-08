@@ -1,0 +1,23 @@
+[run]
+source = .
+omit =
+    tests/*
+    test_*.py
+    client-go/*
+    scratch/*
+    setup.py
+branch = True
+
+[report]
+# Fail the build if total coverage drops below the project gate.
+fail_under = 90
+show_missing = True
+skip_covered = False
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    raise NotImplementedError
+    if TYPE_CHECKING:
+
+[html]
+directory = htmlcov

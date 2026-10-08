@@ -6,3 +6,6 @@ dashboard*.png
 nosebleed.zip
 fill_storage.py
 tracker-arm
+client-go/client-go
+.coverage
+htmlcov/

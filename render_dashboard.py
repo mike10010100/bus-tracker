@@ -6,18 +6,12 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional
 from PIL import Image, ImageDraw, ImageFont
 
-from bus_tracker import NJTransitBusTracker
+from bus_tracker import NJTransitBusTracker, normalize_arrival
 from citibike import CitiBikeTracker
 
 # Canvas Dimensions (standard 7.5" e-ink: TRMNL, Waveshare 7.5", etc.)
 WIDTH = 800
 HEIGHT = 480
-
-# Walk times from home (in minutes, based on pedestrian street routing at ~65 m/min)
-WALK_TIMES = {
-    "20494": 3,  # Clinton St at 9th St (~3 min walk, 246m street distance)
-    "20512": 5,  # Washington St at 9th St (~5 min walk, 322m street distance)
-}
 
 STOPS = [
     {
@@ -62,6 +56,26 @@ def get_font(size: int, bold: bool = False):
         return ImageFont.load_default()
     except Exception:
         return None
+
+
+# Arrival fetch statuses mirrored from bus_tracker.NJTransitBusTracker
+STATUS_OK = "ok"
+STATUS_EMPTY = "empty"
+STATUS_ERROR = "error"
+
+_NO_BUS_MESSAGE = "No buses tracked in next hour"
+_ERROR_MESSAGE = "Live data unavailable — retrying"
+
+
+def empty_state_message(status: Optional[str]) -> tuple:
+    """
+    Maps an upstream fetch status to the message (and colour) shown in an
+    empty arrival card, so an upstream outage is never presented as
+    'no buses'.
+    """
+    if status == STATUS_ERROR:
+        return _ERROR_MESSAGE, "#aa0000"
+    return _NO_BUS_MESSAGE, "#666666"
 
 
 def parse_minutes(eta_text: str) -> Optional[int]:
@@ -110,6 +124,52 @@ def draw_header_badge(
 
 def draw_rounded_card(draw: ImageDraw.ImageDraw, xy, radius=12, fill="white", outline="black", width=2):
     draw.rounded_rectangle(xy, radius=radius, fill=fill, outline=outline, width=width)
+
+
+def ellipsize_to_width(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> str:
+    """
+    Truncates text with a trailing ellipsis so its rendered width never exceeds
+    max_width. Returns the original string when it already fits (or when the
+    budget is too small to place even an ellipsis).
+    """
+    if max_width <= 0 or not text:
+        return text
+    if draw.textbbox((0, 0), text, font=font)[2] <= max_width:
+        return text
+    ellipsis = "…"
+    if draw.textbbox((0, 0), ellipsis, font=font)[2] > max_width:
+        return ""
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if draw.textbbox((0, 0), text[:mid] + ellipsis, font=font)[2] <= max_width:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo].rstrip() + ellipsis
+
+
+def mock_badge_width(draw: ImageDraw.ImageDraw, font) -> int:
+    """Returns the width of a 'MOCK DATA' badge, to reserve header space."""
+    bbox = draw.textbbox((0, 0), "MOCK DATA", font=font)
+    return (bbox[2] - bbox[0]) + 16
+
+
+def draw_mock_badge(draw: ImageDraw.ImageDraw, x: int, y: int, font=None) -> int:
+    """
+    Draws a prominent 'MOCK DATA' badge so fabricated preview data is never
+    mistaken for live telemetry. Returns the right edge of the badge.
+    """
+    if font is None:
+        font = get_font(11, bold=True)
+    text = "MOCK DATA"
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw = bbox[2] - bbox[0]
+    box_h = 22
+    x1 = x + tw + 16
+    draw.rounded_rectangle([x, y, x1, y + box_h], radius=4, fill="black")
+    draw.text((x + 8 - bbox[0], y + (box_h - (bbox[3] - bbox[1])) // 2 - bbox[1]), text, fill="white", font=font)
+    return x1
 
 
 def draw_battery_indicator(
@@ -251,7 +311,7 @@ def render_morning_view(
     batt_level: Optional[int],
     is_charging: bool,
     is_mock: bool,
-    view_mode: str = "auto",
+    stop_status: Optional[Dict[str, str]] = None,
     width: int = WIDTH,
     height: int = HEIGHT,
 ):
@@ -272,7 +332,6 @@ def render_morning_view(
     font_hero_label = get_font(13, bold=True)
     font_sub_stat = get_font(14 if is_tall else 13, bold=False)
     font_badge = get_font(11, bold=True)
-    font_footer = get_font(11, bold=False)
     font_bus_bar_title = get_font(11, bold=True)
     font_bus_stop = get_font(14 if is_tall else 13, bold=True)
     font_bus_eta = get_font(14 if is_tall else 13, bold=True)
@@ -312,6 +371,10 @@ def render_morning_view(
     date_w = date_bbox[2] - date_bbox[0]
     draw.text((width - 20 - date_w, 39), now_date_str, fill="#555555", font=font_header_sub)
 
+    if is_mock:
+        badge_font = get_font(11, bold=True)
+        draw_mock_badge(draw, width - 20 - date_w - mock_badge_width(draw, badge_font) - 10, 36, badge_font)
+
     draw.line([(20, 62), (width - 20, 62)], fill="black", width=2)
 
     # 2. Citi Bike Hero Cards (3 Columns)
@@ -349,7 +412,8 @@ def render_morning_view(
         else:
             card_title_font = get_font(11, bold=True)
 
-        draw.text((cx0 + 10, cb_y0 + 6), c["name"].upper(), fill="black", font=card_title_font)
+        title_line = ellipsize_to_width(draw, c["name"].upper(), card_title_font, max_title_w)
+        draw.text((cx0 + 10, cb_y0 + 6), title_line, fill="black", font=card_title_font)
 
         if c.get("is_offline"):
             draw.text((cx0 + 14, cb_y0 + (90 if is_tall else 80)), "STATION OFFLINE", fill="#666666", font=font_card_title)
@@ -391,6 +455,15 @@ def render_morning_view(
     draw.line([(20, bus_y0 + header_h), (width - 20, bus_y0 + header_h)], fill="black", width=1)
     draw.text((34, bus_y0 + (6 if is_tall else 5)), "NJ TRANSIT 126 BUS • UPCOMING PORT AUTHORITY ARRIVALS", fill="#444444", font=font_bus_bar_title)
 
+    # Row offsets below the section header. The compact (800x480) box has only
+    # 52px of content height, so its rows must sit tighter than the tall one;
+    # using the tall offsets here pushed the "Following" line past the border.
+    content_top = bus_y0 + header_h
+    if is_tall:
+        row_name, row_next, row_follow, row_third, row_empty = 10, 32, 50, 68, 34
+    else:
+        row_name, row_next, row_follow, row_empty = 2, 17, 34, 20
+
     bus_col_w = (width - 40) // 2
     for i, stop_cfg in enumerate(STOPS):
         sid = stop_cfg["id"]
@@ -399,7 +472,7 @@ def render_morning_view(
         if i > 0:
             draw.line([(bx0, bus_y0 + header_h + 6), (bx0, bus_y1 - 6)], fill="#dddddd", width=1)
 
-        stop_name_y = bus_y0 + header_h + (10 if is_tall else 8)
+        stop_name_y = content_top + row_name
         draw.text((bx0 + 14, stop_name_y), stop_cfg["name"].upper(), fill="black", font=font_bus_stop)
 
         walk_badge = f"{stop_cfg['walk_min']}m walk"
@@ -408,20 +481,30 @@ def render_morning_view(
         draw.rounded_rectangle([bx1 - ww - 18, stop_name_y - 2, bx1 - 10, stop_name_y + 14], radius=4, fill="#eeeeee", outline="black", width=1)
         draw.text((bx1 - ww - 14, stop_name_y), walk_badge, fill="black", font=font_walk)
 
+        # Column interior; text must not cross into the neighbouring column.
+        col_max_w = (bx1 - 12) - (bx0 + 14)
+
         arrivals = stops_data.get(sid, [])
         if arrivals:
             first_bus = arrivals[0]
             eta = first_bus.get("eta", "")
             b_num = f" (Bus #{first_bus['vehicle_id']})" if first_bus.get("vehicle_id") else ""
-            draw.text((bx0 + 14, bus_y0 + header_h + (32 if is_tall else 26)), f"Next: {eta}{b_num}", fill="black", font=font_bus_eta)
+            next_line = ellipsize_to_width(draw, f"Next: {eta}{b_num}", font_bus_eta, col_max_w)
+            draw.text((bx0 + 14, content_top + row_next), next_line, fill="black", font=font_bus_eta)
             if len(arrivals) > 1:
                 next_eta = arrivals[1].get("eta", "")
-                draw.text((bx0 + 14, bus_y0 + header_h + (50 if is_tall else 42)), f"Following: {next_eta}", fill="#555555", font=font_bus_meta)
+                follow_line = ellipsize_to_width(draw, f"Following: {next_eta}", font_bus_meta, col_max_w)
+                draw.text((bx0 + 14, content_top + row_follow), follow_line, fill="#555555", font=font_bus_meta)
             if is_tall and len(arrivals) > 2:
                 third_eta = arrivals[2].get("eta", "")
-                draw.text((bx0 + 14, bus_y0 + header_h + 68), f"Upcoming: {third_eta}", fill="#777777", font=font_bus_meta)
+                third_line = ellipsize_to_width(draw, f"Upcoming: {third_eta}", font_bus_meta, col_max_w)
+                draw.text((bx0 + 14, content_top + row_third), third_line, fill="#777777", font=font_bus_meta)
         else:
-            draw.text((bx0 + 14, bus_y0 + header_h + (34 if is_tall else 28)), "No buses tracked in next hour", fill="#666666", font=font_bus_eta)
+            status = (stop_status or {}).get(sid)
+            msg, color = empty_state_message(status)
+            msg_font = font_bus_meta if status == STATUS_ERROR else font_bus_eta
+            msg = ellipsize_to_width(draw, msg, msg_font, col_max_w)
+            draw.text((bx0 + 14, content_top + row_empty), msg, fill=color, font=msg_font)
 
     # 4. Touch Button Bar (Interactive Actions)
     draw_bottom_button_bar(draw, width, height, active_view="morning")
@@ -435,7 +518,7 @@ def render_evening_view(
     batt_level: Optional[int],
     is_charging: bool,
     is_mock: bool,
-    view_mode: str = "auto",
+    stop_status: Optional[Dict[str, str]] = None,
     width: int = WIDTH,
     height: int = HEIGHT,
 ):
@@ -493,6 +576,10 @@ def render_evening_view(
     date_w = date_bbox[2] - date_bbox[0]
     draw.text((width - 20 - date_w, 39), now_date_str, fill="#555555", font=font_header_sub)
 
+    if is_mock:
+        badge_font = get_font(11, bold=True)
+        draw_mock_badge(draw, width - 20 - date_w - mock_badge_width(draw, badge_font) - 10, 36, badge_font)
+
     draw.line([(20, 62), (width - 20, 62)], fill="black", width=2)
 
     # 2. Dual Bus Cards (Side-by-Side)
@@ -528,11 +615,16 @@ def render_evening_view(
 
         arrivals = stops_data.get(stop_id, [])
         if not arrivals:
-            draw.text((x0 + 24, y0 + (80 if is_tall else (70 if has_citibike else 120))), "NO BUSES IN NEXT HOUR", fill="#444444", font=font_stop_name if has_citibike else font_title)
+            status = (stop_status or {}).get(stop_id)
+            if status == STATUS_ERROR:
+                headline, subtext, headline_color = "LIVE DATA UNAVAILABLE", "Could not reach NJ Transit.\nRetrying automatically.", "#aa0000"
+            else:
+                headline, subtext, headline_color = "NO BUSES IN NEXT HOUR", "Off-peak schedule active or\nno buses currently tracked.", "#444444"
+            draw.text((x0 + 24, y0 + (80 if is_tall else (70 if has_citibike else 120))), headline, fill=headline_color, font=font_stop_name if has_citibike else font_title)
             draw.text(
                 (x0 + 24, y0 + (115 if is_tall else (100 if has_citibike else 155))),
-                "Off-peak schedule active or\nno buses currently tracked.",
-                fill="#666666",
+                subtext,
+                fill=("#aa0000" if status == STATUS_ERROR else "#666666"),
                 font=font_detail,
             )
             box_h0 = y1 - (88 if is_tall else (66 if has_citibike else 85))
@@ -544,7 +636,8 @@ def render_evening_view(
                 outline="#bbbbbb",
                 width=1,
             )
-            draw.text((x0 + 24, box_h0 + (18 if is_tall else (16 if has_citibike else 23))), "Tip: Check NJ Transit app for daily timetables", fill="#666666", font=font_footer)
+            tip = "Check your network / server connection" if status == STATUS_ERROR else "Tip: Check NJ Transit app for daily timetables"
+            draw.text((x0 + 24, box_h0 + (18 if is_tall else (16 if has_citibike else 23))), tip, fill="#666666", font=font_footer)
         else:
             first_bus = arrivals[0]
             first_eta_raw = first_bus.get("eta", "")
@@ -610,30 +703,40 @@ def render_evening_view(
                 )
                 draw.text((badge_x + 7, badge_y + (4 if has_citibike else 6)), badge_label, fill=badge_fg, font=font_badge)
 
-            sched_str = first_eta_raw
-            draw.text((x0 + 16, cy + (80 if is_tall else (74 if has_citibike else 82))), f"Estimated: {sched_str}", fill="#333333", font=font_detail)
+            card_text_max_w = (x1 - 10) - (x0 + 16)
+            sched_str = ellipsize_to_width(draw, f"Estimated: {first_eta_raw}", font_detail, card_text_max_w)
+            draw.text((x0 + 16, cy + (80 if is_tall else (74 if has_citibike else 82))), sched_str, fill="#333333", font=font_detail)
 
             bus_num = first_bus.get("vehicle_id")
             load = first_bus.get("occupancy")
             load_clean = load.replace("_", " ").title() if load and load != "EMPTY" else "Seats Available"
             bus_meta = f"Bus #{bus_num}  •  {load_clean}" if bus_num else f"Status: {load_clean}"
+            bus_meta = ellipsize_to_width(draw, bus_meta, font_detail, card_text_max_w)
             draw.text((x0 + 16, cy + (102 if is_tall else (94 if has_citibike else 104))), bus_meta, fill="#444444", font=font_detail)
 
             box_y0 = y1 - (88 if is_tall else (66 if has_citibike else 85))
             box_y1 = y1 - (12 if has_citibike else 16)
             draw.rounded_rectangle([x0 + 12, box_y0, x1 - 12, box_y1], radius=7, fill="#f8f8f8", outline="black", width=1)
 
+            # Text must stay inside the inner box (x0+12 .. x1-12), so clamp the
+            # right edge to the box interior minus the left inset.
+            inner_left = x0 + 20
+            inner_right = x1 - 12
+            inner_max_w = inner_right - inner_left - 4
+
             if len(arrivals) > 1:
                 next_bus = arrivals[1]
                 next_eta = next_bus.get("eta", "Scheduled")
                 next_bus_num = f" (Bus #{next_bus['vehicle_id']})" if next_bus.get("vehicle_id") else ""
                 draw.text((x0 + 20, box_y0 + (8 if is_tall else (9 if has_citibike else 12))), "UPCOMING BUSES:", fill="#555555", font=font_walk)
-                draw.text((x0 + 20, box_y0 + (25 if is_tall else (27 if has_citibike else 32))), f"126 to NYC → {next_eta}{next_bus_num}", fill="black", font=font_detail_bold)
+                line2 = ellipsize_to_width(draw, f"126 to NYC → {next_eta}{next_bus_num}", font_detail_bold, inner_max_w)
+                draw.text((x0 + 20, box_y0 + (25 if is_tall else (27 if has_citibike else 32))), line2, fill="black", font=font_detail_bold)
                 if is_tall and len(arrivals) > 2:
                     third_bus = arrivals[2]
                     third_eta = third_bus.get("eta", "Scheduled")
                     third_bus_num = f" (#{third_bus['vehicle_id']})" if third_bus.get("vehicle_id") else ""
-                    draw.text((x0 + 20, box_y0 + 46), f"Following → {third_eta}{third_bus_num}", fill="#555555", font=font_detail)
+                    line3 = ellipsize_to_width(draw, f"Following → {third_eta}{third_bus_num}", font_detail, inner_max_w)
+                    draw.text((x0 + 20, box_y0 + 46), line3, fill="#555555", font=font_detail)
             else:
                 draw.text((x0 + 20, box_y0 + (8 if is_tall else (9 if has_citibike else 12))), "UPCOMING BUSES:", fill="#555555", font=font_walk)
                 draw.text((x0 + 20, box_y0 + (25 if is_tall else (27 if has_citibike else 32))), "No further buses in next 60 min", fill="#666666", font=font_detail)
@@ -654,6 +757,16 @@ def render_evening_view(
         col_count = len(cb_display_data)
         col_w = (cb_x1 - cb_x0) // col_count
 
+        # Row offsets below the section header. The compact (800x480) box body is
+        # only 52px tall, so its rows sit tighter than the tall layout; the tall
+        # offsets previously pushed the "Docks available" line past the border.
+        if is_tall:
+            r_name, r_stat, r_sub, r_badge = 10, 32, 52, 70
+            badge_top, badge_bot, walk_top = 8, 24, 10
+        else:
+            r_name, r_stat, r_sub = 5, 23, 38
+            badge_top, badge_bot, walk_top = 6, 22, 7
+
         for i, c in enumerate(cb_display_data):
             cx0 = cb_x0 + i * col_w
             cx1 = cx0 + col_w
@@ -664,24 +777,24 @@ def render_evening_view(
             wb = draw.textbbox((0, 0), walk_str, font=font_cb_walk)
             ww = wb[2] - wb[0]
             badge_x0 = cx1 - ww - 18
-            draw.rounded_rectangle([badge_x0, body_y0 + (8 if is_tall else 6), cx1 - 10, body_y0 + (24 if is_tall else 22)], radius=4, fill="#eeeeee", outline="black", width=1)
-            draw.text((cx1 - ww - 14, body_y0 + (10 if is_tall else 8)), walk_str, fill="black", font=font_cb_walk)
+            draw.rounded_rectangle([badge_x0, body_y0 + badge_top, cx1 - 10, body_y0 + badge_bot], radius=4, fill="#eeeeee", outline="black", width=1)
+            draw.text((cx1 - ww - 14, body_y0 + walk_top), walk_str, fill="black", font=font_cb_walk)
 
             cb_name_font = font_cb_name
             max_name_w = badge_x0 - (cx0 + 14) - 6
             tb = draw.textbbox((0, 0), c["name"].upper(), font=cb_name_font)
             if (tb[2] - tb[0]) > max_name_w:
                 cb_name_font = get_font(12, bold=True)
-            draw.text((cx0 + 14, body_y0 + (10 if is_tall else 8)), c["name"].upper(), fill="black", font=cb_name_font)
+            draw.text((cx0 + 14, body_y0 + r_name), c["name"].upper(), fill="black", font=cb_name_font)
 
             if c.get("is_offline"):
-                draw.text((cx0 + 14, body_y0 + (34 if is_tall else 27)), "STATION OFFLINE", fill="#777777", font=font_cb_stat)
-                draw.text((cx0 + 14, body_y0 + (54 if is_tall else 44)), "Temporarily unavailable", fill="#777777", font=font_cb_sub)
+                draw.text((cx0 + 14, body_y0 + r_stat), "STATION OFFLINE", fill="#777777", font=font_cb_stat)
+                draw.text((cx0 + 14, body_y0 + r_sub), "Temporarily unavailable", fill="#777777", font=font_cb_sub)
             else:
                 stat_str = f"{c['ebikes']} Ebikes  •  {c['classic']} Classic"
-                draw.text((cx0 + 14, body_y0 + (32 if is_tall else 27)), stat_str, fill="black", font=font_cb_stat)
+                draw.text((cx0 + 14, body_y0 + r_stat), stat_str, fill="black", font=font_cb_stat)
                 docks_str = f"{c['docks']} Docks available"
-                draw.text((cx0 + 14, body_y0 + (52 if is_tall else 44)), docks_str, fill="#555555", font=font_cb_sub)
+                draw.text((cx0 + 14, body_y0 + r_sub), docks_str, fill="#555555", font=font_cb_sub)
                 if is_tall:
                     if c["ebikes"] >= 4:
                         cb_badge = "● GOOD AVAILABILITY"
@@ -691,7 +804,7 @@ def render_evening_view(
                         cb_badge = "● DOCKS FULL"
                     else:
                         cb_badge = "● CLASSIC ONLY"
-                    draw.text((cx0 + 14, body_y0 + 70), cb_badge, fill="#444444", font=font_cb_walk)
+                    draw.text((cx0 + 14, body_y0 + r_badge), cb_badge, fill="#444444", font=font_cb_walk)
 
     # 4. Touch Button Bar (Interactive Actions)
     draw_bottom_button_bar(draw, width, height, active_view="evening")
@@ -705,6 +818,7 @@ def render_dashboard(
     is_mock: bool = False,
     batt_level: Optional[int] = None,
     is_charging: bool = False,
+    stop_status: Optional[Dict[str, str]] = None,
     width: int = WIDTH,
     height: int = HEIGHT,
 ) -> str:
@@ -712,6 +826,9 @@ def render_dashboard(
     Renders a high-contrast black-and-white image optimized for e-ink
     or low-power dashboard screens (default 800x480, or 800x600 for 4:3 displays).
     Supports 'morning' (Citi Bike Hero) and 'evening' (Bus Hero) view modes.
+
+    stop_status maps stop id -> fetch status ('ok'/'empty'/'error') so that an
+    upstream outage can be distinguished from a genuine absence of buses.
     """
     if citibike_data is None:
         try:
@@ -736,7 +853,7 @@ def render_dashboard(
             batt_level=batt_level,
             is_charging=is_charging,
             is_mock=is_mock,
-            view_mode=view,
+            stop_status=stop_status,
             width=width,
             height=height,
         )
@@ -749,7 +866,7 @@ def render_dashboard(
             batt_level=batt_level,
             is_charging=is_charging,
             is_mock=is_mock,
-            view_mode=view,
+            stop_status=stop_status,
             width=width,
             height=height,
         )
@@ -812,33 +929,19 @@ if __name__ == "__main__":
 
     stops_data = {}
 
+    stop_status = {}
+
     if use_mock:
         print("Rendering with mock peak-commute data...")
         stops_data = get_mock_data()
+        stop_status = {stop["id"]: STATUS_OK for stop in STOPS}
     else:
         print("Fetching live data from NJ Transit API...")
-        try:
-            tracker = NJTransitBusTracker()
-            # Map stop ID directly to arrivals
-            for stop in STOPS:
-                sid = stop["id"]
-                trips = tracker.get_arrivals(stop_id=sid, route="126")
-                arrivals = []
-                for t in trips:
-                    status = (t.get("departurestatus") or "").strip()
-                    dep_time = (t.get("departuretime") or "").strip()
-                    eta_str = f"{status} ({dep_time})" if status and dep_time else (status or dep_time or "Scheduled")
-                    arrivals.append({
-                        "route": t.get("public_route"),
-                        "destination": (t.get("header") or "").strip(),
-                        "eta": eta_str,
-                        "occupancy": t.get("passload"),
-                        "vehicle_id": t.get("vehicle_id"),
-                    })
-                stops_data[sid] = arrivals
-        except Exception as e:
-            print(f"Live fetch error ({e}), falling back to mock preview data...")
-            stops_data = get_mock_data()
-            use_mock = True
+        tracker = NJTransitBusTracker()
+        for stop in STOPS:
+            sid = stop["id"]
+            status, trips = tracker.get_arrivals_with_status(stop_id=sid, route="126")
+            stops_data[sid] = [normalize_arrival(t) for t in trips]
+            stop_status[sid] = status
 
-    render_dashboard(stops_data, output_path="dashboard.png", view=view_arg, is_mock=use_mock)
+    render_dashboard(stops_data, output_path="dashboard.png", view=view_arg, is_mock=use_mock, stop_status=stop_status)

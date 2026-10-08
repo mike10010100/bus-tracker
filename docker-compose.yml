@@ -10,7 +10,7 @@ services:
     restart: unless-stopped
     # On Linux servers (Raspberry Pi, mini PC, NAS, Unraid), network_mode: host
     # allows the container to bind directly to the LAN interface. This enables:
-    # 1. Zero-config mDNS service advertisement (_bustracker._tcp.local)
+    # 1. Zero-config mDNS service advertisement (_transittracker._tcp.local)
     # 2. Receiving Kindle UDP discovery broadcasts (port 8001) without NAT traversal
     network_mode: host
     environment:
@@ -20,7 +20,6 @@ services:
       - NJT_PASSWORD=${NJT_PASSWORD:-}
       - NJT_API_USERNAME=${NJT_API_USERNAME:-}
       - NJT_API_PASSWORD=${NJT_API_PASSWORD:-}
-      - NJT_API_KEY=${NJT_API_KEY:-}
     env_file:
       - path: .env
         required: false

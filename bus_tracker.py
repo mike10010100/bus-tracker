@@ -3,22 +3,49 @@ import time
 from typing import List, Dict, Any, Optional
 import requests
 
+def load_env_file(env_file: str) -> None:
+    """
+    Minimal .env parser used when python-dotenv is unavailable. Reads
+    KEY=value pairs, ignoring blanks/comments, and only sets keys that are not
+    already present in the environment.
+    """
+    if not os.path.exists(env_file):
+        return
+    with open(env_file, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip("'\"")
+                if k not in os.environ:
+                    os.environ[k] = v
+
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     # Native fallback if python-dotenv is not installed
-    env_file = os.path.join(os.path.dirname(__file__), ".env")
-    if os.path.exists(env_file):
-        with open(env_file, "r") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    k = k.strip()
-                    v = v.strip().strip("'\"")
-                    if k not in os.environ:
-                        os.environ[k] = v
+    load_env_file(os.path.join(os.path.dirname(__file__), ".env"))
+
+def normalize_arrival(t: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Maps a raw NJ Transit trip (from either BUSDV2 or GraphQL) to the canonical
+    Arrival record consumed by the renderer. Centralizing this mapping keeps the
+    two upstream sources behind a single domain shape.
+    """
+    status = (t.get("departurestatus") or "").strip()
+    dep_time = (t.get("departuretime") or "").strip()
+    eta_str = f"{status} ({dep_time})" if status and dep_time else (status or dep_time or "Scheduled")
+    return {
+        "route": t.get("public_route"),
+        "destination": (t.get("header") or "").strip(),
+        "eta": eta_str,
+        "occupancy": t.get("passload"),
+        "vehicle_id": t.get("vehicle_id"),
+    }
+
 
 class NJTransitBusTracker:
     """
@@ -118,17 +145,24 @@ class NJTransitBusTracker:
                 "lanegate": item.get("lanegate"),
                 "departuretime": item.get("departuretime"),
                 "departurestatus": item.get("departurestatus"),
-                "sched_dep_time": item.get("schedDepTime"),
                 "vehicle_id": item.get("vehicleId"),
                 "passload": item.get("passload"),
             })
         return results
 
-    def get_arrivals(self, stop_id: str, route: str = "126") -> List[Dict[str, Any]]:
+    # Arrival fetch statuses
+    STATUS_OK = "ok"          # Upstream responded and returned upcoming buses
+    STATUS_EMPTY = "empty"    # Upstream responded but there are genuinely no buses
+    STATUS_ERROR = "error"    # Upstream could not be reached; data is unknown
+
+    def get_arrivals_with_status(self, stop_id: str, route: str = "126"):
         """
-        Fetches upcoming bus arrivals for a specific stop number and route.
-        Tries Developer BUSDV2 API first, automatically falling back to
-        the public GraphQL API if the developer server is in maintenance.
+        Fetches upcoming bus arrivals and returns (status, trips).
+
+        Unlike get_arrivals(), this distinguishes an upstream failure
+        (STATUS_ERROR, arrivals unknown) from a successful response with no
+        upcoming buses (STATUS_EMPTY). Collapsing both into an empty list
+        previously caused the dashboard to falsely claim "no buses".
         """
         try:
             token = self.get_token()
@@ -146,14 +180,24 @@ class NJTransitBusTracker:
             resp.raise_for_status()
             data = resp.json()
             trips = data.get("DVTrip") or []
-            return trips
         except Exception as e:
             # Automatic fallback to official website GraphQL API
             try:
-                return self.get_arrivals_graphql(stop_id=stop_id, route=route)
+                trips = self.get_arrivals_graphql(stop_id=stop_id, route=route)
             except Exception as e2:
                 print(f"[Tracker] Both BUSDV2 ({e}) and GraphQL ({e2}) failed.")
-                return []
+                return self.STATUS_ERROR, []
+
+        return (self.STATUS_OK if trips else self.STATUS_EMPTY), trips
+
+    def get_arrivals(self, stop_id: str, route: str = "126") -> List[Dict[str, Any]]:
+        """
+        Fetches upcoming bus arrivals for a specific stop number and route.
+        Returns an empty list on both success-with-no-buses and upstream
+        failure; prefer get_arrivals_with_status() when the distinction matters.
+        """
+        _status, trips = self.get_arrivals_with_status(stop_id=stop_id, route=route)
+        return trips
 
     def get_summary(self, stops: Dict[str, str], route: str = "126") -> Dict[str, List[Dict[str, str]]]:
         """
@@ -163,20 +207,7 @@ class NJTransitBusTracker:
         summary = {}
         for stop_name, stop_id in stops.items():
             trips = self.get_arrivals(stop_id=stop_id, route=route)
-            arrivals = []
-            for t in trips:
-                status = (t.get("departurestatus") or "").strip()
-                dep_time = (t.get("departuretime") or "").strip()
-                eta_str = f"{status} ({dep_time})" if status and dep_time else (status or dep_time or "Scheduled")
-
-                arrivals.append({
-                    "route": t.get("public_route"),
-                    "destination": (t.get("header") or "").strip(),
-                    "eta": eta_str,
-                    "occupancy": t.get("passload"),
-                    "vehicle_id": t.get("vehicle_id"),
-                })
-            summary[stop_name] = arrivals
+            summary[stop_name] = [normalize_arrival(t) for t in trips]
         return summary
 
 

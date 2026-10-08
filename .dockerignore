@@ -11,3 +11,5 @@ scratch
 *.png
 !dashboard.png
 tracker-arm
+.coverage
+htmlcov

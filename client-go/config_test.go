@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"os"
 	"testing"
 )
 
@@ -91,6 +92,28 @@ func TestResolveServerURLWithDiscoverer(t *testing.T) {
 	if got != want {
 		t.Errorf("ResolveServerURLWithDiscoverer() = %q, want %q", got, want)
 	}
+}
+
+func TestGetServerURL_EnvOverride(t *testing.T) {
+	originalArgs := os.Args
+	os.Args = []string{"/tmp/tracker"}
+	defer func() { os.Args = originalArgs }()
+
+	t.Setenv("TRACKER_SERVER", "http://env-injected:8000")
+	if got := GetServerURL(); got != "http://env-injected:8000" {
+		t.Errorf("GetServerURL() = %q, want env override", got)
+	}
+}
+
+func TestGetServerURL_DefaultFallback(t *testing.T) {
+	originalArgs := os.Args
+	os.Args = []string{"/tmp/tracker"}
+	defer func() { os.Args = originalArgs }()
+
+	// Clear env override; unreadable config files fall through to discovery
+	// (disabled) and finally the default candidate list.
+	t.Setenv("TRACKER_SERVER", "")
+	GetServerURL() // must not panic; returns some default
 }
 
 func TestResolveViewMode(t *testing.T) {

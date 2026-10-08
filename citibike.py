@@ -9,6 +9,8 @@ import time
 import urllib.request
 from typing import Dict, List, Any, Optional
 
+from version import VERSION
+
 # Closest Citi Bike stations to 919 Park Ave, Hoboken, NJ (40.7484552, -74.0302997)
 # Pedestrian routing distances and walk times based on actual street routing via crosswalks
 DEFAULT_STATIONS = [
@@ -97,7 +99,7 @@ class CitiBikeTracker:
         try:
             req = urllib.request.Request(
                 GBFS_STATUS_URL,
-                headers={"User-Agent": "126BusTracker/1.5.0 (Kindle Transit Display)"},
+                headers={"User-Agent": f"TransitTracker/{VERSION} (Kindle Transit Display)"},
             )
             with urllib.request.urlopen(req, timeout=5) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))

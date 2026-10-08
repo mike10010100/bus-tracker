@@ -1,0 +1,441 @@
+"""
+Integration tests that exercise the real HTTP handlers over a loopback socket.
+The server is bound to an ephemeral port; the dashboard route is served from
+mock data so no external network calls are made.
+"""
+
+import io
+import json
+import os
+import socket
+import tempfile
+import threading
+import time
+import unittest
+import urllib.request
+import urllib.error
+from http.server import ThreadingHTTPServer
+
+import server
+from server import DashboardHandler, format_for_kindle, sha256_file
+from PIL import Image
+
+
+def _http_get(port, path, headers=None):
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, dict(resp.headers), resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+
+
+def _http(method, port, path, headers=None, body=None):
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=body, headers=headers or {}, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, dict(resp.headers), resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+
+
+class ServerHTTPTestBase(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), DashboardHandler)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.thread.join(timeout=5)
+
+
+class TestHealthAndRoot(ServerHTTPTestBase):
+    def test_healthz(self):
+        status, _headers, body = _http_get(self.port, "/healthz")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["version"], server.SERVER_VERSION)
+        self.assertIn("stopped", payload)
+
+    def test_root_html(self):
+        status, headers, body = _http_get(self.port, "/")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", headers.get("Content-Type", ""))
+        self.assertIn(b"Dashboard", body)
+
+    def test_root_html_with_token_shows_token_links(self):
+        original = server.CONTROL_TOKEN
+        server.CONTROL_TOKEN = "s3cret"
+        try:
+            status, _headers, body = _http_get(self.port, "/")
+            self.assertEqual(status, 200)
+            self.assertIn(b"token=s3cret", body)
+        finally:
+            server.CONTROL_TOKEN = original
+
+    def test_unknown_path_404(self):
+        status, _headers, _body = _http_get(self.port, "/does-not-exist")
+        self.assertEqual(status, 404)
+
+    def test_head_request(self):
+        status, _headers, _body = _http(method="HEAD", port=self.port, path="/healthz")
+        self.assertEqual(status, 200)
+
+
+class TestLogEndpoint(ServerHTTPTestBase):
+    def test_post_log_returns_200(self):
+        status, _headers, _body = _http(method="POST", port=self.port, path="/log", body=b"hello from kindle")
+        self.assertEqual(status, 200)
+
+    def test_post_unknown_path_404(self):
+        status, _headers, _body = _http(method="POST", port=self.port, path="/nope", body=b"x")
+        self.assertEqual(status, 404)
+
+    def test_get_log_with_query(self):
+        status, _headers, _body = _http_get(self.port, "/log?msg=test-message")
+        self.assertEqual(status, 200)
+
+
+class TestDashboardRoute(ServerHTTPTestBase):
+    def test_mock_dashboard_standard(self):
+        status, headers, body = _http_get(self.port, "/dashboard.png?mock=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Content-Type"), "image/png")
+        self.assertIn("X-Kindle-Poll-Interval", headers)
+        img = Image.open(io.BytesIO(body))
+        self.assertEqual(img.size, (800, 480))
+
+    def test_mock_dashboard_kindle_rotation(self):
+        status, headers, body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5&rotate=90")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("X-Resolved-View") in ("morning", "evening"), True)
+        img = Image.open(io.BytesIO(body))
+        self.assertEqual(img.size, (1236, 1648))
+        self.assertEqual(img.mode, "L")
+
+    def test_battery_clamped(self):
+        # Out-of-range battery must be ignored (rendered without battery), not crash
+        status, _headers, body = _http_get(self.port, "/dashboard.png?mock=1&batt=999")
+        self.assertEqual(status, 200)
+        self.assertTrue(len(body) > 0)
+
+    def test_battery_valid_in_range_accepted(self):
+        status, _headers, body = _http_get(self.port, "/dashboard.png?mock=1&batt=77&charging=1")
+        self.assertEqual(status, 200)
+        self.assertTrue(len(body) > 0)
+
+    def test_view_via_header(self):
+        status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1", headers={"X-Tracker-View": "evening"})
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("X-Tracker-View"), "evening")
+
+    def test_bus_png_alias(self):
+        status, _headers, _body = _http_get(self.port, "/bus.png?mock=1")
+        self.assertEqual(status, 200)
+
+
+class TestControlEndpoints(ServerHTTPTestBase):
+    def tearDown(self):
+        server.tracker_stopped = False
+        server.CONTROL_TOKEN = ""
+
+    def test_stop_then_resume_from_loopback(self):
+        status, _headers, body = _http_get(self.port, "/stop")
+        self.assertEqual(status, 200)
+        self.assertTrue(server.tracker_stopped)
+        self.assertIn(b"Stopping", body)
+
+        # While stopped, the dashboard route signals HTTP 205 to the client
+        status, _headers, _body = _http_get(self.port, "/dashboard.png?mock=1")
+        self.assertEqual(status, 205)
+
+        status, _headers, _body = _http_get(self.port, "/resume")
+        self.assertEqual(status, 200)
+        self.assertFalse(server.tracker_stopped)
+
+    def test_start_alias_resumes(self):
+        server.tracker_stopped = True
+        status, _headers, _body = _http_get(self.port, "/start")
+        self.assertEqual(status, 200)
+        self.assertFalse(server.tracker_stopped)
+
+    def test_stop_denied_with_token_configured_and_wrong_token(self):
+        server.CONTROL_TOKEN = "topsecret"
+        status, _headers, body = _http_get(self.port, "/stop")
+        self.assertEqual(status, 403)
+        self.assertFalse(server.tracker_stopped)
+        self.assertIn(b"Forbidden", body)
+
+    def test_stop_allowed_with_correct_token(self):
+        server.CONTROL_TOKEN = "topsecret"
+        status, _headers, _body = _http_get(self.port, "/stop?token=topsecret")
+        self.assertEqual(status, 200)
+        self.assertTrue(server.tracker_stopped)
+
+    def test_stop_allowed_with_correct_header_token(self):
+        server.CONTROL_TOKEN = "topsecret"
+        status, _headers, _body = _http_get(self.port, "/stop", headers={"X-Tracker-Token": "topsecret"})
+        self.assertEqual(status, 200)
+        self.assertTrue(server.tracker_stopped)
+
+    def test_resume_denied_without_token(self):
+        server.tracker_stopped = True
+        server.CONTROL_TOKEN = "topsecret"
+        status, _headers, _body = _http_get(self.port, "/resume")
+        self.assertEqual(status, 403)
+        self.assertTrue(server.tracker_stopped)
+
+    def test_token_links_present_when_stopped_and_configured(self):
+        server.CONTROL_TOKEN = "topsecret"
+        server.tracker_stopped = True
+        status, _headers, body = _http_get(self.port, "/")
+        self.assertEqual(status, 200)
+        self.assertIn(b"resume?token=topsecret", body)
+
+
+class TestTrackerArmRoute(ServerHTTPTestBase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.binary = os.path.join(os.path.dirname(server.__file__), "tracker-arm")
+        cls._pre_existing = os.path.exists(cls.binary)
+        if not cls._pre_existing:
+            with open(cls.binary, "wb") as f:
+                f.write(b"FAKEARM" * 100)
+
+    @classmethod
+    def tearDownClass(cls):
+        if not cls._pre_existing and os.path.exists(cls.binary):
+            os.remove(cls.binary)
+        super().tearDownClass()
+
+    def test_get_binary_headers(self):
+        status, headers, body = _http_get(self.port, "/tracker-arm")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Content-Type"), "application/octet-stream")
+        self.assertEqual(headers.get("X-Tracker-Version"), server.SERVER_VERSION)
+        self.assertEqual(headers.get("X-Tracker-SHA256"), sha256_file(self.binary))
+        self.assertEqual(len(body), os.path.getsize(self.binary))
+        with open(self.binary, "rb") as f:
+            self.assertEqual(body, f.read())
+
+    def test_missing_binary_returns_404(self):
+        os.rename(self.binary, self.binary + ".bak")
+        try:
+            status, _headers, _body = _http_get(self.port, "/tracker-arm")
+            self.assertEqual(status, 404)
+        finally:
+            os.rename(self.binary + ".bak", self.binary)
+
+    def test_conditional_request_304(self):
+        _status, headers, _body = _http_get(self.port, "/tracker-arm")
+        last_mod = headers.get("Last-Modified")
+        status, _headers, _body = _http_get(self.port, "/tracker-arm", headers={"If-Modified-Since": last_mod})
+        self.assertEqual(status, 304)
+
+
+class TestDiscoveryAndLighting(unittest.TestCase):
+    def test_sha256_file_matches_hashlib(self):
+        import hashlib
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(b"payload-bytes")
+            path = f.name
+        try:
+            self.assertEqual(sha256_file(path), hashlib.sha256(b"payload-bytes").hexdigest())
+        finally:
+            os.remove(path)
+
+    def test_get_local_ip_returns_string(self):
+        ip = server.get_local_ip()
+        self.assertIsInstance(ip, str)
+        self.assertTrue(len(ip) > 0)
+
+    def test_peak_commute_boundaries(self):
+        from datetime import datetime
+        self.assertTrue(server.is_peak_commute_hours(datetime(2026, 1, 1, 7, 30)))
+        self.assertFalse(server.is_peak_commute_hours(datetime(2026, 1, 1, 9, 30)))
+        self.assertTrue(server.is_peak_commute_hours(datetime(2026, 1, 1, 16, 30)))
+        self.assertFalse(server.is_peak_commute_hours(datetime(2026, 1, 1, 19, 0)))
+
+    def test_lighting_and_poll_interval_pair(self):
+        from datetime import datetime
+        peak = datetime(2026, 1, 1, 8, 0)
+        off = datetime(2026, 1, 1, 13, 0)
+        self.assertEqual(server.get_commute_lighting(peak), (8, 12))
+        self.assertEqual(server.get_target_poll_interval(peak), 45)
+        self.assertEqual(server.get_commute_lighting(off), (0, 0))
+        self.assertEqual(server.get_target_poll_interval(off), 600)
+
+
+class TestMdnsAdvertiser(unittest.TestCase):
+    def test_returns_none_when_zeroconf_unavailable(self):
+        original = server.ZEROCONF_AVAILABLE
+        server.ZEROCONF_AVAILABLE = False
+        try:
+            zc, info = server.start_mdns_advertiser()
+            self.assertIsNone(zc)
+            self.assertIsNone(info)
+        finally:
+            server.ZEROCONF_AVAILABLE = original
+
+    def test_registers_service_when_available(self):
+        original_flag = server.ZEROCONF_AVAILABLE
+        original_zc = getattr(server, "Zeroconf", None)
+        original_info = getattr(server, "ServiceInfo", None)
+        registered = {}
+
+        class FakeZC:
+            def register_service(self, info):
+                registered["info"] = info
+
+            def unregister_service(self, info):
+                registered["unregistered"] = info
+
+            def close(self):
+                registered["closed"] = True
+
+        server.ZEROCONF_AVAILABLE = True
+        server.Zeroconf = FakeZC
+        server.ServiceInfo = lambda *a, **k: {"args": a, "kwargs": k}
+        try:
+            zc, info = server.start_mdns_advertiser(http_port=8000, version="1.2.3")
+            self.assertIsInstance(zc, FakeZC)
+            self.assertIsNotNone(info)
+            self.assertIn("info", registered)
+            self.assertEqual(registered["info"]["kwargs"]["server"], "transittracker.local.")
+        finally:
+            server.ZEROCONF_AVAILABLE = original_flag
+            if original_zc is None:
+                del server.Zeroconf
+            else:
+                server.Zeroconf = original_zc
+            if original_info is None:
+                del server.ServiceInfo
+            else:
+                server.ServiceInfo = original_info
+
+
+class TestForbiddenResponse(unittest.TestCase):
+    def test_send_forbidden_renders_403(self):
+        captured = {}
+
+        class FakeHandler(DashboardHandler):
+            def __init__(self):
+                pass
+
+            def send_response(self, code):
+                captured["code"] = code
+
+            def send_header(self, k, v):
+                pass
+
+            def end_headers(self):
+                pass
+
+            @property
+            def wfile(self):
+                return io.BytesIO()
+
+        FakeHandler()._send_forbidden()
+        self.assertEqual(captured["code"], 403)
+
+
+class TestDiscoveryResponderFailure(unittest.TestCase):
+    def test_bind_failure_is_handled(self):
+        import socket as _socket
+        original = server.socket.socket
+
+        class FakeSock:
+            def setsockopt(self, *a, **k):
+                pass
+
+            def bind(self, *a, **k):
+                raise OSError("permission denied")
+
+        server.socket.socket = lambda *a, **k: FakeSock()
+        try:
+            t = server.start_discovery_responder(http_port=1, version="1")
+            self.assertTrue(t.daemon)
+            time.sleep(0.1)
+        finally:
+            server.socket.socket = original
+
+
+class TestMdnsFailure(unittest.TestCase):
+    def test_registration_exception_returns_none(self):
+        original_flag = server.ZEROCONF_AVAILABLE
+        original_zc = getattr(server, "Zeroconf", None)
+        original_info = getattr(server, "ServiceInfo", None)
+        server.ZEROCONF_AVAILABLE = True
+        server.ServiceInfo = lambda *a, **k: object()
+
+        def boom():
+            raise RuntimeError("cannot bind mdns")
+
+        server.Zeroconf = boom
+        try:
+            zc, info = server.start_mdns_advertiser()
+            self.assertIsNone(zc)
+            self.assertIsNone(info)
+        finally:
+            server.ZEROCONF_AVAILABLE = original_flag
+            if original_zc is None:
+                del server.Zeroconf
+            else:
+                server.Zeroconf = original_zc
+            if original_info is None:
+                del server.ServiceInfo
+            else:
+                server.ServiceInfo = original_info
+
+
+class TestUDPDiscoveryResponder(unittest.TestCase):
+    def test_responder_answers_probe(self):
+        # Bind a responder on an ephemeral discovery port using a patched module constant.
+        original_port = server.DISCOVERY_PORT
+        # Grab a free UDP port.
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+
+        server.DISCOVERY_PORT = port
+        try:
+            t = server.start_discovery_responder(http_port=server.PORT, version="9.9.9")
+            self.assertTrue(t.daemon)
+            time.sleep(0.2)
+
+            client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            client.settimeout(3)
+            try:
+                client.sendto(b"TRANSIT_TRACKER_DISCOVER\n", ("127.0.0.1", port))
+                data, _addr = client.recvfrom(1024)
+                self.assertIn(b"TRANSIT_TRACKER_OFFER", data)
+                self.assertIn(b"9.9.9", data)
+            finally:
+                client.close()
+        finally:
+            server.DISCOVERY_PORT = original_port
+
+
+class TestFormatForKindle(unittest.TestCase):
+    def test_landscape_rotation_and_grayscale(self):
+        base = Image.new("RGB", (800, 480), "white")
+        out = format_for_kindle(base, orientation="landscape", rotation=90)
+        self.assertEqual(out.size, (1236, 1648))
+        self.assertEqual(out.mode, "L")
+
+    def test_non_landscape_is_grayscale(self):
+        base = Image.new("RGB", (800, 480), "white")
+        out = format_for_kindle(base, orientation="portrait")
+        self.assertEqual(out.mode, "L")
+
+
+if __name__ == "__main__":
+    unittest.main()
