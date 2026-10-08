@@ -39,20 +39,21 @@ NJT_USERNAME=your_username
 NJT_PASSWORD=your_password
 ```
 
-### 4. Running the Tracker
+### 4. Running the Tracker (CLI)
 ```bash
 python bus_tracker.py
 ```
 
-Sample output:
-```text
-=== Washington St at 9th St (Stop #20512) ===
-  [126] NEW YORK VIA PORT AUTHORITY -> in 4 mins (Load: LIGHT)
-  [126] NEW YORK VIA PORT AUTHORITY -> in 16 mins (Load: EMPTY)
+### 5. Generating E-Ink Dashboard Images
+Generate a crisp 800×480 black-and-white image formatted for low-power displays (TRMNL, Waveshare 7.5", LilyGO):
+```bash
+# Render using live NJ Transit data:
+python render_dashboard.py
 
-=== Clinton St at 9th St (Stop #20494) ===
-  [126] NEW YORK VIA CLINTON -> in 9 mins (Load: SEATS AVAILABLE)
+# Render with mock peak-commute data for previewing:
+python render_dashboard.py --mock
 ```
+This saves `dashboard.png` in the project root.
 
 ---
 
@@ -60,6 +61,7 @@ Sample output:
 
 - [x] Feasibility research & API reverse-engineering
 - [x] Core Python API client with automatic token refresh
-- [ ] Lightweight local web server / JSON endpoint
-- [ ] Hardware integration: E-ink wall display (TRMNL / Waveshare e-Paper on Raspberry Pi Zero or ESP32)
-- [ ] Home Assistant sensor integration
+- [x] High-contrast 800×480 E-Ink graphic renderer ([render_dashboard.py](file:///Users/mike10010100/git/bus-tracker/render_dashboard.py))
+- [ ] Lightweight local web server / image endpoint (HTTP GET `/dashboard.png`)
+- [ ] Hardware deployment (TRMNL plugin, Waveshare on Pi/ESP32, or LilyGO T5)
+- [ ] Smart scheduling (e.g. active refreshes during 6:30 AM – 9:30 AM commute hours)
