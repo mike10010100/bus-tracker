@@ -17,10 +17,11 @@ import (
 )
 
 const (
-	Version            = "1.6.0"
+	Version            = "1.6.1"
 	BinaryPath         = "/tmp/tracker"
 	ImagePath          = "/tmp/dashboard.png"
-	PollInterval       = 45 * time.Second
+	PeakPollInterval   = 45 * time.Second
+	EcoPollInterval    = 10 * time.Minute
 	ManualHoldDuration = 45 * time.Minute
 )
 
@@ -29,6 +30,7 @@ type TrackerClient struct {
 	client            *http.Client
 	manualLightTime   time.Time
 	manualViewTime    time.Time
+	manualRefreshTime time.Time
 	mu                sync.Mutex
 	refreshCh         chan struct{}
 	lastBinaryMod     string
@@ -94,6 +96,35 @@ func (tc *TrackerClient) setExplicitViewMode(target string) string {
 	tc.viewMode = target
 	tc.manualViewTime = time.Now()
 	return tc.viewMode
+}
+
+func (tc *TrackerClient) markManualInteraction() {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	tc.manualRefreshTime = time.Now()
+}
+
+func (tc *TrackerClient) getNextPollInterval(serverIntervalSec int) time.Duration {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+
+	// If manual interaction occurred within last 45 minutes, stay in fast 45s mode
+	if !tc.manualRefreshTime.IsZero() && time.Since(tc.manualRefreshTime) < ManualHoldDuration {
+		return PeakPollInterval
+	}
+
+	// Use server guidance if provided
+	if serverIntervalSec > 0 {
+		return time.Duration(serverIntervalSec) * time.Second
+	}
+
+	// Fallback calculation based on local time: 45s during rush, 10m off-peak
+	now := time.Now()
+	hour := float64(now.Hour()) + float64(now.Minute())/60.0
+	if (hour >= 7.5 && hour < 9.5) || (hour >= 16.5 && hour < 19.0) {
+		return PeakPollInterval
+	}
+	return EcoPollInterval
 }
 
 func (tc *TrackerClient) getServerURL() string {
@@ -250,6 +281,7 @@ func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context
 		}
 
 		gd.OnSingleTap = func(x, y int32) {
+			tc.markManualInteraction()
 			tc.logRemote(fmt.Sprintf("Single tap recognized at (%d, %d)", x, y))
 			tc.cycleFrontlight()
 		}
@@ -265,6 +297,7 @@ func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context
 		}
 
 		gd.OnTopLeftTap = func(x, y int32) {
+			tc.markManualInteraction()
 			tc.logRemote(fmt.Sprintf("Top-Left corner tapped at (%d, %d)! Refreshing...", x, y))
 			select {
 			case tc.refreshCh <- struct{}{}:
@@ -273,6 +306,7 @@ func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context
 		}
 
 		gd.OnBottomLeftTap = func(x, y int32) {
+			tc.markManualInteraction()
 			newMode := tc.cycleViewMode()
 			tc.logRemote(fmt.Sprintf("Bottom-Left corner tapped at (%d, %d)! View mode cycled to: %s. Refreshing...", x, y, newMode))
 			select {
@@ -282,6 +316,7 @@ func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context
 		}
 
 		gd.OnBusesTap = func(x, y int32) {
+			tc.markManualInteraction()
 			newMode := tc.setExplicitViewMode("evening")
 			tc.logRemote(fmt.Sprintf("BUSES button tapped at (%d, %d)! View set to: %s. Refreshing...", x, y, newMode))
 			select {
@@ -291,6 +326,7 @@ func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context
 		}
 
 		gd.OnBikesTap = func(x, y int32) {
+			tc.markManualInteraction()
 			newMode := tc.setExplicitViewMode("morning")
 			tc.logRemote(fmt.Sprintf("CITI BIKE button tapped at (%d, %d)! View set to: %s. Refreshing...", x, y, newMode))
 			select {
@@ -300,11 +336,13 @@ func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context
 		}
 
 		gd.OnLightTap = func(x, y int32) {
+			tc.markManualInteraction()
 			tc.logRemote(fmt.Sprintf("LIGHT button tapped at (%d, %d)! Cycling frontlight...", x, y))
 			tc.cycleFrontlight()
 		}
 
 		gd.OnRefreshTap = func(x, y int32) {
+			tc.markManualInteraction()
 			tc.logRemote(fmt.Sprintf("REFRESH button tapped at (%d, %d)! Refreshing...", x, y))
 			select {
 			case tc.refreshCh <- struct{}{}:
@@ -429,8 +467,9 @@ func (tc *TrackerClient) checkOTAUpdate(ctx context.Context) bool {
 	return false
 }
 
-// fetchAndDrawDashboard fetches dashboard PNG, applies lighting, and pushes to e-ink
-func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel context.CancelFunc) {
+// fetchAndDrawDashboard fetches dashboard PNG, applies lighting, and pushes to e-ink.
+// Returns the target poll interval in seconds reported by the server header (or 0 if unavailable).
+func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel context.CancelFunc) int {
 	batt := GetBatteryInfo()
 	chargeVal := 0
 	if batt.IsCharging {
@@ -443,7 +482,7 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		tc.handleNetworkError(ctx)
-		return
+		return 0
 	}
 	req.Header.Set("X-Kindle-Battery", strconv.Itoa(batt.Level))
 	req.Header.Set("X-Kindle-Charging", strconv.Itoa(chargeVal))
@@ -452,7 +491,7 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	resp, err := tc.client.Do(req)
 	if err != nil {
 		tc.handleNetworkError(ctx)
-		return
+		return 0
 	}
 	defer resp.Body.Close()
 
@@ -471,12 +510,17 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	if resp.StatusCode == 205 {
 		tc.logRemote("Server sent HTTP 205 Stop signal. Exiting cleanly...")
 		exitCancel()
-		return
+		return 0
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		tc.handleNetworkError(ctx)
-		return
+		return 0
+	}
+
+	var serverPollSec int
+	if pStr := resp.Header.Get("X-Kindle-Poll-Interval"); pStr != "" {
+		serverPollSec, _ = strconv.Atoi(pStr)
 	}
 
 	tc.mu.Lock()
@@ -486,12 +530,12 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	// Write image to /tmp/dashboard.png
 	tmpFile, err := os.Create(ImagePath)
 	if err != nil {
-		return
+		return serverPollSec
 	}
 	_, err = io.Copy(tmpFile, resp.Body)
 	tmpFile.Close()
 	if err != nil {
-		return
+		return serverPollSec
 	}
 
 	// Push directly to Kindle e-ink display
@@ -500,7 +544,7 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	cmd.Stderr = io.Discard
 	_ = cmd.Run()
 
-	// Apply astronomical lighting headers if manual override is inactive
+	// Apply lighting headers if manual override is inactive
 	tc.mu.Lock()
 	manualActive := time.Since(tc.manualLightTime) < ManualHoldDuration
 	tc.mu.Unlock()
@@ -513,13 +557,14 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 
 		if brightStr != "" && brightStr != currB {
 			lipcSet("com.lab126.powerd", "flIntensity", brightStr)
-			tc.logRemote(fmt.Sprintf("Astronomical auto-dimming applied: brightness %s -> %s", currB, brightStr))
+			tc.logRemote(fmt.Sprintf("Commute auto-lighting applied: brightness %s -> %s", currB, brightStr))
 		}
 		if warmStr != "" && warmStr != currW {
 			lipcSet("com.lab126.powerd", "schedAmberLevel", warmStr)
-			tc.logRemote(fmt.Sprintf("Astronomical auto-dimming applied: warmth %s -> %s", currW, warmStr))
+			tc.logRemote(fmt.Sprintf("Commute auto-lighting applied: warmth %s -> %s", currW, warmStr))
 		}
 	}
+	return serverPollSec
 }
 
 func main() {
@@ -538,7 +583,7 @@ func main() {
 	_ = os.WriteFile("/mnt/us/documents/tracker_server.txt", []byte(serverURL), 0644)
 
 	// Send initial startup diagnostic
-	tc.logRemote(fmt.Sprintf("Bus Tracker v%s starting up (server: %s, view: %s)...", Version, serverURL, initialView))
+	tc.logRemote(fmt.Sprintf("Transit Tracker v%s starting up (server: %s, view: %s)...", Version, serverURL, initialView))
 	if devData, err := os.ReadFile("/proc/bus/input/devices"); err == nil {
 		tc.logRemote(fmt.Sprintf("Input devices:\n%s", string(devData)))
 	}
@@ -560,9 +605,8 @@ func main() {
 	go tc.startPowerListener(ctx, cancel)
 
 	// Initial fetch
-	tc.fetchAndDrawDashboard(ctx, cancel)
-
-	ticker := time.NewTicker(PollInterval)
+	initialPollSec := tc.fetchAndDrawDashboard(ctx, cancel)
+	ticker := time.NewTicker(tc.getNextPollInterval(initialPollSec))
 	defer ticker.Stop()
 
 	for {
@@ -573,15 +617,19 @@ func main() {
 
 		case <-tc.refreshCh:
 			// Forced refresh requested via screen tap
-			tc.fetchAndDrawDashboard(ctx, cancel)
+			serverPollSec := tc.fetchAndDrawDashboard(ctx, cancel)
+			nextInterval := tc.getNextPollInterval(serverPollSec)
+			ticker.Reset(nextInterval)
 
 		case <-ticker.C:
-			// 1. Check for OTA binary update on Mac
+			// 1. Check for OTA binary update on server
 			if tc.checkOTAUpdate(ctx) {
 				return // Replaced by new binary via syscall.Exec
 			}
 			// 2. Fetch and render latest dashboard
-			tc.fetchAndDrawDashboard(ctx, cancel)
+			serverPollSec := tc.fetchAndDrawDashboard(ctx, cancel)
+			nextInterval := tc.getNextPollInterval(serverPollSec)
+			ticker.Reset(nextInterval)
 		}
 	}
 }

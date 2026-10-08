@@ -22,7 +22,7 @@ from render_dashboard import render_dashboard, STOPS, get_mock_data, resolve_vie
 
 PORT = int(os.environ.get("PORT", 8000))
 DISCOVERY_PORT = 8001
-SERVER_VERSION = "1.6.0"
+SERVER_VERSION = "1.6.1"
 CACHE_TTL = 30  # Re-fetch from NJ Transit at most once every 30 seconds
 cached_image_bytes = None
 last_render_time = 0
@@ -146,23 +146,38 @@ def format_for_kindle(base_img, orientation="landscape", rotation=90):
     return base_img.convert("L")
 
 
-def get_astronomical_lighting():
+def is_peak_commute_hours(dt=None):
+    """
+    Returns True during peak commute windows in Hoboken, NJ:
+    - Morning commute: 7:30 AM - 9:30 AM
+    - Evening commute: 4:30 PM - 7:00 PM (16:30 - 19:00)
+    """
+    if dt is None:
+        dt = datetime.now()
+    hour = dt.hour + dt.minute / 60.0
+    return (7.5 <= hour < 9.5) or (16.5 <= hour < 19.0)
+
+
+def get_astronomical_lighting(dt=None):
     """
     Returns (brightness, warmth) based on Hoboken, NJ local time.
-    Values range from 0 to 24.
+    Cozy ambient glow (8, 12) during peak morning & evening commute windows.
+    Off (0, 0) during off-peak and overnight hours to save battery.
     """
-    now = datetime.now()
-    hour = now.hour + now.minute / 60.0
-
-    # 7:30 AM to 6:30 PM (18.5) -> Daytime: Off (0, 0)
-    if 7.5 <= hour < 18.5:
-        return 0, 0
-    # 6:30 PM to 11:00 PM (23.0) -> Evening: Cozy Warm Glow (8, 12)
-    elif 18.5 <= hour < 23.0:
+    if is_peak_commute_hours(dt=dt):
         return 8, 12
-    # 11:00 PM to 7:30 AM -> Night: Dark (0, 0)
-    else:
-        return 0, 0
+    return 0, 0
+
+
+def get_target_poll_interval(dt=None):
+    """
+    Returns target Kindle poll interval in seconds:
+    - 45s during peak commute rush
+    - 600s (10 min) off-peak Eco Mode
+    """
+    if is_peak_commute_hours(dt=dt):
+        return 45
+    return 600
 
 
 tracker_stopped = False
@@ -317,11 +332,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             img_bytes = buf.getvalue()
 
             brightness, warmth = get_astronomical_lighting()
+            poll_interval = get_target_poll_interval()
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
             self.send_header("Content-Length", str(len(img_bytes)))
             self.send_header("X-Kindle-Brightness", str(brightness))
             self.send_header("X-Kindle-Warmth", str(warmth))
+            self.send_header("X-Kindle-Poll-Interval", str(poll_interval))
             self.send_header("X-Tracker-Server", f"http://{get_local_ip()}:{PORT}")
             self.send_header("X-Tracker-View", view_param)
             self.send_header("X-Resolved-View", resolve_view(view_param))
