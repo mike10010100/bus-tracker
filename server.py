@@ -5,12 +5,22 @@ import io
 import urllib.parse
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import socket
+import threading
 from PIL import Image
+
+try:
+    from zeroconf import Zeroconf, ServiceInfo
+    ZEROCONF_AVAILABLE = True
+except ImportError:
+    ZEROCONF_AVAILABLE = False
 
 from bus_tracker import NJTransitBusTracker
 from render_dashboard import render_dashboard, STOPS, get_mock_data
 
-PORT = 8000
+PORT = int(os.environ.get("PORT", 8000))
+DISCOVERY_PORT = 8001
+SERVER_VERSION = "1.4.0"
 CACHE_TTL = 30  # Re-fetch from NJ Transit at most once every 30 seconds
 cached_image_bytes = None
 last_render_time = 0
@@ -195,6 +205,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             stat = os.stat(file_path)
             last_mod = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime(stat.st_mtime))
+            print(f"[Server OTA] client={self.address_string()} cmd={self.command} version={SERVER_VERSION} ims={self.headers.get('If-Modified-Since')}")
 
             # Handle conditional request (If-Modified-Since)
             ims = self.headers.get("If-Modified-Since")
@@ -207,7 +218,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(stat.st_size))
             self.send_header("Last-Modified", last_mod)
-            self.send_header("X-Tracker-Version", "1.3.0")
+            self.send_header("X-Tracker-Version", SERVER_VERSION)
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
 
@@ -330,7 +341,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 def get_local_ip():
     try:
-        import socket
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
@@ -338,6 +348,74 @@ def get_local_ip():
         return ip
     except Exception:
         return "localhost"
+
+
+def start_discovery_responder(http_port=PORT, version=SERVER_VERSION):
+    """
+    Listens on UDP 8001 for BUS_TRACKER_DISCOVER broadcasts
+    and replies with the server URL and version.
+    """
+    def responder_loop():
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass
+        try:
+            sock.bind(("", DISCOVERY_PORT))
+            print(f"[Discovery] UDP broadcast responder active on port {DISCOVERY_PORT}")
+        except Exception as e:
+            print(f"[Discovery] Could not bind UDP {DISCOVERY_PORT}: {e}")
+            return
+
+        while True:
+            try:
+                data, addr = sock.recvfrom(1024)
+                msg = data.decode("utf-8", errors="ignore").strip()
+                if "BUS_TRACKER_DISCOVER" in msg:
+                    resp_ip = get_local_ip()
+                    reply = f"BUS_TRACKER_OFFER http://{resp_ip}:{http_port} {version}\n".encode("utf-8")
+                    sock.sendto(reply, addr)
+                    print(f"[Discovery] Answered probe from {addr[0]}:{addr[1]} -> http://{resp_ip}:{http_port}")
+            except Exception:
+                pass
+
+    t = threading.Thread(target=responder_loop, daemon=True, name="DiscoveryResponder")
+    t.start()
+    return t
+
+
+def start_mdns_advertiser(http_port=PORT, version=SERVER_VERSION):
+    """
+    Registers _bustracker._tcp.local. service with Zeroconf / mDNS.
+    """
+    if not ZEROCONF_AVAILABLE:
+        print("[mDNS] Zeroconf library not installed; skipping mDNS advertisement.")
+        return None, None
+
+    try:
+        local_ip = get_local_ip()
+        ip_bytes = socket.inet_aton(local_ip)
+        service_type = "_bustracker._tcp.local."
+        service_name = f"BusTracker._bustracker._tcp.local."
+        desc = {"version": version, "endpoint": "/dashboard.png"}
+
+        info = ServiceInfo(
+            service_type,
+            service_name,
+            addresses=[ip_bytes],
+            port=http_port,
+            properties=desc,
+            server="bustracker.local.",
+        )
+        zc = Zeroconf()
+        zc.register_service(info)
+        print(f"[mDNS] Registered service {service_name} at {local_ip}:{http_port}")
+        return zc, info
+    except Exception as e:
+        print(f"[mDNS] Failed to register Zeroconf service: {e}")
+        return None, None
 
 
 if __name__ == "__main__":
@@ -348,9 +426,21 @@ if __name__ == "__main__":
     print(f"  NJ Transit Bus Tracker Server Running on Port {PORT}")
     print(f"  Local View:      http://localhost:{PORT}")
     print(f"  Kindle Endpoint: http://{local_ip}:{PORT}/dashboard.png?kindle=pw5")
+    print(f"  Auto-Discovery:  UDP Port {DISCOVERY_PORT} & mDNS (_bustracker._tcp.local)")
     print(f"==================================================")
+
+    start_discovery_responder(http_port=PORT, version=SERVER_VERSION)
+    zc, mdns_info = start_mdns_advertiser(http_port=PORT, version=SERVER_VERSION)
+
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\nStopping server...")
+    finally:
+        if zc and mdns_info:
+            try:
+                zc.unregister_service(mdns_info)
+                zc.close()
+            except Exception:
+                pass
         httpd.server_close()

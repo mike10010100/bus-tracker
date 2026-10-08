@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"strings"
@@ -16,11 +17,22 @@ var DefaultCandidateServers = []string{
 // 1. Command-line argument (-server <url> or -server=<url>)
 // 2. Environment variable (TRACKER_SERVER)
 // 3. Configuration file in Kindle storage (/mnt/us/documents/tracker_server.txt)
-// 4. Default candidates probe (finds reachable server on current subnet)
+// 4. LAN Auto-discovery (UDP broadcast & Subnet sweep)
+// 5. Default candidate servers probe
 func ResolveServerURL(
 	args []string,
 	getenv func(string) string,
 	readFile func(string) ([]byte, error),
+) string {
+	return ResolveServerURLWithDiscoverer(args, getenv, readFile, nil)
+}
+
+// ResolveServerURLWithDiscoverer allows dependency injection of auto-discovery for testing
+func ResolveServerURLWithDiscoverer(
+	args []string,
+	getenv func(string) string,
+	readFile func(string) ([]byte, error),
+	discoverer func() (string, error),
 ) string {
 	// 1. Command-line flags
 	for i, arg := range args {
@@ -49,8 +61,8 @@ func ResolveServerURL(
 	// 3. Configuration files
 	if readFile != nil {
 		paths := []string{
-			"/mnt/us/documents/tracker_server.txt",
-			"/tmp/tracker_server.txt",
+			ServerConfigFile,
+			FallbackConfigFile,
 		}
 		for _, p := range paths {
 			if data, err := readFile(p); err == nil {
@@ -62,9 +74,16 @@ func ResolveServerURL(
 		}
 	}
 
-	// 4. Test candidate servers with short timeout to detect reachable host
+	// 4. LAN Auto-Discovery
+	if discoverer != nil {
+		if discovered, err := discoverer(); err == nil && discovered != "" {
+			return discovered
+		}
+	}
+
+	// 5. Test candidate servers with short timeout to detect reachable host
 	for _, candidate := range DefaultCandidateServers {
-		client := &http.Client{Timeout: 600 * time.Millisecond}
+		client := &http.Client{Timeout: 400 * time.Millisecond}
 		resp, err := client.Head(candidate + "/tracker-arm")
 		if err == nil {
 			resp.Body.Close()
@@ -77,7 +96,16 @@ func ResolveServerURL(
 	return DefaultCandidateServers[0]
 }
 
-// GetServerURL resolves server URL using production environment
+// GetServerURL resolves server URL using production environment and auto-discovery
 func GetServerURL() string {
-	return ResolveServerURL(os.Args, os.Getenv, os.ReadFile)
+	return ResolveServerURLWithDiscoverer(
+		os.Args,
+		os.Getenv,
+		os.ReadFile,
+		func() (string, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			return AutoDiscoverServer(ctx)
+		},
+	)
 }

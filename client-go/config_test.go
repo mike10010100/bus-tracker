@@ -74,3 +74,21 @@ func TestResolveServerURL(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveServerURLWithDiscoverer(t *testing.T) {
+	mockDiscover := func() (string, error) {
+		return "http://192.168.86.77:8000", nil
+	}
+
+	got := ResolveServerURLWithDiscoverer(
+		[]string{"/tmp/tracker"},
+		func(k string) string { return "" },
+		func(p string) ([]byte, error) { return nil, errors.New("no file") },
+		mockDiscover,
+	)
+
+	want := "http://192.168.86.77:8000"
+	if got != want {
+		t.Errorf("ResolveServerURLWithDiscoverer() = %q, want %q", got, want)
+	}
+}

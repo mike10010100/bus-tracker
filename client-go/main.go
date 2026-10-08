@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	Version            = "1.3.0"
+	Version            = "1.4.0"
 	BinaryPath         = "/tmp/tracker"
 	ImagePath          = "/tmp/dashboard.png"
 	PollInterval       = 45 * time.Second
@@ -25,12 +25,13 @@ const (
 )
 
 type TrackerClient struct {
-	serverURL       string
-	client          *http.Client
-	manualLightTime time.Time
-	mu              sync.Mutex
-	refreshCh       chan struct{}
-	lastBinaryMod   string
+	serverURL         string
+	client            *http.Client
+	manualLightTime   time.Time
+	mu                sync.Mutex
+	refreshCh         chan struct{}
+	lastBinaryMod     string
+	consecutiveErrors int
 }
 
 func NewTrackerClient(server string) *TrackerClient {
@@ -43,10 +44,23 @@ func NewTrackerClient(server string) *TrackerClient {
 	}
 }
 
-// logRemote sends non-blocking diagnostic logs to Mac server
+func (tc *TrackerClient) getServerURL() string {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	return tc.serverURL
+}
+
+func (tc *TrackerClient) setServerURL(url string) {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	tc.serverURL = url
+}
+
+// logRemote sends non-blocking diagnostic logs to the active server
 func (tc *TrackerClient) logRemote(msg string) {
+	server := tc.getServerURL()
 	go func() {
-		req, err := http.NewRequest("POST", tc.serverURL+"/log", strings.NewReader(msg))
+		req, err := http.NewRequest("POST", server+"/log", strings.NewReader(msg))
 		if err == nil {
 			req.Header.Set("Content-Type", "text/plain")
 			resp, err := tc.client.Do(req)
@@ -55,6 +69,25 @@ func (tc *TrackerClient) logRemote(msg string) {
 			}
 		}
 	}()
+}
+
+func (tc *TrackerClient) handleNetworkError(ctx context.Context) {
+	tc.mu.Lock()
+	tc.consecutiveErrors++
+	errCount := tc.consecutiveErrors
+	tc.mu.Unlock()
+
+	// After 3 consecutive failed polls (~2-3 min), attempt LAN auto-discovery
+	if errCount >= 3 {
+		tc.logRemote(fmt.Sprintf("Server unreachable (%d errors). Triggering LAN auto-discovery...", errCount))
+		if discovered, err := AutoDiscoverServer(ctx); err == nil && discovered != "" {
+			tc.setServerURL(discovered)
+			tc.mu.Lock()
+			tc.consecutiveErrors = 0
+			tc.mu.Unlock()
+			tc.logRemote(fmt.Sprintf("LAN Auto-discovery re-routed server to %s", discovered))
+		}
+	}
 }
 
 // lipcSet executes a lipc-set-prop command, discarding output
@@ -226,9 +259,10 @@ func (tc *TrackerClient) startPowerListener(ctx context.Context, exitCancel cont
 	}
 }
 
-// checkOTAUpdate checks if Mac server has a newer binary build and hot-swaps in-place
+// checkOTAUpdate checks if server has a newer binary build and hot-swaps in-place
 func (tc *TrackerClient) checkOTAUpdate(ctx context.Context) bool {
-	req, err := http.NewRequestWithContext(ctx, "HEAD", tc.serverURL+"/tracker-arm", nil)
+	server := tc.getServerURL()
+	req, err := http.NewRequestWithContext(ctx, "HEAD", server+"/tracker-arm", nil)
 	if err != nil {
 		return false
 	}
@@ -261,7 +295,7 @@ func (tc *TrackerClient) checkOTAUpdate(ctx context.Context) bool {
 		tc.logRemote(fmt.Sprintf("OTA update triggered: %s. Hot-reloading...", reason))
 
 		updatePath := "/tmp/tracker.update"
-		getReq, _ := http.NewRequestWithContext(ctx, "GET", tc.serverURL+"/tracker-arm", nil)
+		getReq, _ := http.NewRequestWithContext(ctx, "GET", server+"/tracker-arm", nil)
 		getResp, err := tc.client.Do(getReq)
 		if err != nil || getResp.StatusCode != http.StatusOK {
 			return false
@@ -282,10 +316,9 @@ func (tc *TrackerClient) checkOTAUpdate(ctx context.Context) bool {
 		_ = os.Rename(updatePath, BinaryPath)
 		_ = os.Chmod(BinaryPath, 0755)
 
-		_ = os.WriteFile("/tmp/tracker_server.txt", []byte(tc.serverURL), 0644)
-		_ = os.WriteFile("/mnt/us/documents/tracker_server.txt", []byte(tc.serverURL), 0644)
+		_ = SaveServerURL(server)
 
-		newArgs := []string{BinaryPath, "-server", tc.serverURL}
+		newArgs := []string{BinaryPath, "-server", server}
 		tc.logRemote("Executing updated binary via syscall.Exec...")
 		_ = syscall.Exec(BinaryPath, newArgs, os.Environ())
 		return true
@@ -301,9 +334,11 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 		chargeVal = 1
 	}
 
-	url := fmt.Sprintf("%s/dashboard.png?kindle=pw5&batt=%d&charging=%d&t=%d", tc.serverURL, batt.Level, chargeVal, time.Now().Unix())
+	server := tc.getServerURL()
+	url := fmt.Sprintf("%s/dashboard.png?kindle=pw5&batt=%d&charging=%d&t=%d", server, batt.Level, chargeVal, time.Now().Unix())
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
+		tc.handleNetworkError(ctx)
 		return
 	}
 	req.Header.Set("X-Kindle-Battery", strconv.Itoa(batt.Level))
@@ -311,6 +346,7 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 
 	resp, err := tc.client.Do(req)
 	if err != nil {
+		tc.handleNetworkError(ctx)
 		return
 	}
 	defer resp.Body.Close()
@@ -323,8 +359,13 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		tc.handleNetworkError(ctx)
 		return
 	}
+
+	tc.mu.Lock()
+	tc.consecutiveErrors = 0
+	tc.mu.Unlock()
 
 	// Write image to /tmp/dashboard.png
 	tmpFile, err := os.Create(ImagePath)
