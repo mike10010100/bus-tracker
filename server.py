@@ -117,10 +117,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.do_GET()
 
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/log":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length).decode("utf-8", errors="replace").strip()
+                print(f"[Kindle Log] {body}")
+            except Exception as e:
+                print(f"[Server] Error reading log: {e}")
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self.send_response(404)
+        self.end_headers()
+
     def do_GET(self):
         global tracker_stopped
         parsed = urllib.parse.urlparse(self.path)
         params = urllib.parse.parse_qs(parsed.query)
+
+        if parsed.path == "/log":
+            msg = params.get("msg", [""])[0]
+            print(f"[Kindle Log] {msg}")
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
 
         if parsed.path == "/stop":
             tracker_stopped = True
@@ -165,12 +189,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(stat.st_size))
             self.send_header("Last-Modified", last_mod)
+            self.send_header("X-Tracker-Version", "1.2.1")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
 
             if self.command == "GET":
-                with open(file_path, "rb") as f:
-                    self.wfile.write(f.read())
+                try:
+                    with open(file_path, "rb") as f:
+                        self.wfile.write(f.read())
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
             return
 
         if parsed.path in ["/dashboard.png", "/bus.png"]:
@@ -266,13 +294,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
         print(f"[Server] {self.address_string()} - {args[0]}")
 
 
+def get_local_ip():
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "localhost"
+
+
 if __name__ == "__main__":
     server_address = ("", PORT)
     httpd = HTTPServer(server_address, DashboardHandler)
+    local_ip = get_local_ip()
     print(f"==================================================")
     print(f"  NJ Transit Bus Tracker Server Running on Port {PORT}")
-    print(f"  Local Mac View:  http://localhost:{PORT}")
-    print(f"  Kindle Endpoint: http://192.168.86.193:{PORT}/dashboard.png?kindle=pw5")
+    print(f"  Local View:      http://localhost:{PORT}")
+    print(f"  Kindle Endpoint: http://{local_ip}:{PORT}/dashboard.png?kindle=pw5")
     print(f"==================================================")
     try:
         httpd.serve_forever()

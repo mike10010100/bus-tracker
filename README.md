@@ -1,35 +1,79 @@
-# NJ Transit Bus Tracker (Route 126)
+# NJ Transit 126 Bus Tracker (E-Ink Dashboard & Kindle Client)
 
 A real-time bus arrival tracker for NJ Transit Route 126 in Hoboken, NJ, tracking NYC-bound buses at:
 - **Washington St at 9th St** (Stop `#20512`)
 - **Clinton St at 9th St** (Stop `#20494`)
 
-Built to eventually power an e-ink wall display or smart home dashboard.
+Built for low-power e-ink wall displays and jailbroken Amazon Kindle devices (tested on Kindle Paperwhite 5 / PW5).
 
 ---
 
-## How It Works
+## Architecture Overview
 
-This client interfaces directly with NJ Transit's official **Bus DepartureVision (BUSDV2)** API (`https://pcsdata.njtransit.com/api/BUSDV2`).
+```mermaid
+flowchart TD
+    subgraph Cloud["External APIs"]
+        NJT["NJ Transit BUSDV2 API"]
+        GQL["NJ Transit GraphQL Fallback"]
+    end
 
-- **Automated Authentication**: NJ Transit issues 24-hour API tokens. The client handles token generation and renewal automatically in the background without any manual interaction.
-- **Real-Time Data**: Fetches live arrival estimates (`"in 4 mins"`, `"APPROACHING"`), passenger occupancy load, and vehicle IDs for each stop.
+    subgraph Host["Host Server (Mac / Linux / Raspberry Pi)"]
+        Tracker["bus_tracker.py (Dual-Source Poller)"]
+        Renderer["render_dashboard.py (8-bit Grayscale Pillow Canvas)"]
+        Server["server.py (HTTP Server on Port 8000)"]
+        Tracker --> Renderer --> Server
+    end
+
+    subgraph Kindle["Kindle Paperwhite (PW5)"]
+        Launcher["BusTracker.sh (Bootstrap Launcher)"]
+        GoClient["tracker-arm (Native Go Client v1.2.1)"]
+        EIPS["eips (Native E-Ink Framebuffer)"]
+        Touch["pt_mt Multi-Touch Digitizer (/dev/input/event1)"]
+        Power["bd71828-pwrkey Power Key (/dev/input/event0)"]
+        
+        Launcher -->|OTA Hot-Reload| GoClient
+        GoClient -->|Push Framebuffer| EIPS
+        Touch -->|Single Tap: Cycle Light\nDouble Tap: Exit| GoClient
+        Power -->|Hardware Press: Exit| GoClient
+    end
+
+    NJT --> Tracker
+    GQL --> Tracker
+    Server -->|dashboard.png?kindle=pw5| GoClient
+    Server -->|tracker-arm (OTA Updates)| Launcher
+```
 
 ---
 
-## Setup
+## Features
 
-### 1. Developer Account
-Register for a free account at the [NJ Transit Developer Portal](https://developer.njtransit.com/registration). Once approved, you will receive your API username and password.
+- **Dual-Redundancy Arrival Engine:** Primary polling against NJ Transit DepartureVision (BUSDV2) with instant automatic fallback to public GraphQL API.
+- **Native Kindle Paperwhite 5 Support:** Standalone statically linked Go ARM client running in memory (`/tmp/tracker`).
+- **Touch Gestures:**
+  - **Single Tap Anywhere:** Cycles frontlight brightness (**Off** $\rightarrow$ **Cozy 8** $\rightarrow$ **Bright 18** $\rightarrow$ **Off**) instantly without flickering the e-ink screen.
+  - **Double Tap Anywhere (< 380ms):** Clean exit back to the Kindle Library / Home booklet.
+  - **Hardware Power Button:** Clean exit to Kindle Library.
+  - **Top-Right Corner Tap:** Instant exit shortcut.
+  - **Top-Left Corner Tap:** Immediate arrival refresh shortcut.
+- **Astronomical Auto-Dimming:** Automatically adjusts frontlight brightness and warmth based on local astronomical time in Hoboken, NJ (Daytime: Off, Evening: Cozy Amber, Overnight: Dark). Manual tap overrides hold for 45 minutes.
+- **Wireless Over-The-Air (OTA) Hot-Reloading:** The Kindle polls the server and automatically self-updates its running Go binary in RAM via `syscall.Exec` when a new build is available on the server.
+- **Local Fallback Mode:** Caches the last valid binary and offline notification if the server is unreachable.
 
-### 2. Installation
-Install dependencies:
+---
+
+## Setup & Usage
+
+### 1. Host Server Requirements
+- Python 3.9+
+- Go 1.20+ (optional, only needed if rebuilding the Kindle ARM client)
+
+Install Python dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configuration
-Copy `.env.example` to `.env` and fill in your credentials:
+### 2. NJ Transit API Configuration (Optional)
+NJ Transit DepartureVision credentials can be configured via environment variables or a `.env` file:
 ```bash
 cp .env.example .env
 ```
@@ -38,51 +82,54 @@ Edit `.env`:
 NJT_USERNAME=your_username
 NJT_PASSWORD=your_password
 ```
+*(Note: If credentials are not provided, the tracker automatically falls back to NJ Transit's public arrival API without authentication).*
 
-### 4. Running the Tracker (CLI)
-```bash
-python bus_tracker.py
-```
-
-### 5. Generating E-Ink Dashboard Images
-Generate a crisp 800×480 black-and-white image formatted for low-power displays (TRMNL, Waveshare 7.5", LilyGO):
-```bash
-# Render using live NJ Transit data:
-python render_dashboard.py
-
-# Render with mock peak-commute data for previewing:
-python render_dashboard.py --mock
-```
-This saves `dashboard.png` in the project root.
-
-### 5. Running the Local Dashboard Server
-Start the local server that generates and serves images over your Wi-Fi network:
+### 3. Running the Server
 ```bash
 python server.py
 ```
-* **Web View (Auto-reloading):** `http://localhost:8000`
-* **Kindle Endpoint:** `http://<YOUR_MAC_IP>:8000/dashboard.png?kindle=pw5`
+- **Web UI (Auto-reloading):** `http://localhost:8000`
+- **Kindle Image Endpoint:** `http://<SERVER_IP>:8000/dashboard.png?kindle=pw5`
 
 ---
 
-## Kindle Paperwhite Dashboard Setup
+## Kindle Paperwhite Setup
 
-If using a jailbroken **Kindle Paperwhite (PW5)**:
-
-1. Copy `BusTracker.sh` to your Kindle's `documents/` folder.
-2. In your Kindle Library, tap **"126 Bus Tracker"**.
-3. The script will:
-   * Disable the screensaver timeout.
-   * Auto-fetch `dashboard.png?kindle=pw5` from your Mac server every 45 seconds.
-   * Render it directly to the e-ink screen using Kindle's native `eips` framebuffer tool.
+1. Copy `BusTracker.sh` to your Kindle's `documents/` directory:
+   ```bash
+   cp BusTracker.sh /Volumes/Kindle/documents/
+   ```
+2. *(Optional)* Configure your server address:
+   - Either set `SERVER="http://<YOUR_IP>:8000"` inside `BusTracker.sh`, OR
+   - Create a text file `/Volumes/Kindle/documents/tracker_server.txt` containing your server URL (e.g. `http://192.168.1.100:8000`).
+3. Safely eject the Kindle.
+4. In your Kindle Library, tap **"126 Bus Tracker"**.
 
 ---
 
-## Roadmap
+## Building the Go Client
 
-- [x] Feasibility research & API reverse-engineering
-- [x] Core Python API client with automatic token refresh
-- [x] High-contrast 800×480 E-Ink graphic renderer ([render_dashboard.py](file:///Users/mike10010100/git/bus-tracker/render_dashboard.py))
-- [x] Local HTTP image server with caching and Kindle PW5 rotation ([server.py](file:///Users/mike10010100/git/bus-tracker/server.py))
-- [x] Native Kindle Paperwhite scriptlet ([BusTracker.sh](file:///Users/mike10010100/git/bus-tracker/BusTracker.sh))
-- [ ] Smart scheduling (e.g. active refreshes during 6:30 AM – 9:30 AM commute hours)
+To compile the ARM binary for Kindle:
+```bash
+cd client-go
+CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="-s -w" -o ../tracker-arm main.go
+```
+Any running Kindle connected to your server will detect the new build on its next 45-second poll cycle and update itself over Wi-Fi.
+
+---
+
+## Development & Verification Suite
+
+Run the full Go test and verification suite:
+```bash
+make test    # Run unit tests with race detection
+make vet     # Static analysis with go vet
+make fmt     # Format check with gofmt
+make check   # Run complete verification suite
+```
+
+---
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.

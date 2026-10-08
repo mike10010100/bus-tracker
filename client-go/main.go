@@ -1,15 +1,14 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,42 +17,12 @@ import (
 )
 
 const (
-	Version       = "1.1.0"
-	ServerURL     = "http://192.168.86.193:8000"
-	BinaryPath    = "/tmp/tracker"
-	ImagePath     = "/tmp/dashboard.png"
-	PollInterval  = 45 * time.Second
+	Version            = "1.2.1"
+	BinaryPath         = "/tmp/tracker"
+	ImagePath          = "/tmp/dashboard.png"
+	PollInterval       = 45 * time.Second
 	ManualHoldDuration = 45 * time.Minute
 )
-
-// Linux input subsystem constants
-const (
-	EV_SYN    = 0x00
-	EV_KEY    = 0x01
-	EV_ABS    = 0x03
-	BTN_TOUCH = 0x14a // 330
-
-	ABS_X             = 0x00
-	ABS_Y             = 0x01
-	ABS_MT_POSITION_X = 0x35
-	ABS_MT_POSITION_Y = 0x36
-)
-
-type inputEvent32 struct {
-	Sec   int32
-	Usec  int32
-	Type  uint16
-	Code  uint16
-	Value int32
-}
-
-type inputEvent64 struct {
-	Sec   int64
-	Usec  int64
-	Type  uint16
-	Code  uint16
-	Value int32
-}
 
 type TrackerClient struct {
 	serverURL       string
@@ -72,6 +41,20 @@ func NewTrackerClient(server string) *TrackerClient {
 		},
 		refreshCh: make(chan struct{}, 1),
 	}
+}
+
+// logRemote sends non-blocking diagnostic logs to Mac server
+func (tc *TrackerClient) logRemote(msg string) {
+	go func() {
+		req, err := http.NewRequest("POST", tc.serverURL+"/log", strings.NewReader(msg))
+		if err == nil {
+			req.Header.Set("Content-Type", "text/plain")
+			resp, err := tc.client.Do(req)
+			if err == nil {
+				resp.Body.Close()
+			}
+		}
+	}()
 }
 
 // lipcSet executes a lipc-set-prop command, discarding output
@@ -95,6 +78,8 @@ func lipcGet(prop, key string) string {
 
 // cleanup performs full cleanup, resets screensaver, clears screen, and restores Kindle UI
 func (tc *TrackerClient) cleanup() {
+	tc.logRemote("Cleaning up and exiting to Kindle Home...")
+
 	// Re-enable screensaver
 	lipcSet("com.lab126.powerd", "preventScreenSaver", "0")
 
@@ -117,167 +102,108 @@ func (tc *TrackerClient) cycleFrontlight() {
 	currStr := lipcGet("com.lab126.powerd", "flIntensity")
 	curr, _ := strconv.Atoi(currStr)
 
-	var nextIntensity, nextWarmth int
-	switch {
-	case curr == 0:
-		nextIntensity = 8
-		nextWarmth = 12
-	case curr <= 12:
-		nextIntensity = 18
-		nextWarmth = 8
-	default:
-		nextIntensity = 0
-		nextWarmth = 0
-	}
+	nextIntensity, nextWarmth := NextFrontlightState(curr)
 
 	lipcSet("com.lab126.powerd", "flIntensity", strconv.Itoa(nextIntensity))
 	lipcSet("com.lab126.powerd", "schedAmberLevel", strconv.Itoa(nextWarmth))
+	tc.logRemote(fmt.Sprintf("Frontlight cycled: %s -> intensity %d (warmth %d)", currStr, nextIntensity, nextWarmth))
 }
 
-// findTouchDevice locates the touchscreen event node in /dev/input
-func findTouchDevice() string {
-	// Check /proc/bus/input/devices first
-	data, err := os.ReadFile("/proc/bus/input/devices")
-	if err == nil {
-		lines := strings.Split(string(data), "\n")
-		isTouch := false
-		for _, line := range lines {
-			lower := strings.ToLower(line)
-			if strings.Contains(lower, "touch") || strings.Contains(lower, "mxt") || strings.Contains(lower, "zforce") || strings.Contains(lower, "cyttsp") {
-				isTouch = true
-			}
-			if isTouch && strings.Contains(line, "Handlers=") {
-				fields := strings.Fields(line)
-				for _, f := range fields {
-					if strings.HasPrefix(f, "event") {
-						candidate := "/dev/input/" + f
-						if _, err := os.Stat(candidate); err == nil {
-							return candidate
-						}
+// startInputListeners opens ALL /dev/input/event* devices and multiplexes events into eventCh
+func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context.CancelFunc) {
+	matches, err := filepath.Glob("/dev/input/event*")
+	if err != nil || len(matches) == 0 {
+		matches = []string{"/dev/input/event0", "/dev/input/event1", "/dev/input/event2"}
+	}
+
+	tc.logRemote(fmt.Sprintf("Found input devices: %v", matches))
+
+	eventCh := make(chan RawEventMsg, 128)
+
+	for _, devPath := range matches {
+		f, err := os.Open(devPath)
+		if err != nil {
+			continue
+		}
+		tc.logRemote(fmt.Sprintf("Opened input device listener on %s", devPath))
+
+		go func(path string, file *os.File) {
+			defer file.Close()
+			buf := make([]byte, 512)
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				n, err := file.Read(buf)
+				if err != nil {
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+
+				events := ParseInputEvents(buf, n, path)
+				for _, ev := range events {
+					select {
+					case eventCh <- ev:
+					default:
 					}
 				}
 			}
-			if strings.TrimSpace(line) == "" {
-				isTouch = false
+		}(devPath, f)
+	}
+
+	// Dispatcher goroutine: processes all events from all devices
+	go func() {
+		gd := NewGestureDetector(DefaultGestureConfig())
+		defer gd.Stop()
+
+		gd.OnLog = func(msg string) {
+			tc.logRemote(msg)
+		}
+
+		gd.OnSingleTap = func(x, y int32) {
+			tc.logRemote(fmt.Sprintf("Single tap recognized at (%d, %d)", x, y))
+			tc.cycleFrontlight()
+		}
+
+		gd.OnDoubleTap = func(x, y int32) {
+			tc.logRemote(fmt.Sprintf("Double tap recognized at (%d, %d)! Exiting cleanly...", x, y))
+			cancel()
+		}
+
+		gd.OnTopRightTap = func(x, y int32) {
+			tc.logRemote(fmt.Sprintf("Top-Right corner tapped at (%d, %d)! Exiting...", x, y))
+			cancel()
+		}
+
+		gd.OnTopLeftTap = func(x, y int32) {
+			tc.logRemote(fmt.Sprintf("Top-Left corner tapped at (%d, %d)! Refreshing...", x, y))
+			select {
+			case tc.refreshCh <- struct{}{}:
+			default:
 			}
 		}
-	}
 
-	// Fallbacks
-	for _, dev := range []string{"/dev/input/event1", "/dev/input/event0", "/dev/input/event2"} {
-		if _, err := os.Stat(dev); err == nil {
-			return dev
-		}
-	}
-	return "/dev/input/event0"
-}
-
-// startTouchListener reads input_event from touchscreen and handles gestures
-func (tc *TrackerClient) startTouchListener(ctx context.Context, exitCancel context.CancelFunc) {
-	devPath := findTouchDevice()
-	f, err := os.Open(devPath)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	// Detect 16-byte vs 24-byte input_event structure dynamically
-	buf := make([]byte, 24)
-	n, err := f.Read(buf)
-	if err != nil || (n != 16 && n != 24) {
-		// Default to 16 bytes for 32-bit ARM Linux on Kindle
-		n = 16
-	}
-	eventSize := n
-
-	var (
-		curX, curY   int32
-		lastTapTime  time.Time
-		tapTimer     *time.Timer
-		tapTimerLock sync.Mutex
-	)
-
-	// Process raw input event
-	processEvent := func(evType, evCode uint16, evValue int32) {
-		if evType == EV_ABS {
-			if evCode == ABS_X || evCode == ABS_MT_POSITION_X {
-				curX = evValue
-			} else if evCode == ABS_Y || evCode == ABS_MT_POSITION_Y {
-				curY = evValue
-			}
-		} else if (evType == EV_KEY && evCode == BTN_TOUCH && evValue == 0) || (evType == EV_ABS && evCode == 0x39 && evValue == -1) {
-			// Finger release / Tap completed!
-			now := time.Now()
-			diff := now.Sub(lastTapTime)
-
-			// 1. Double-Tap Check (within 1.2 seconds) -> EXIT
-			if diff < 1200*time.Millisecond && diff > 50*time.Millisecond {
-				tapTimerLock.Lock()
-				if tapTimer != nil {
-					tapTimer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev := <-eventCh:
+				// 1. Hardware Power Button
+				if IsPowerKeyEvent(ev) {
+					tc.logRemote(fmt.Sprintf("Power button pressed on %s! Exiting...", ev.Device))
+					cancel()
+					return
 				}
-				tapTimerLock.Unlock()
-				exitCancel()
-				return
+
+				// 2. Feed into Gesture Recognizer
+				gd.ProcessEvent(ev)
 			}
-			lastTapTime = now
-
-			// 2. Corner Touch Gestures (assuming 1236 x 1648 or similar coordinates)
-			// Top-Right corner tap -> Immediate Exit
-			if (curX > 1050 && curY < 180) || (curX < 180 && curY > 1450) {
-				exitCancel()
-				return
-			}
-
-			// Top-Left corner tap -> Force immediate refresh
-			if (curX < 200 && curY < 180) || (curX < 200 && curY < 200) {
-				select {
-				case tc.refreshCh <- struct{}{}:
-				default:
-				}
-				return
-			}
-
-			// 3. Normal Single Tap -> Wait briefly to ensure it's not a double-tap, then cycle light
-			tapTimerLock.Lock()
-			if tapTimer != nil {
-				tapTimer.Stop()
-			}
-			tapTimer = time.AfterFunc(350*time.Millisecond, func() {
-				tc.cycleFrontlight()
-			})
-			tapTimerLock.Unlock()
 		}
-	}
-
-	eventBuf := make([]byte, eventSize)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		_, err := io.ReadFull(f, eventBuf)
-		if err != nil {
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-
-		var evType, evCode uint16
-		var evValue int32
-		if eventSize == 16 {
-			var ev inputEvent32
-			_ = binary.Read(bytes.NewReader(eventBuf), binary.LittleEndian, &ev)
-			evType, evCode, evValue = ev.Type, ev.Code, ev.Value
-		} else {
-			var ev inputEvent64
-			_ = binary.Read(bytes.NewReader(eventBuf), binary.LittleEndian, &ev)
-			evType, evCode, evValue = ev.Type, ev.Code, ev.Value
-		}
-
-		processEvent(evType, evCode, evValue)
-	}
+	}()
 }
 
 // startPowerListener watches for power button sleep events via lipc
@@ -293,6 +219,7 @@ func (tc *TrackerClient) startPowerListener(ctx context.Context, exitCancel cont
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard
 		if err := cmd.Run(); err == nil {
+			tc.logRemote("powerd goingToScreenSaver event received! Exiting...")
 			exitCancel()
 			return
 		}
@@ -315,6 +242,7 @@ func (tc *TrackerClient) checkOTAUpdate(ctx context.Context) bool {
 		return false
 	}
 
+	serverVer := resp.Header.Get("X-Tracker-Version")
 	lastMod := resp.Header.Get("Last-Modified")
 	if lastMod == "" {
 		lastMod = resp.Header.Get("ETag")
@@ -323,13 +251,15 @@ func (tc *TrackerClient) checkOTAUpdate(ctx context.Context) bool {
 		lastMod = resp.Header.Get("Content-Length")
 	}
 
+	should, reason := ShouldUpdate(serverVer, Version, lastMod, tc.lastBinaryMod)
+
 	if tc.lastBinaryMod == "" {
 		tc.lastBinaryMod = lastMod
-		return false
 	}
 
-	if lastMod != tc.lastBinaryMod {
-		// Newer binary available on Mac! Download to /tmp/tracker.update
+	if should {
+		tc.logRemote(fmt.Sprintf("OTA update triggered: %s. Hot-reloading...", reason))
+
 		updatePath := "/tmp/tracker.update"
 		getReq, _ := http.NewRequestWithContext(ctx, "GET", tc.serverURL+"/tracker-arm", nil)
 		getResp, err := tc.client.Do(getReq)
@@ -352,8 +282,7 @@ func (tc *TrackerClient) checkOTAUpdate(ctx context.Context) bool {
 		_ = os.Rename(updatePath, BinaryPath)
 		_ = os.Chmod(BinaryPath, 0755)
 
-		// Self-exec hot swap!
-		tc.cleanup()
+		tc.logRemote("Executing updated binary via syscall.Exec...")
 		_ = syscall.Exec(BinaryPath, os.Args, os.Environ())
 		return true
 	}
@@ -376,6 +305,7 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 
 	// HTTP 205 signals remote stop command
 	if resp.StatusCode == 205 {
+		tc.logRemote("Server sent HTTP 205 Stop signal. Exiting cleanly...")
 		exitCancel()
 		return
 	}
@@ -409,25 +339,37 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	if !manualActive {
 		brightStr := resp.Header.Get("X-Kindle-Brightness")
 		warmStr := resp.Header.Get("X-Kindle-Warmth")
-		if brightStr != "" {
+		currB := lipcGet("com.lab126.powerd", "flIntensity")
+		currW := lipcGet("com.lab126.powerd", "schedAmberLevel")
+
+		if brightStr != "" && brightStr != currB {
 			lipcSet("com.lab126.powerd", "flIntensity", brightStr)
+			tc.logRemote(fmt.Sprintf("Astronomical auto-dimming applied: brightness %s -> %s", currB, brightStr))
 		}
-		if warmStr != "" {
+		if warmStr != "" && warmStr != currW {
 			lipcSet("com.lab126.powerd", "schedAmberLevel", warmStr)
+			tc.logRemote(fmt.Sprintf("Astronomical auto-dimming applied: warmth %s -> %s", currW, warmStr))
 		}
 	}
 }
 
 func main() {
-	// Silence standard error
+	// Silence standard error on headless Kindle
 	if nullFile, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0); err == nil {
 		_ = syscall.Dup2(int(nullFile.Fd()), int(os.Stderr.Fd()))
 	}
 
+	serverURL := GetServerURL()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	tc := NewTrackerClient(ServerURL)
+	tc := NewTrackerClient(serverURL)
+
+	// Send initial startup diagnostic
+	tc.logRemote(fmt.Sprintf("Bus Tracker v%s starting up (server: %s)...", Version, serverURL))
+	if devData, err := os.ReadFile("/proc/bus/input/devices"); err == nil {
+		tc.logRemote(fmt.Sprintf("Input devices:\n%s", string(devData)))
+	}
 
 	// Ensure Kindle stays awake while dashboard is running
 	lipcSet("com.lab126.powerd", "preventScreenSaver", "1")
@@ -437,11 +379,12 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
 		<-sigCh
+		tc.logRemote("OS signal received. Exiting...")
 		cancel()
 	}()
 
 	// Start background listeners
-	go tc.startTouchListener(ctx, cancel)
+	tc.startInputListeners(ctx, cancel)
 	go tc.startPowerListener(ctx, cancel)
 
 	// Clear screen on initial launch

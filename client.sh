@@ -5,7 +5,7 @@
 exec 2>/dev/null
 
 VERSION="1.0.0"
-SERVER="http://192.168.86.193:8000"
+SERVER="${SERVER:-http://192.168.1.100:8000}"
 DEST="/tmp/dashboard.png"
 SCRIPT_PATH="/tmp/client.sh"
 SCRIPT_NEW="/tmp/client_new.sh"

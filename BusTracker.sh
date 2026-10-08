@@ -5,7 +5,10 @@
 
 exec 2>/dev/null
 
-SERVER="http://192.168.86.193:8000"
+SERVER="${SERVER:-http://192.168.1.100:8000}"
+if [ -f /mnt/us/documents/tracker_server.txt ]; then
+    SERVER=$(cat /mnt/us/documents/tracker_server.txt | tr -d '\r\n ')
+fi
 BINARY="/tmp/tracker"
 BACKUP="/mnt/us/documents/tracker_backup"
 
@@ -21,14 +24,14 @@ fi
 
 # 2. If valid binary in RAM, execute it
 if [ -x "$BINARY" ]; then
-    exec "$BINARY"
+    exec "$BINARY" -server "$SERVER"
 fi
 
 # 3. If Mac server is offline, launch cached backup from storage
 if [ -s "$BACKUP" ]; then
     cp "$BACKUP" "$BINARY" 2>/dev/null
     chmod +x "$BINARY"
-    exec "$BINARY"
+    exec "$BINARY" -server "$SERVER"
 fi
 
 # 4. If completely offline with no cache, show clean notification and exit
