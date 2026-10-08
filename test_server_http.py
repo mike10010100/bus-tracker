@@ -119,6 +119,47 @@ class TestDashboardRoute(ServerHTTPTestBase):
         self.assertEqual(img.size, (1236, 1648))
         self.assertEqual(img.mode, "L")
 
+    def test_kindle_custom_panel_dimensions_reported_natively(self):
+        # Client reports its landscape panel size; server must render natively
+        # at that size (no bitmap upscaling) then rotate to portrait.
+        status, _headers, body = _http_get(
+            self.port, "/dashboard.png?mock=1&kindle=pw5&w=1648&h=1236&rotate=90"
+        )
+        self.assertEqual(status, 200)
+        img = Image.open(io.BytesIO(body))
+        # Portrait rotation of a 1648x1236 landscape canvas.
+        self.assertEqual(img.size, (1236, 1648))
+        self.assertEqual(img.mode, "L")
+
+    def test_kindle_smaller_panel(self):
+        # A hypothetical smaller panel (e.g. 1072x1448 portrait -> 1448x1072).
+        status, _headers, body = _http_get(
+            self.port, "/dashboard.png?mock=1&kindle=pw5&w=1448&h=1072&rotate=90"
+        )
+        self.assertEqual(status, 200)
+        img = Image.open(io.BytesIO(body))
+        self.assertEqual(img.size, (1072, 1448))
+
+    def test_kindle_bad_dimensions_fall_back(self):
+        # Malformed w/h must not crash; falls back to the PW5 default.
+        status, _headers, body = _http_get(
+            self.port, "/dashboard.png?mock=1&kindle=pw5&w=abc&h=xyz&rotate=90"
+        )
+        self.assertEqual(status, 200)
+        img = Image.open(io.BytesIO(body))
+        self.assertEqual(img.size, (1236, 1648))
+
+    def test_kindle_buffer_sized_dimensions_rejected(self):
+        # A misreporting client may send the double-buffered backing size
+        # (3296x1248 for a 1648x1236 panel); it must be sanitized to the default.
+        status, _headers, body = _http_get(
+            self.port, "/dashboard.png?mock=1&kindle=pw5&w=3296&h=1248&rotate=90"
+        )
+        self.assertEqual(status, 200)
+        img = Image.open(io.BytesIO(body))
+        self.assertEqual(img.size, (1236, 1648))
+        self.assertEqual(server.sanitize_kindle_panel(3296, 1248), server.PW5_LANDSCAPE)
+
     def test_battery_clamped(self):
         # Out-of-range battery must be ignored (rendered without battery), not crash
         status, _headers, body = _http_get(self.port, "/dashboard.png?mock=1&batt=999")
@@ -424,6 +465,29 @@ class TestUDPDiscoveryResponder(unittest.TestCase):
             server.DISCOVERY_PORT = original_port
 
 
+class TestSanitizeKindlePanel(unittest.TestCase):
+    def test_valid_panels_pass_through(self):
+        self.assertEqual(server.sanitize_kindle_panel(1648, 1236), (1648, 1236))
+        self.assertEqual(server.sanitize_kindle_panel(1448, 1072), (1448, 1072))
+        self.assertEqual(server.sanitize_kindle_panel(800, 600), (800, 600))
+
+    def test_buffer_sized_falls_back(self):
+        self.assertEqual(server.sanitize_kindle_panel(3296, 1248), server.PW5_LANDSCAPE)
+
+    def test_out_of_range_falls_back(self):
+        self.assertEqual(server.sanitize_kindle_panel(9999, 9999), server.PW5_LANDSCAPE)
+        self.assertEqual(server.sanitize_kindle_panel(100, 100), server.PW5_LANDSCAPE)
+        self.assertEqual(server.sanitize_kindle_panel(1648, 9999), server.PW5_LANDSCAPE)
+
+    def test_non_numeric_falls_back(self):
+        self.assertEqual(server.sanitize_kindle_panel("abc", "xyz"), server.PW5_LANDSCAPE)
+        self.assertEqual(server.sanitize_kindle_panel(None, None), server.PW5_LANDSCAPE)
+
+    def test_bad_aspect_ratio_falls_back(self):
+        # Very wide or very tall values are rejected.
+        self.assertEqual(server.sanitize_kindle_panel(2000, 600), server.PW5_LANDSCAPE)
+
+
 class TestFormatForKindle(unittest.TestCase):
     def test_landscape_rotation_and_grayscale(self):
         base = Image.new("RGB", (800, 480), "white")
@@ -435,6 +499,23 @@ class TestFormatForKindle(unittest.TestCase):
         base = Image.new("RGB", (800, 480), "white")
         out = format_for_kindle(base, orientation="portrait")
         self.assertEqual(out.mode, "L")
+
+    def test_native_size_is_not_resampled(self):
+        # A base already at the landscape panel size must be rotated as-is,
+        # not resized (preserving native pixel detail).
+        base = Image.new("RGB", (1648, 1236), "white")
+        out = format_for_kindle(base, orientation="landscape", rotation=90)
+        self.assertEqual(out.size, (1236, 1648))
+
+    def test_custom_target_size(self):
+        # 1072x1448 portrait panel -> 1448x1072 landscape.
+        base = Image.new("RGB", (1448, 1072), "white")
+        out = format_for_kindle(base, orientation="landscape", rotation=90, target=(1448, 1072))
+        self.assertEqual(out.size, (1072, 1448))
+
+    def test_native_render_scale(self):
+        self.assertAlmostEqual(server.native_render_scale(1648, 1236, 800), 2.06, places=2)
+        self.assertAlmostEqual(server.native_render_scale(1448, 1072, 800), 1.81, places=2)
 
 
 if __name__ == "__main__":

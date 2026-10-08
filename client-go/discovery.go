@@ -177,6 +177,11 @@ func DiscoverViaSubnetSweep(ctx context.Context, httpPort int) (string, error) {
 	sweepCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Snapshot the verification function so probe goroutines (which may outlive
+	// this call when we return early on a match) capture a stable local value
+	// rather than re-reading the seam concurrently with test cleanup.
+	verify := verifyServerFn
+
 	resultChan := make(chan string, 1)
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 48) // concurrent probe limit
@@ -194,7 +199,7 @@ func DiscoverViaSubnetSweep(ctx context.Context, httpPort int) (string, error) {
 					return
 				}
 
-				if verifyServerFn(sweepCtx, candidate, 400*time.Millisecond) {
+				if verify(sweepCtx, candidate, 400*time.Millisecond) {
 					select {
 					case resultChan <- candidate:
 						cancel()

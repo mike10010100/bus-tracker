@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -24,6 +25,7 @@ func patchRuntime(t *testing.T) {
 	origExec := sysExec
 	origGlob := globInputs
 	origOpen := osOpen
+	origReadFile := osReadFile
 	origGetBattery := GetBatteryInfo
 	origDiscover := autoDiscover
 
@@ -40,6 +42,7 @@ func patchRuntime(t *testing.T) {
 		sysExec = origExec
 		globInputs = origGlob
 		osOpen = origOpen
+		osReadFile = origReadFile
 		GetBatteryInfo = origGetBattery
 		autoDiscover = origDiscover
 	})
@@ -190,6 +193,51 @@ func TestFetchAndDrawDashboard_Success(t *testing.T) {
 	}
 	if tc.lastRenderedView != "morning" {
 		t.Errorf("expected resolved view captured, got %q", tc.lastRenderedView)
+	}
+}
+
+func TestFetchAndDrawDashboard_ReportsPanelDimensions(t *testing.T) {
+	patchRuntime(t)
+	png := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("X-Kindle-Poll-Interval", "45")
+		w.WriteHeader(http.StatusOK)
+		w.Write(png)
+	}))
+	defer srv.Close()
+
+	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
+	osCreate = tempFileCreate(t)
+	osReadFile = func(string) ([]byte, error) { return []byte("1236,1648\n"), nil }
+
+	tc := NewTrackerClient(srv.URL, "auto")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tc.fetchAndDrawDashboard(ctx, cancel)
+
+	if !strings.Contains(gotQuery, "kindle=pw5") {
+		t.Errorf("expected kindle=pw5 in query, got %q", gotQuery)
+	}
+	if !strings.Contains(gotQuery, "w=1648") || !strings.Contains(gotQuery, "h=1236") {
+		t.Errorf("expected native panel dims in query, got %q", gotQuery)
+	}
+}
+
+func TestGetPanelSize_CachesDetection(t *testing.T) {
+	patchRuntime(t)
+	calls := 0
+	osReadFile = func(string) ([]byte, error) {
+		calls++
+		return []byte("1236,1648\n"), nil
+	}
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	_ = tc.getPanelSize()
+	_ = tc.getPanelSize()
+	if calls != 1 {
+		t.Errorf("expected panel size detected once, got %d reads", calls)
 	}
 }
 

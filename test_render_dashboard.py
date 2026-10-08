@@ -9,7 +9,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 import render_dashboard as rd
 
@@ -255,13 +255,13 @@ class TestTextStaysInsideContainers(unittest.TestCase):
         ImageDraw.ImageDraw.text = cls._orig_text
         ImageDraw.ImageDraw.rounded_rectangle = cls._orig_rrect
 
-    def _render_and_collect(self, stops, cb, view, height, **kwargs):
+    def _render_and_collect(self, stops, cb, view, height, scale=1.0, **kwargs):
         type(self).CONTAINER_CALLS = []
         type(self).TEXT_CALLS = []
         rd.render_dashboard(
             stops, citibike_data=cb, output_path="/tmp/_containment.png",
             view=view, is_mock=True, batt_level=77, width=800, height=height,
-            **kwargs,
+            scale=scale, **kwargs,
         )
         return list(self.CONTAINER_CALLS), list(self.TEXT_CALLS)
 
@@ -355,6 +355,101 @@ class TestTextStaysInsideContainers(unittest.TestCase):
                         [], view, height,
                     )
                     self._assert_all_contained(containers, texts, ctx)
+
+    def test_containment_holds_at_native_kindle_scale(self):
+        """
+        Native Kindle rendering scales all geometry and fonts by ~2.06 instead
+        of resampling. The containment invariant must still hold in native
+        coordinate space (where ScaledDraw forwards to the real ImageDraw).
+        """
+        scale = 1648 / 800
+        stops = {
+            "20512": self._arrivals(3, "APPROACHING NOW BOARDING (11:47 PM)", "126 NEW YORK VIA LINCOLN TUNNEL"),
+            "20494": self._arrivals(4, "in 17 mins (8:47 AM)", "126 NEW YORK VIA CLINTON"),
+        }
+        for view in ("morning", "evening"):
+            for height in (600,):
+                ctx = f"native {view} h={height}"
+                containers, texts = self._render_and_collect(
+                    stops, self._cbset(), view, height, scale=scale,
+                )
+                self.assertGreater(len(containers), 3, f"[{ctx}] no containers captured")
+                self.assertGreater(len(texts), 3, f"[{ctx}] no text captured")
+                self._assert_all_contained(containers, texts, ctx)
+
+
+class TestScaledDraw(unittest.TestCase):
+    def _proxy(self, scale):
+        img = Image.new("RGB", (1000, 1000), "white")
+        real = ImageDraw.Draw(img)
+        return img, rd.ScaledDraw(real, scale), real
+
+    def test_scale_one_is_identity(self):
+        img, sd, real = self._proxy(1.0)
+        sd.text((10, 20), "Hi", fill="black", font=rd.get_font(12))
+        a1 = real.textbbox((0, 0), "Hi", font=rd.get_font(12))
+        a2 = sd.textbbox((0, 0), "Hi", font=rd.get_font(12))
+        self.assertEqual(a1, a2)
+
+    def test_textbbox_is_returned_in_logical_units(self):
+        img, sd, real = self._proxy(2.0)
+        font = rd.get_font(20)
+        logical = sd.textbbox((0, 0), "Hello", font=font)
+        # Logical bbox should be about half the native glyph size.
+        native = real.textbbox((0, 0), "Hello", font=sd._font(font))
+        self.assertLess(logical[2] - logical[0], native[2] - native[0])
+        self.assertAlmostEqual((native[2] - native[0]) / 2, logical[2] - logical[0], delta=3)
+
+    def test_fonts_are_reconstructed_larger(self):
+        img, sd, real = self._proxy(3.0)
+        font = rd.get_font(10)
+        scaled = sd._font(font)
+        self.assertGreater(scaled.size, font.size)
+
+    def test_accepts_flat_and_nested_boxes(self):
+        img, sd, real = self._proxy(2.0)
+        sd.rectangle([0, 0, 10, 10], outline="black")
+        sd.rectangle([(0, 0), (10, 10)], outline="black")
+        sd.rounded_rectangle([0, 0, 10, 10], radius=2, outline="black")
+        sd.rounded_rectangle([(0, 0), (10, 10)], radius=2, outline="black")
+
+    def test_native_canvas_is_scaled(self):
+        img, sd, real = self._proxy(2.0)
+        sd.line([(0, 0), (50, 50)], fill="black", width=2)
+        # A logical (50,50) endpoint maps to native (100,100).
+        self.assertEqual(sd._pt((50, 50)), (100.0, 100.0))
+
+    def test_untagged_font_is_passed_through(self):
+        # A font without the transit tags cannot be rescaled; it is used as-is.
+        img, sd, real = self._proxy(2.0)
+        plain = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
+        self.assertIs(sd._font(plain), plain)
+
+    def test_none_font_is_passed_through(self):
+        img, sd, real = self._proxy(2.0)
+        self.assertIsNone(sd._font(None))
+
+    def test_font_cache_returns_same_object(self):
+        img, sd, real = self._proxy(2.0)
+        font = rd.get_font(12)
+        self.assertIs(sd._font(font), sd._font(font))
+
+    def test_outline_none_and_scaling(self):
+        img, sd, real = self._proxy(2.0)
+        self.assertIsNone(sd._outline(None))
+        self.assertEqual(sd._outline(2), 4)
+        self.assertEqual(sd._outline(1), 2)
+
+    def test_textlength_is_logical(self):
+        img, sd, real = self._proxy(2.0)
+        font = rd.get_font(14)
+        logical = sd.textlength("Hello", font=font)
+        native = real.textlength("Hello", font=sd._font(font))
+        self.assertAlmostEqual(native / 2, logical, delta=2)
+
+    def test_polygon_scales(self):
+        img, sd, real = self._proxy(2.0)
+        sd.polygon([(0, 0), (10, 0), (5, 10)], fill="black")
 
 
 class TestEllipsizeToWidth(unittest.TestCase):

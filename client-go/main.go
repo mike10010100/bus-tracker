@@ -41,6 +41,8 @@ type TrackerClient struct {
 	consecutiveErrors int
 	viewMode          string
 	lastRenderedView  string
+	panelOnce         sync.Once
+	panelSize         PanelSize
 }
 
 func NewTrackerClient(server string, initialView string) *TrackerClient {
@@ -129,6 +131,14 @@ func (tc *TrackerClient) getNextPollInterval(serverIntervalSec int) time.Duratio
 		return PeakPollInterval
 	}
 	return EcoPollInterval
+}
+
+// getPanelSize returns the device framebuffer dimensions, detecting them once.
+func (tc *TrackerClient) getPanelSize() PanelSize {
+	tc.panelOnce.Do(func() {
+		tc.panelSize = DetectPanelSize()
+	})
+	return tc.panelSize
 }
 
 func (tc *TrackerClient) getServerURL() string {
@@ -491,7 +501,9 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 
 	viewMode := tc.getViewMode()
 	server := tc.getServerURL()
-	url := fmt.Sprintf("%s/dashboard.png?kindle=pw5&batt=%d&charging=%d&view=%s&t=%d", server, batt.Level, chargeVal, viewMode, time.Now().Unix())
+	panel := tc.getPanelSize()
+	url := fmt.Sprintf("%s/dashboard.png?kindle=pw5&w=%d&h=%d&batt=%d&charging=%d&view=%s&t=%d",
+		server, panel.LandscapeW, panel.LandscapeH, batt.Level, chargeVal, viewMode, time.Now().Unix())
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		tc.handleNetworkError(ctx)

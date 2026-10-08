@@ -55,7 +55,7 @@ build time via `-ldflags "-X main.Version=..."`.
 
 - **Dual-Redundancy Arrival Engine:** Primary polling against NJ Transit DepartureVision (BUSDV2) with instant automatic fallback to public GraphQL API. Upstream failures are surfaced distinctly from a genuine "no buses" state.
 - **Citi Bike Dock Telemetry:** Live tracking of nearby Citi Bike docks with real-time e-bike availability prioritization.
-- **Native Kindle Paperwhite 5 Support:** Standalone statically linked Go ARM client running in memory (`/tmp/tracker`).
+- **Native Kindle Paperwhite 5 Support:** Standalone statically linked Go ARM client running in memory (`/tmp/tracker`). The client reports its true framebuffer size (`/sys/class/graphics/fb0/virtual_size`) so the server renders the dashboard **natively at panel resolution** (e.g. 1648×1236 landscape for the PW5) instead of upscaling an 800px bitmap — text is rasterized crisply and the server only rotates (never resamples) to the portrait framebuffer.
 - **Touch Gestures:**
   - **Bottom button bar:** `BUSES`, `CITI BIKE`, `LIGHT`, `REFRESH`, `EXIT` tactile buttons along the bottom edge.
   - **Bottom-Left Corner Tap:** Cycles views between Citi Bike and NJ Transit Bus departures (outside the button bar).

@@ -9,9 +9,101 @@ from PIL import Image, ImageDraw, ImageFont
 from bus_tracker import NJTransitBusTracker, normalize_arrival
 from citibike import CitiBikeTracker
 
-# Canvas Dimensions (standard 7.5" e-ink: TRMNL, Waveshare 7.5", etc.)
+# Design-space canvas dimensions. All layout math in this module is expressed
+# in this logical 800px-wide coordinate space; ScaledDraw translates it to the
+# actual (possibly much larger) native canvas so we never resample a bitmap.
 WIDTH = 800
 HEIGHT = 480
+
+
+class ScaledDraw:
+    """
+    A transparent ImageDraw proxy that renders a logical-coordinate layout onto
+    a larger native canvas.
+
+    Every view function draws in the 800px logical design space. Wrapping the
+    real ImageDraw in this proxy lets us render at the panel's true resolution
+    (e.g. 1648x1236 for a Kindle PW5) with crisp native text instead of
+    LANCZOS-upscaling an 800px bitmap.
+
+    Coordinates, outline widths and corner radii are multiplied by `scale`.
+    Fonts are reconstructed at `size * scale` (cached) so glyphs are rendered
+    natively. `textbbox` divides its result back into logical units so callers
+    (and the ellipsize helper) keep operating in one consistent space.
+    """
+
+    def __init__(self, draw: ImageDraw.ImageDraw, scale: float = 1.0):
+        self._d = draw
+        self._s = float(scale)
+        self._font_cache = {}
+
+    # -- helpers -----------------------------------------------------------
+    def _pt(self, p):
+        return (p[0] * self._s, p[1] * self._s)
+
+    def _box(self, xy):
+        """Accepts [(x0,y0),(x1,y1)] or flat [x0,y0,x1,y1] and scales it."""
+        if len(xy) == 4 and not hasattr(xy[0], "__len__"):
+            return [xy[0] * self._s, xy[1] * self._s, xy[2] * self._s, xy[3] * self._s]
+        return [self._pt(xy[0]), self._pt(xy[1])]
+
+    def _outline(self, w):
+        if w is None:
+            return None
+        return max(1, int(round(w * self._s)))
+
+    def _font(self, font):
+        if font is None or self._s == 1.0:
+            return font
+        path = getattr(font, "_transit_path", None)
+        size = getattr(font, "_transit_size", None)
+        if path is None or size is None:
+            return font
+        key = (path, size)
+        cached = self._font_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            scaled = ImageFont.truetype(path, max(1, int(round(size * self._s))))
+            try:
+                scaled._transit_path = path
+                scaled._transit_size = max(1, int(round(size * self._s)))
+            except Exception:
+                pass
+        except Exception:
+            scaled = font
+        self._font_cache[key] = scaled
+        return scaled
+
+    # -- drawing primitives ------------------------------------------------
+    def text(self, xy, text, fill=None, font=None, **kwargs):
+        return self._d.text(self._pt(xy), text, fill=fill, font=self._font(font), **kwargs)
+
+    def textbbox(self, xy, text, font=None, **kwargs):
+        bbox = self._d.textbbox(self._pt(xy), text, font=self._font(font), **kwargs)
+        return tuple(v / self._s for v in bbox)
+
+    def textlength(self, text, font=None, **kwargs):
+        return self._d.textlength(text, font=self._font(font), **kwargs) / self._s
+
+    def line(self, xy, fill=None, width=1, **kwargs):
+        return self._d.line([self._pt(p) for p in xy], fill=fill, width=self._outline(width), **kwargs)
+
+    def rectangle(self, xy, fill=None, outline=None, width=1, **kwargs):
+        return self._d.rectangle(self._box(xy), fill=fill, outline=outline, width=self._outline(width), **kwargs)
+
+    def rounded_rectangle(self, xy, radius=0, fill=None, outline=None, width=1, **kwargs):
+        return self._d.rounded_rectangle(
+            self._box(xy),
+            radius=max(0, int(round(radius * self._s))),
+            fill=fill,
+            outline=outline,
+            width=self._outline(width),
+            **kwargs,
+        )
+
+    def polygon(self, xy, fill=None, outline=None, width=1, **kwargs):
+        return self._d.polygon([self._pt(p) for p in xy], fill=fill, outline=outline, width=self._outline(width), **kwargs)
 
 STOPS = [
     {
@@ -49,11 +141,21 @@ def get_font(size: int, bold: bool = False):
     for p in font_paths:
         if os.path.exists(p):
             try:
-                return ImageFont.truetype(p, size)
+                font = ImageFont.truetype(p, size)
+                # Tag so ScaledDraw can reconstruct this font at native size.
+                font._transit_path = p
+                font._transit_size = size
+                return font
             except Exception:
                 continue
     try:
-        return ImageFont.load_default()
+        font = ImageFont.load_default()
+        try:
+            font._transit_path = getattr(font, "path", None)
+            font._transit_size = size
+        except Exception:
+            pass
+        return font
     except Exception:
         return None
 
@@ -821,6 +923,7 @@ def render_dashboard(
     stop_status: Optional[Dict[str, str]] = None,
     width: int = WIDTH,
     height: int = HEIGHT,
+    scale: float = 1.0,
 ) -> str:
     """
     Renders a high-contrast black-and-white image optimized for e-ink
@@ -829,6 +932,11 @@ def render_dashboard(
 
     stop_status maps stop id -> fetch status ('ok'/'empty'/'error') so that an
     upstream outage can be distinguished from a genuine absence of buses.
+
+    width/height are the *logical* design-space dimensions that drive layout.
+    `scale` maps that design space onto a larger native canvas: the output image
+    is (width*scale) x (height*scale) and all drawing is done natively at that
+    resolution (fonts are reconstructed at scale), so no bitmap upscaling occurs.
     """
     if citibike_data is None:
         try:
@@ -839,9 +947,11 @@ def render_dashboard(
 
     active_view = resolve_view(view)
 
-    # Create white canvas
-    img = Image.new("RGB", (width, height), color="white")
-    draw = ImageDraw.Draw(img)
+    # Create native-resolution canvas; view code draws in logical coordinates.
+    native_w = max(1, int(round(width * scale)))
+    native_h = max(1, int(round(height * scale)))
+    img = Image.new("RGB", (native_w, native_h), color="white")
+    draw = ScaledDraw(ImageDraw.Draw(img), scale)
     now = datetime.now()
 
     if active_view == "morning":
@@ -873,7 +983,7 @@ def render_dashboard(
 
     # Save output
     img.save(output_path, "PNG")
-    print(f"✓ Dashboard image successfully rendered [{active_view.upper()} VIEW]: {output_path} ({width}x{height})")
+    print(f"✓ Dashboard image successfully rendered [{active_view.upper()} VIEW]: {output_path} ({native_w}x{native_h}, scale={scale:g})")
     return output_path
 
 
