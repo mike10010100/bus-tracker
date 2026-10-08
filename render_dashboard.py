@@ -192,6 +192,57 @@ def resolve_view(view: str = "auto", hour: Optional[int] = None) -> str:
     return "evening"
 
 
+def draw_bottom_button_bar(
+    draw: ImageDraw.ImageDraw,
+    width: int,
+    height: int,
+    active_view: str = "morning",
+    font=None,
+):
+    """
+    Renders 5 tactile touch buttons across the bottom edge of the dashboard:
+    [ BUSES ] [ CITI BIKE ] [ ☼ LIGHT ] [ ↻ REFRESH ] [ ✕ EXIT ]
+    The active view button is highlighted with inverted fill (black fill, white text).
+    """
+    is_tall = height >= 580
+    btn_y0 = height - (44 if is_tall else 38)
+    btn_y1 = height - (10 if is_tall else 8)
+    btn_h = btn_y1 - btn_y0
+
+    # Subtle separator line above the buttons
+    draw.line([(20, btn_y0 - 8), (width - 20, btn_y0 - 8)], fill="#bbbbbb", width=1)
+
+    start_x = 20
+    total_w = width - 40
+    gap = 10
+    col_w = (total_w - 4 * gap) // 5
+
+    if font is None:
+        font = get_font(12, bold=True)
+
+    is_bus = (active_view == "evening")
+    is_bike = (active_view == "morning")
+
+    buttons = [
+        ("● BUSES" if is_bus else "BUSES", is_bus),
+        ("● CITI BIKE" if is_bike else "CITI BIKE", is_bike),
+        ("☼ LIGHT", False),
+        ("↻ REFRESH", False),
+        ("✕ EXIT", False),
+    ]
+
+    for i, (label, active) in enumerate(buttons):
+        x0 = start_x + i * (col_w + gap)
+        x1 = x0 + col_w
+        bg = "black" if active else "#f4f4f4"
+        fg = "white" if active else "black"
+        draw.rounded_rectangle([x0, btn_y0, x1, btn_y1], radius=6, fill=bg, outline="black", width=2)
+        bbox = draw.textbbox((0, 0), label, font=font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        draw.text((x0 + (col_w - tw) // 2, btn_y0 + (btn_h - th) // 2 - 1), label, fill=fg, font=font)
+
+
 def render_morning_view(
     draw: ImageDraw.ImageDraw,
     stops_data: Dict[str, List[Dict[str, Any]]],
@@ -330,8 +381,8 @@ def render_morning_view(
             draw.text((cx0 + 18, badge_box_y0 + (9 if is_tall else 8)), status_label, fill="black", font=font_badge)
 
     # 3. Compact 126 Bus Section (Bottom Bar)
-    bus_y0 = 428 if is_tall else 354
-    bus_y1 = 556 if is_tall else 442
+    bus_y0 = 422 if is_tall else 348
+    bus_y1 = 542 if is_tall else 424
     draw.rounded_rectangle([20, bus_y0, width - 20, bus_y1], radius=10, fill="white", outline="black", width=2)
 
     header_h = 26 if is_tall else 24
@@ -362,36 +413,18 @@ def render_morning_view(
             first_bus = arrivals[0]
             eta = first_bus.get("eta", "")
             b_num = f" (Bus #{first_bus['vehicle_id']})" if first_bus.get("vehicle_id") else ""
-            draw.text((bx0 + 14, bus_y0 + header_h + (34 if is_tall else 28)), f"Next: {eta}{b_num}", fill="black", font=font_bus_eta)
+            draw.text((bx0 + 14, bus_y0 + header_h + (32 if is_tall else 26)), f"Next: {eta}{b_num}", fill="black", font=font_bus_eta)
             if len(arrivals) > 1:
                 next_eta = arrivals[1].get("eta", "")
-                draw.text((bx0 + 14, bus_y0 + header_h + (54 if is_tall else 45)), f"Following: {next_eta}", fill="#555555", font=font_bus_meta)
+                draw.text((bx0 + 14, bus_y0 + header_h + (50 if is_tall else 42)), f"Following: {next_eta}", fill="#555555", font=font_bus_meta)
             if is_tall and len(arrivals) > 2:
                 third_eta = arrivals[2].get("eta", "")
-                draw.text((bx0 + 14, bus_y0 + header_h + 74), f"Upcoming: {third_eta}", fill="#777777", font=font_bus_meta)
+                draw.text((bx0 + 14, bus_y0 + header_h + 68), f"Upcoming: {third_eta}", fill="#777777", font=font_bus_meta)
         else:
-            draw.text((bx0 + 14, bus_y0 + header_h + (36 if is_tall else 30)), "No buses tracked in next hour", fill="#666666", font=font_bus_eta)
+            draw.text((bx0 + 14, bus_y0 + header_h + (34 if is_tall else 28)), "No buses tracked in next hour", fill="#666666", font=font_bus_eta)
 
-    # 4. Footer
-    footer_y = height - 28
-    draw.line([(20, footer_y), (width - 20, footer_y)], fill="black", width=1)
-
-    sync_status = "● AM CITI BIKE HERO"
-    draw.text((20, footer_y + 9), sync_status, fill="black", font=font_footer)
-
-    center_text = f"Double-tap: Exit  •  Tap: Light  •  Last Synced: {now_time_str}"
-    cb = draw.textbbox((0, 0), center_text, font=font_footer)
-    cw = cb[2] - cb[0]
-    draw.text(((width - cw) // 2, footer_y + 9), center_text, fill="#555555", font=font_footer)
-
-    if batt_level is not None:
-        charge_str = " (CHARGING)" if is_charging else ""
-        right_text = f"BATTERY: {batt_level}%{charge_str}  •  READY"
-    else:
-        right_text = "E-INK DISPLAY READY"
-    rb = draw.textbbox((0, 0), right_text, font=font_footer)
-    rw = rb[2] - rb[0]
-    draw.text((width - 20 - rw, footer_y + 9), right_text, fill="black", font=font_footer)
+    # 4. Touch Button Bar (Interactive Actions)
+    draw_bottom_button_bar(draw, width, height, active_view="morning")
 
 
 def render_evening_view(
@@ -607,7 +640,7 @@ def render_evening_view(
 
     # 3. Citi Bike Bottom Section
     if has_citibike:
-        cb_x0, cb_y0, cb_x1, cb_y1 = 20, (428 if is_tall else 354), width - 20, (556 if is_tall else 442)
+        cb_x0, cb_y0, cb_x1, cb_y1 = 20, (422 if is_tall else 348), width - 20, (542 if is_tall else 424)
         draw.rounded_rectangle([cb_x0, cb_y0, cb_x1, cb_y1], radius=10, fill="white", outline="black", width=2)
 
         header_h = 26 if is_tall else 24
@@ -658,28 +691,10 @@ def render_evening_view(
                         cb_badge = "● DOCKS FULL"
                     else:
                         cb_badge = "● CLASSIC ONLY"
-                    draw.text((cx0 + 14, body_y0 + 72), cb_badge, fill="#444444", font=font_cb_walk)
+                    draw.text((cx0 + 14, body_y0 + 70), cb_badge, fill="#444444", font=font_cb_walk)
 
-    # 4. Footer
-    footer_y = height - 28
-    draw.line([(20, footer_y), (width - 20, footer_y)], fill="black", width=1)
-
-    sync_status = "● PM BUS HERO"
-    draw.text((20, footer_y + 9), sync_status, fill="black", font=font_footer)
-
-    center_text = f"Double-tap: Exit  •  Tap: Light  •  Last Synced: {now_time_str}"
-    cb = draw.textbbox((0, 0), center_text, font=font_footer)
-    cw = cb[2] - cb[0]
-    draw.text(((width - cw) // 2, footer_y + 9), center_text, fill="#555555", font=font_footer)
-
-    if batt_level is not None:
-        charge_str = " (CHARGING)" if is_charging else ""
-        right_text = f"BATTERY: {batt_level}%{charge_str}  •  READY"
-    else:
-        right_text = "E-INK DISPLAY READY"
-    rb = draw.textbbox((0, 0), right_text, font=font_footer)
-    rw = rb[2] - rb[0]
-    draw.text((width - 20 - rw, footer_y + 9), right_text, fill="black", font=font_footer)
+    # 4. Touch Button Bar (Interactive Actions)
+    draw_bottom_button_bar(draw, width, height, active_view="evening")
 
 
 def render_dashboard(

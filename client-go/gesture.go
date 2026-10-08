@@ -7,31 +7,41 @@ import (
 
 // GestureDetectorConfig holds timing and threshold settings for touch recognition
 type GestureDetectorConfig struct {
-	DoubleTapWindow      time.Duration
-	SingleTapDelay       time.Duration
-	InactivityTimeout    time.Duration
-	DebounceDuration     time.Duration
-	TopRightThresholdX   int32
-	TopRightThresholdY   int32
-	TopLeftThresholdX    int32
-	TopLeftThresholdY    int32
-	BottomLeftThresholdX int32
-	BottomLeftThresholdY int32
+	DoubleTapWindow         time.Duration
+	SingleTapDelay          time.Duration
+	InactivityTimeout       time.Duration
+	DebounceDuration        time.Duration
+	TopRightThresholdX      int32
+	TopRightThresholdY      int32
+	TopLeftThresholdX       int32
+	TopLeftThresholdY       int32
+	BottomLeftThresholdX    int32
+	BottomLeftThresholdY    int32
+	BottomBarThresholdY     int32
+	ButtonBusesThresholdX   int32
+	ButtonBikesThresholdX   int32
+	ButtonLightThresholdX   int32
+	ButtonRefreshThresholdX int32
 }
 
 // DefaultGestureConfig returns production settings tailored for Kindle Paperwhite 5
 func DefaultGestureConfig() GestureDetectorConfig {
 	return GestureDetectorConfig{
-		DoubleTapWindow:      380 * time.Millisecond,
-		SingleTapDelay:       200 * time.Millisecond,
-		InactivityTimeout:    100 * time.Millisecond,
-		DebounceDuration:     80 * time.Millisecond,
-		TopRightThresholdX:   1000,
-		TopRightThresholdY:   300,
-		TopLeftThresholdX:    300,
-		TopLeftThresholdY:    300,
-		BottomLeftThresholdX: 350,
-		BottomLeftThresholdY: 1300,
+		DoubleTapWindow:         380 * time.Millisecond,
+		SingleTapDelay:          200 * time.Millisecond,
+		InactivityTimeout:       100 * time.Millisecond,
+		DebounceDuration:        80 * time.Millisecond,
+		TopRightThresholdX:      1000,
+		TopRightThresholdY:      300,
+		TopLeftThresholdX:       300,
+		TopLeftThresholdY:       300,
+		BottomLeftThresholdX:    350,
+		BottomLeftThresholdY:    1300,
+		BottomBarThresholdY:     1200,
+		ButtonBusesThresholdX:   250,
+		ButtonBikesThresholdX:   490,
+		ButtonLightThresholdX:   740,
+		ButtonRefreshThresholdX: 990,
 	}
 }
 
@@ -52,6 +62,11 @@ type GestureDetector struct {
 	OnTopRightTap   func(x, y int32)
 	OnTopLeftTap    func(x, y int32)
 	OnBottomLeftTap func(x, y int32)
+	OnBusesTap      func(x, y int32)
+	OnBikesTap      func(x, y int32)
+	OnLightTap      func(x, y int32)
+	OnRefreshTap    func(x, y int32)
+	OnExitTap       func(x, y int32)
 	OnLog           func(msg string)
 }
 
@@ -81,7 +96,52 @@ func (gd *GestureDetector) TriggerTap(now time.Time) {
 
 	x, y := gd.curX, gd.curY
 
-	// 1. Corner Touch Gestures (Dedicated Action Zones)
+	// 1. Bottom Button Bar (Interactive Tactile Buttons)
+	if gd.cfg.BottomBarThresholdY > 0 && y >= gd.cfg.BottomBarThresholdY {
+		if gd.singleTapTimer != nil {
+			gd.singleTapTimer.Stop()
+		}
+		gd.lastTapTime = time.Time{}
+
+		switch {
+		case x < gd.cfg.ButtonBusesThresholdX:
+			if gd.OnBusesTap != nil {
+				gd.OnBusesTap(x, y)
+				return
+			}
+			if gd.OnBottomLeftTap != nil {
+				gd.OnBottomLeftTap(x, y)
+				return
+			}
+		case x < gd.cfg.ButtonBikesThresholdX:
+			if gd.OnBikesTap != nil {
+				gd.OnBikesTap(x, y)
+				return
+			}
+			if gd.OnBottomLeftTap != nil {
+				gd.OnBottomLeftTap(x, y)
+				return
+			}
+		case x < gd.cfg.ButtonLightThresholdX:
+			if gd.OnLightTap != nil {
+				gd.OnLightTap(x, y)
+				return
+			}
+		case x < gd.cfg.ButtonRefreshThresholdX:
+			if gd.OnRefreshTap != nil {
+				gd.OnRefreshTap(x, y)
+				return
+			}
+		default:
+			if gd.OnExitTap != nil {
+				gd.OnExitTap(x, y)
+				return
+			}
+		}
+		return
+	}
+
+	// 2. Corner Touch Gestures (Dedicated Action Zones)
 	// Top-Right Corner Tap -> Immediate Exit
 	if x > gd.cfg.TopRightThresholdX && y < gd.cfg.TopRightThresholdY {
 		if gd.singleTapTimer != nil {

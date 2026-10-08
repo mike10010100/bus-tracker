@@ -251,3 +251,96 @@ func TestGestureDetectorInactivityFallback(t *testing.T) {
 		t.Errorf("Inactivity fallback should have triggered 1 tap, got %d", count)
 	}
 }
+
+func TestGestureDetectorButtonTaps(t *testing.T) {
+	cfg := DefaultGestureConfig()
+	cfg.DebounceDuration = 5 * time.Millisecond
+
+	gd := NewGestureDetector(cfg)
+	defer gd.Stop()
+
+	var (
+		busesTaps   int
+		bikesTaps   int
+		lightTaps   int
+		refreshTaps int
+		exitTaps    int
+		mu          sync.Mutex
+	)
+
+	gd.OnBusesTap = func(x, y int32) {
+		mu.Lock()
+		busesTaps++
+		mu.Unlock()
+	}
+	gd.OnBikesTap = func(x, y int32) {
+		mu.Lock()
+		bikesTaps++
+		mu.Unlock()
+	}
+	gd.OnLightTap = func(x, y int32) {
+		mu.Lock()
+		lightTaps++
+		mu.Unlock()
+	}
+	gd.OnRefreshTap = func(x, y int32) {
+		mu.Lock()
+		refreshTaps++
+		mu.Unlock()
+	}
+	gd.OnExitTap = func(x, y int32) {
+		mu.Lock()
+		exitTaps++
+		mu.Unlock()
+	}
+
+	t0 := time.Now()
+
+	// 1. Buses button (x < 250, y >= 1200)
+	gd.curX = 100
+	gd.curY = 1400
+	gd.TriggerTap(t0)
+
+	// 2. Bikes button (250 <= x < 490, y >= 1200)
+	gd.curX = 350
+	gd.curY = 1400
+	t1 := t0.Add(20 * time.Millisecond)
+	gd.TriggerTap(t1)
+
+	// 3. Light button (490 <= x < 740, y >= 1200)
+	gd.curX = 600
+	gd.curY = 1400
+	t2 := t1.Add(20 * time.Millisecond)
+	gd.TriggerTap(t2)
+
+	// 4. Refresh button (740 <= x < 990, y >= 1200)
+	gd.curX = 850
+	gd.curY = 1400
+	t3 := t2.Add(20 * time.Millisecond)
+	gd.TriggerTap(t3)
+
+	// 5. Exit button (x >= 990, y >= 1200)
+	gd.curX = 1100
+	gd.curY = 1400
+	t4 := t3.Add(20 * time.Millisecond)
+	gd.TriggerTap(t4)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if busesTaps != 1 {
+		t.Errorf("Expected 1 buses button tap, got %d", busesTaps)
+	}
+	if bikesTaps != 1 {
+		t.Errorf("Expected 1 bikes button tap, got %d", bikesTaps)
+	}
+	if lightTaps != 1 {
+		t.Errorf("Expected 1 light button tap, got %d", lightTaps)
+	}
+	if refreshTaps != 1 {
+		t.Errorf("Expected 1 refresh button tap, got %d", refreshTaps)
+	}
+	if exitTaps != 1 {
+		t.Errorf("Expected 1 exit button tap, got %d", exitTaps)
+	}
+}

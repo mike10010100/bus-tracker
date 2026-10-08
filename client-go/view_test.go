@@ -61,4 +61,17 @@ func TestCycleViewMode(t *testing.T) {
 			t.Errorf("getViewMode() after hold = %q, want %q", tc.getViewMode(), "auto")
 		}
 	})
+
+	t.Run("Set explicit view mode sets target and manualViewTime", func(t *testing.T) {
+		tc := NewTrackerClient("http://localhost:8000", "auto")
+		mode := tc.setExplicitViewMode("evening")
+		if mode != "evening" || tc.getViewMode() != "evening" {
+			t.Errorf("setExplicitViewMode(evening) = %q, want %q", mode, "evening")
+		}
+
+		mode2 := tc.setExplicitViewMode("morning")
+		if mode2 != "morning" || tc.getViewMode() != "morning" {
+			t.Errorf("setExplicitViewMode(morning) = %q, want %q", mode2, "morning")
+		}
+	})
 }

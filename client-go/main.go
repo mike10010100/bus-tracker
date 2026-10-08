@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	Version            = "1.5.5"
+	Version            = "1.6.0"
 	BinaryPath         = "/tmp/tracker"
 	ImagePath          = "/tmp/dashboard.png"
 	PollInterval       = 45 * time.Second
@@ -84,6 +84,14 @@ func (tc *TrackerClient) cycleViewMode() string {
 	} else {
 		tc.viewMode = "morning"
 	}
+	tc.manualViewTime = time.Now()
+	return tc.viewMode
+}
+
+func (tc *TrackerClient) setExplicitViewMode(target string) string {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	tc.viewMode = target
 	tc.manualViewTime = time.Now()
 	return tc.viewMode
 }
@@ -271,6 +279,42 @@ func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context
 			case tc.refreshCh <- struct{}{}:
 			default:
 			}
+		}
+
+		gd.OnBusesTap = func(x, y int32) {
+			newMode := tc.setExplicitViewMode("evening")
+			tc.logRemote(fmt.Sprintf("BUSES button tapped at (%d, %d)! View set to: %s. Refreshing...", x, y, newMode))
+			select {
+			case tc.refreshCh <- struct{}{}:
+			default:
+			}
+		}
+
+		gd.OnBikesTap = func(x, y int32) {
+			newMode := tc.setExplicitViewMode("morning")
+			tc.logRemote(fmt.Sprintf("CITI BIKE button tapped at (%d, %d)! View set to: %s. Refreshing...", x, y, newMode))
+			select {
+			case tc.refreshCh <- struct{}{}:
+			default:
+			}
+		}
+
+		gd.OnLightTap = func(x, y int32) {
+			tc.logRemote(fmt.Sprintf("LIGHT button tapped at (%d, %d)! Cycling frontlight...", x, y))
+			tc.cycleFrontlight()
+		}
+
+		gd.OnRefreshTap = func(x, y int32) {
+			tc.logRemote(fmt.Sprintf("REFRESH button tapped at (%d, %d)! Refreshing...", x, y))
+			select {
+			case tc.refreshCh <- struct{}{}:
+			default:
+			}
+		}
+
+		gd.OnExitTap = func(x, y int32) {
+			tc.logRemote(fmt.Sprintf("EXIT button tapped at (%d, %d)! Exiting cleanly...", x, y))
+			cancel()
 		}
 
 		for {
