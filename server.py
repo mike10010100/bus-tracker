@@ -1,4 +1,5 @@
 import os
+import re
 import hmac
 import time
 import io
@@ -97,8 +98,22 @@ def check_control_auth(handler) -> bool:
 # Last device diagnostics report uploaded by a client, plus a one-shot flag that
 # asks the next polling client to upload a fresh one.
 _diag_lock = threading.Lock()
-_last_diagnostics = {"text": "", "time": 0.0}
+_last_diagnostics = {"text": "", "time": 0.0, "battery": None, "charging": None}
 _diag_requested = ""
+
+
+def parse_diag_battery(text):
+    """
+    Extracts (level, charging) from a diagnostics report's machine-readable
+    'battery_level=<n> charging=<bool>' line. Returns (None, None) if absent.
+    """
+    m = re.search(r"battery_level=(-?\d+)\s+charging=(true|false)", text)
+    if not m:
+        return None, None
+    level = int(m.group(1))
+    if level < 0:
+        return None, None
+    return level, m.group(2) == "true"
 
 
 # Upstream data cache (bus arrivals + Citi Bike status), decoupled from render.
@@ -346,10 +361,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(length).decode("utf-8", errors="replace")
+                level, charging = parse_diag_battery(body)
                 with _diag_lock:
                     _last_diagnostics["text"] = body
                     _last_diagnostics["time"] = time.time()
-                print(f"[Diagnostics] received {len(body)} bytes from {self.address_string()}")
+                    if level is not None:
+                        _last_diagnostics["battery"] = level
+                        _last_diagnostics["charging"] = charging
+                extra = f" battery={level}%{'⚡' if charging else ''}" if level is not None else ""
+                print(f"[Diagnostics] received {len(body)} bytes from {self.address_string()}{extra}")
             except Exception as e:
                 print(f"[Server] Error reading diagnostics: {e}")
             self._send_empty(200)
@@ -544,12 +564,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             poll_interval = get_target_poll_interval()
             _exists, _mtime, bin_sha, _size = get_binary_info()
 
-            # Consume a pending diagnostics request (one-shot) so the client
-            # uploads a fresh device report on this poll. The stored value is
-            # "" (none), "1" (passive) or "full" (passive + active probe).
-            with _diag_lock:
-                diag_header = _diag_requested
-                _diag_requested = ""
+            # Consume a pending diagnostics request (one-shot) so a *Kindle*
+            # client uploads a fresh device report on this poll. Desktop/web
+            # requests for /dashboard.png must not consume it. The stored value
+            # is "" (none), "1" (passive) or "full" (passive + active probe).
+            diag_header = ""
+            if is_kindle:
+                with _diag_lock:
+                    diag_header = _diag_requested
+                    _diag_requested = ""
 
             if self.headers.get("If-None-Match") == etag:
                 self.send_response(304)
@@ -590,6 +613,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 toggle_link = f'<a href="/resume{token_qs}" style="color:#51cf66;">Resume Tracker</a>'
             else:
                 toggle_link = f'<a href="/stop{token_qs}" style="color:#ff6b6b;">Stop Kindle Tracker</a>'
+
+            # Kindle battery, as last reported by the device diagnostics dump.
+            with _diag_lock:
+                batt_level = _last_diagnostics["battery"]
+                batt_charging = _last_diagnostics["charging"]
+            if batt_level is not None:
+                bolt = "⚡ " if batt_charging else ""
+                batt_html = f' | Kindle: {bolt}<strong>{batt_level}%</strong>'
+            else:
+                batt_html = " | Kindle: <em>no report</em>"
+            diag_link = f'<a href="/diag">diagnostics</a> | <a href="/diag?request=full">request full dump</a>'
             html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -626,7 +660,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 </head>
 <body>
     <img src="/dashboard.png?view={current_view}&t={int(time.time())}" alt="Transit Dashboard" />
-    <div class="status">Status: {status_badge} | {toggle_link}</div>
+    <div class="status">Status: {status_badge} | {toggle_link}{batt_html}</div>
+    <div class="links">{diag_link}</div>
     <div class="links">
         <strong>View Mode:</strong>
         <a href="/?view=auto">Auto (AM Citi / PM Bus)</a> |

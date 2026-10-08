@@ -104,6 +104,22 @@ class TestDiagnosticsEndpoints(ServerHTTPTestBase):
         status, _headers, _body = _http_get(self.port, "/diag")
         self.assertEqual(status, 404)
 
+    def test_parse_diag_battery(self):
+        self.assertEqual(server.parse_diag_battery("battery_level=83 charging=true"), (83, True))
+        self.assertEqual(server.parse_diag_battery("battery_level=42 charging=false"), (42, False))
+        self.assertEqual(server.parse_diag_battery("no battery here"), (None, None))
+        self.assertEqual(server.parse_diag_battery("battery_level=-1 charging=false"), (None, None))
+
+    def test_post_diag_extracts_and_exposes_battery(self):
+        report = "=== DIAGNOSTICS ===\nbattery: 77%\nbattery_level=77 charging=true\n=== END DIAGNOSTICS ==="
+        _http("POST", self.port, "/diag", body=report.encode("utf-8"))
+        self.assertEqual(server._last_diagnostics["battery"], 77)
+        self.assertEqual(server._last_diagnostics["charging"], True)
+
+        status, _headers, body = _http_get(self.port, "/")
+        self.assertEqual(status, 200)
+        self.assertIn(b"77%", body)
+
     def test_post_then_get_diag(self):
         report = "=== DIAGNOSTICS v1.0.0 ===\nhas_kron: true\n=== END DIAGNOSTICS ==="
         status, _headers, _body = _http("POST", self.port, "/diag", body=report.encode("utf-8"))
@@ -121,31 +137,47 @@ class TestDiagnosticsEndpoints(ServerHTTPTestBase):
         self.assertEqual(status, 404)  # nothing stored yet, but the flag is set
         self.assertEqual(server._diag_requested, "1")
 
-        # The next dashboard poll advertises it and clears the flag.
-        status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1")
+        # The next Kindle poll advertises it and clears the flag.
+        status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
         self.assertEqual(status, 200)
         self.assertEqual(headers.get("X-Tracker-Diag"), "1")
         self.assertEqual(server._diag_requested, "")
 
         # A subsequent poll does not re-request.
-        _status, headers2, _body2 = _http_get(self.port, "/dashboard.png?mock=1")
+        _status, headers2, _body2 = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
         self.assertIsNone(headers2.get("X-Tracker-Diag"))
+
+    def test_web_request_does_not_consume_diag_flag(self):
+        # A desktop/web /dashboard.png (no kindle param) must NOT consume the
+        # one-shot diag request; only a Kindle poll should.
+        _http_get(self.port, "/diag?request=full")
+        self.assertEqual(server._diag_requested, "full")
+
+        status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1")
+        self.assertEqual(status, 200)
+        self.assertIsNone(headers.get("X-Tracker-Diag"))
+        self.assertEqual(server._diag_requested, "full")  # still pending
+
+        # The Kindle poll then consumes and forwards it.
+        status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
+        self.assertEqual(headers.get("X-Tracker-Diag"), "full")
+        self.assertEqual(server._diag_requested, "")
 
     def test_diag_full_request_forwarded(self):
         status, _headers, _body = _http_get(self.port, "/diag?request=full")
         self.assertEqual(status, 404)  # nothing stored yet
         self.assertEqual(server._diag_requested, "full")
-        _status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1")
+        _status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
         self.assertEqual(headers.get("X-Tracker-Diag"), "full")
         self.assertEqual(server._diag_requested, "")
 
     def test_diag_flag_also_sent_on_304(self):
-        # Establish an ETag.
-        _status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1")
+        # Establish an ETag on a Kindle request.
+        _status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
         etag = headers.get("ETag")
         _http_get(self.port, "/diag?request=1")
         status, headers2, _body2 = _http_get(
-            self.port, "/dashboard.png?mock=1", headers={"If-None-Match": etag}
+            self.port, "/dashboard.png?mock=1&kindle=pw5", headers={"If-None-Match": etag}
         )
         self.assertEqual(status, 304)
         self.assertEqual(headers2.get("X-Tracker-Diag"), "1")

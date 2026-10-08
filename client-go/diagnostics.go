@@ -15,16 +15,18 @@ import (
 // expose. It is purely observational: every probe is read-only so it is safe
 // to run on every startup.
 type Diagnostics struct {
-	Version      string
-	GoOS         string
-	GoArch       string
-	Hostname     string
-	Uptime       string
-	BootTime     time.Time
-	Files        map[string]string // path -> content (or "<missing>"/"<directory>")
-	Commands     map[string]string // name -> resolved path (or "<not found>")
-	Capabilities map[string]bool   // feature -> available
-	Processes    string
+	Version         string
+	GoOS            string
+	GoArch          string
+	Hostname        string
+	Uptime          string
+	BootTime        time.Time
+	Files           map[string]string // path -> content (or "<missing>"/"<directory>")
+	Commands        map[string]string // name -> resolved path (or "<not found>")
+	Capabilities    map[string]bool   // feature -> available
+	Processes       string
+	BatteryLevel    int // 0-100, or -1 if unknown
+	BatteryCharging bool
 }
 
 // diagnosticPaths are files worth dumping (firmware markers, jailbreak layout,
@@ -70,6 +72,10 @@ func GatherDiagnostics() Diagnostics {
 	if hn, err := hostname(); err == nil {
 		d.Hostname = strings.TrimSpace(hn)
 	}
+
+	batt := GetBatteryInfo()
+	d.BatteryLevel = batt.Level
+	d.BatteryCharging = batt.IsCharging
 
 	for _, p := range diagnosticPaths {
 		d.Files[p] = readPathOrMissing(p)
@@ -118,6 +124,7 @@ type CapabilityProbe struct {
 	RTCInfo    string   // listing of /sys/class/rtc/*/name etc.
 	Upstart    string   // /etc/upstart/custom-login contents
 	LipcProps  string   // relevant powerd properties
+	Launcher   string   // enumeration of candidate boot-hook locations
 	Notes      []string
 }
 
@@ -170,6 +177,10 @@ func RunActiveProbe() CapabilityProbe {
 		return "<missing>"
 	}()
 
+	// Hunt for the boot hook that launches custom code. We don't assume where it
+	// is: enumerate the known Kindle persistence locations read-only.
+	p.Launcher = gatherLauncherInfo()
+
 	// Powerd properties that govern sleep.
 	var lb strings.Builder
 	for _, prop := range []string{
@@ -211,6 +222,7 @@ func (p CapabilityProbe) Format() string {
 		fmt.Fprintf(&b, "--- rtc sysfs ---\n%s\n", indent(p.RTCInfo))
 	}
 	fmt.Fprintf(&b, "--- /etc/upstart/custom-login ---\n%s\n", indent(p.Upstart))
+	fmt.Fprintf(&b, "--- launcher hunt ---\n%s\n", indent(p.Launcher))
 	fmt.Fprintf(&b, "--- powerd lipc props ---\n%s\n", indent(p.LipcProps))
 	fmt.Fprintf(&b, "--- notes ---\n")
 	for _, n := range p.Notes {
@@ -218,6 +230,73 @@ func (p CapabilityProbe) Format() string {
 	}
 	fmt.Fprintf(&b, "=== END ACTIVE PROBE ===")
 	return b.String()
+}
+
+// launcherProbePaths are candidate boot-hook / userland locations on a Kindle.
+// We list each (read-only) so we can find what actually launches custom code.
+var launcherProbePaths = []string{
+	"/etc/upstart",
+	"/etc/init.d",
+	"/etc/rc.local",
+	"/etc/profile",
+	"/etc/profile.d",
+	"/var/local/kmc",
+	"/var/local/root",
+	"/var/local/system",
+	"/mnt/us/emergency.sh",
+	"/mnt/us/extensions",
+	"/mnt/us/mrpackages",
+	"/usr/share/webkit-1.0/pillow/debug_cmds.json",
+}
+
+// gatherLauncherInfo lists candidate hook locations and scans the upstart dir
+// for non-stock jobs that might reference a custom launcher. Read-only.
+func gatherLauncherInfo() string {
+	var b strings.Builder
+
+	for _, p := range launcherProbePaths {
+		if fi, err := osStat(p); err == nil {
+			if fi.IsDir() {
+				listing := runProbeCmd("ls", "-la", p)
+				fmt.Fprintf(&b, "%s (dir):\n%s\n", p, indent(listing))
+			} else {
+				fmt.Fprintf(&b, "%s (file, %d bytes)\n", p, fi.Size())
+			}
+		} else {
+			fmt.Fprintf(&b, "%s <missing>\n", p)
+		}
+	}
+
+	// Any custom (non-Amazon) upstart jobs?
+	fmt.Fprintf(&b, "--- /etc/upstart/*.conf ---\n")
+	if matches, err := globInputs("/etc/upstart/*.conf"); err == nil {
+		for _, f := range matches {
+			content := readPathOrMissing(f)
+			// Show only files that mention something custom-looking, or that are
+			// not obviously a stock Amazon job, to keep the dump readable.
+			low := strings.ToLower(content)
+			if strings.Contains(low, "tracker") || strings.Contains(low, "kmc") ||
+				strings.Contains(low, "bridge") || strings.Contains(low, "custom") ||
+				strings.Contains(low, "mnt/us") {
+				fmt.Fprintf(&b, "  %s:\n%s\n", f, indent(truncate(content, 1200)))
+			} else {
+				fmt.Fprintf(&b, "  %s <no custom markers>\n", f)
+			}
+		}
+	}
+
+	// The running process tree can reveal the parent of our launcher.
+	fmt.Fprintf(&b, "--- process tree ---\n%s\n", indent(runProbeCmd("ps", "-ef")))
+
+	return strings.TrimSpace(b.String())
+}
+
+func truncate(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) > n {
+		return s[:n] + " …[truncated]"
+	}
+	return s
 }
 
 func indent(s string) string {
@@ -241,6 +320,16 @@ func (d Diagnostics) Format() string {
 		fmt.Fprintf(&b, "uptime: %s (booted ~%s)\n", d.Uptime, d.BootTime.Format(time.RFC3339))
 	} else {
 		fmt.Fprintf(&b, "uptime: %s\n", d.Uptime)
+	}
+	if d.BatteryLevel >= 0 {
+		chg := ""
+		if d.BatteryCharging {
+			chg = " (charging)"
+		}
+		fmt.Fprintf(&b, "battery: %d%%%s\n", d.BatteryLevel, chg)
+		fmt.Fprintf(&b, "battery_level=%d charging=%t\n", d.BatteryLevel, d.BatteryCharging)
+	} else {
+		fmt.Fprintf(&b, "battery: <unknown>\n")
 	}
 
 	fmt.Fprintf(&b, "--- capabilities ---\n")

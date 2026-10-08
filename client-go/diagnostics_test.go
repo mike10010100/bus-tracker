@@ -119,6 +119,41 @@ func TestGatherDiagnostics_MissingEverythingDoesNotPanic(t *testing.T) {
 	}
 }
 
+func TestDiagnosticsFormat_IncludesBattery(t *testing.T) {
+	d := Diagnostics{
+		Version:         "1",
+		BatteryLevel:    83,
+		BatteryCharging: true,
+		Files:           map[string]string{},
+		Commands:        map[string]string{},
+		Capabilities:    map[string]bool{},
+	}
+	out := d.Format()
+	if !strings.Contains(out, "battery: 83% (charging)") {
+		t.Errorf("expected battery line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "battery_level=83 charging=true") {
+		t.Errorf("expected machine-readable battery line, got:\n%s", out)
+	}
+}
+
+func TestDiagnosticsFormat_UnknownBattery(t *testing.T) {
+	d := Diagnostics{
+		Version:      "1",
+		BatteryLevel: -1,
+		Files:        map[string]string{},
+		Commands:     map[string]string{},
+		Capabilities: map[string]bool{},
+	}
+	out := d.Format()
+	if !strings.Contains(out, "battery: <unknown>") {
+		t.Errorf("expected unknown battery line, got:\n%s", out)
+	}
+	if strings.Contains(out, "battery_level=") {
+		t.Errorf("unknown battery must not emit a machine-readable line, got:\n%s", out)
+	}
+}
+
 func TestDiagnosticsFormat_ContainsKeySections(t *testing.T) {
 	d := Diagnostics{
 		Version:  "9.9.9",
@@ -208,6 +243,7 @@ func TestRunActiveProbe_FormatsReport(t *testing.T) {
 		"--- rtc devices ---",
 		"/dev/rtc0",
 		"--- /etc/upstart/custom-login ---",
+		"--- launcher hunt ---",
 		"--- powerd lipc props ---",
 		"=== END ACTIVE PROBE ===",
 	} {
@@ -234,6 +270,43 @@ func TestRunActiveProbe_NoRTCDevices(t *testing.T) {
 	out := p.Format()
 	if !strings.Contains(out, "<none>") {
 		t.Errorf("expected '<none>' for absence of RTC devices, got:\n%s", out)
+	}
+}
+
+func TestTruncate(t *testing.T) {
+	if got := truncate("  hello  ", 10); got != "hello" {
+		t.Errorf("truncate trim = %q", got)
+	}
+	long := strings.Repeat("x", 20)
+	if got := truncate(long, 5); !strings.HasPrefix(got, "xxxxx") || !strings.Contains(got, "truncated") {
+		t.Errorf("truncate long = %q", got)
+	}
+}
+
+func TestGatherLauncherInfo_ListsPaths(t *testing.T) {
+	origCmdCtx := execCommandContext
+	origGlob := globInputs
+	t.Cleanup(func() {
+		execCommandContext = origCmdCtx
+		globInputs = origGlob
+	})
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+		return exec.Command("echo", name)
+	}
+	globInputs = func(pattern string) ([]string, error) {
+		if pattern == "/etc/upstart/*.conf" {
+			return []string{"/etc/upstart/framework.conf"}, nil
+		}
+		return nil, nil
+	}
+	osStat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	osReadFile = func(string) ([]byte, error) { return nil, os.ErrNotExist }
+
+	out := gatherLauncherInfo()
+	for _, want := range []string{"/etc/upstart", "/mnt/us/emergency.sh", "--- process tree ---"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("launcher info missing %q\n%s", want, out)
+		}
 	}
 }
 
