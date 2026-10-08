@@ -13,14 +13,14 @@ class TestCommuteSchedule(unittest.TestCase):
         dt = datetime(2026, 10, 8, 8, 15)
         self.assertTrue(is_peak_commute_hours(dt))
         self.assertEqual(get_commute_lighting(dt), (8, 12))
-        self.assertEqual(get_target_poll_interval(dt), 45)
+        self.assertEqual(get_target_poll_interval(dt), 60)
 
     def test_evening_rush(self):
         # 5:30 PM (17:30)
         dt = datetime(2026, 10, 8, 17, 30)
         self.assertTrue(is_peak_commute_hours(dt))
         self.assertEqual(get_commute_lighting(dt), (8, 12))
-        self.assertEqual(get_target_poll_interval(dt), 45)
+        self.assertEqual(get_target_poll_interval(dt), 60)
 
     def test_midday_eco(self):
         # 1:30 PM (13:30)

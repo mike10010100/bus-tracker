@@ -24,8 +24,12 @@ var Version = "0.0.0"
 const (
 	BinaryPath       = "/tmp/tracker"
 	ImagePath        = "/tmp/dashboard.png"
-	PeakPollInterval = 45 * time.Second
+	PeakPollInterval = 60 * time.Second
 	EcoPollInterval  = 10 * time.Minute
+	// Polls of a minute or more are aligned to the wall clock and delayed by
+	// this offset so the refresh lands just *after* the on-screen clock ticks
+	// over, rather than a hair before it.
+	PollSettleOffset = 500 * time.Millisecond
 	// ManualHoldDuration bounds the view-override hold and the manual-lighting
 	// hold (how long a user's explicit choice survives before auto resumes).
 	ManualHoldDuration = 45 * time.Minute
@@ -136,13 +140,25 @@ func (tc *TrackerClient) getNextPollInterval(serverIntervalSec int) time.Duratio
 		return time.Duration(serverIntervalSec) * time.Second
 	}
 
-	// Fallback calculation based on local time: 45s during rush, 10m off-peak
+	// Fallback calculation based on local time: 60s during rush, 10m off-peak
 	now := time.Now()
 	hour := float64(now.Hour()) + float64(now.Minute())/60.0
 	if (hour >= 7.5 && hour < 9.5) || (hour >= 16.5 && hour < 19.0) {
 		return PeakPollInterval
 	}
 	return EcoPollInterval
+}
+
+// alignDelay returns how long to wait (from `now`) so that the next poll lands
+// on the next wall-clock multiple of interval, offset by PollSettleOffset so it
+// fires just after the target boundary. Intervals below a minute are returned
+// unchanged (drifting polls are fine there).
+func alignDelay(now time.Time, interval time.Duration) time.Duration {
+	if interval < time.Minute {
+		return interval
+	}
+	untilBoundary := interval - time.Duration(now.UnixNano()%int64(interval))
+	return untilBoundary + PollSettleOffset
 }
 
 // getPanelSize returns the device framebuffer dimensions, detecting them once.
@@ -690,11 +706,17 @@ func run(parent context.Context) {
 	tc.runPollLoop(ctx, cancel, tc.getNextPollInterval(initialPollSec))
 }
 
-// runPollLoop drives the fetch/OTA cycle until ctx is cancelled. The initial
-// interval is injected so tests can run the loop at millisecond cadence.
+// runPollLoop drives the fetch/OTA cycle until ctx is cancelled. `interval` is
+// the initial wait; subsequent waits are re-derived from the server's reported
+// poll interval and aligned to the wall clock. The initial interval is injected
+// so tests can run the loop at millisecond cadence.
 func (tc *TrackerClient) runPollLoop(ctx context.Context, cancel context.CancelFunc, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	timer := time.NewTimer(alignDelay(time.Now(), interval))
+	defer timer.Stop()
+
+	reschedule := func(serverPollSec int) {
+		timer.Reset(alignDelay(time.Now(), tc.getNextPollInterval(serverPollSec)))
+	}
 
 	for {
 		select {
@@ -703,16 +725,16 @@ func (tc *TrackerClient) runPollLoop(ctx context.Context, cancel context.CancelF
 			return
 
 		case <-tc.refreshCh:
-			// Forced refresh requested via screen tap
+			// Forced refresh requested via screen tap.
 			serverPollSec := tc.fetchAndDrawDashboard(ctx, cancel)
-			ticker.Reset(tc.getNextPollInterval(serverPollSec))
+			reschedule(serverPollSec)
 
-		case <-ticker.C:
+		case <-timer.C:
 			// Fetch (and, if the server advertises a new build, OTA-update).
 			// There is no separate per-cycle OTA check: the dashboard response
 			// carries the server version, so a normal tick is one request.
 			serverPollSec := tc.fetchAndDrawDashboard(ctx, cancel)
-			ticker.Reset(tc.getNextPollInterval(serverPollSec))
+			reschedule(serverPollSec)
 		}
 	}
 }

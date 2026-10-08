@@ -279,11 +279,12 @@ def get_commute_lighting(dt=None):
 def get_target_poll_interval(dt=None):
     """
     Returns target Kindle poll interval in seconds:
-    - 45s during peak commute rush
+    - 60s during peak commute rush (the client aligns this to the top of each
+      minute, so the on-screen clock rolls exactly when the new data lands)
     - 600s (10 min) off-peak Eco Mode
     """
     if is_peak_commute_hours(dt=dt):
-        return 45
+        return 60
     return 600
 
 

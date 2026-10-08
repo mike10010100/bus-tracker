@@ -373,7 +373,7 @@ class TestDiscoveryAndLighting(unittest.TestCase):
         peak = datetime(2026, 1, 1, 8, 0)
         off = datetime(2026, 1, 1, 13, 0)
         self.assertEqual(server.get_commute_lighting(peak), (8, 12))
-        self.assertEqual(server.get_target_poll_interval(peak), 45)
+        self.assertEqual(server.get_target_poll_interval(peak), 60)
         self.assertEqual(server.get_commute_lighting(off), (0, 0))
         self.assertEqual(server.get_target_poll_interval(off), 600)
 
