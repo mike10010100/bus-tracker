@@ -13,10 +13,10 @@ from citibike import CitiBikeTracker
 WIDTH = 800
 HEIGHT = 480
 
-# Walk times from home (in minutes)
+# Walk times from home (in minutes, based on pedestrian street routing at ~65 m/min)
 WALK_TIMES = {
-    "20494": 2,  # Clinton St at 9th St (~2 min walk, 2 blocks west from 919 Park Ave)
-    "20512": 4,  # Washington St at 9th St (~4 min walk, 3 blocks east from 919 Park Ave)
+    "20494": 3,  # Clinton St at 9th St (~3 min walk, 246m street distance)
+    "20512": 5,  # Washington St at 9th St (~5 min walk, 322m street distance)
 }
 
 STOPS = [
@@ -24,13 +24,13 @@ STOPS = [
         "id": "20512",
         "name": "Washington & 9th",
         "subtitle": "Stop #20512 • via Lincoln Tunnel",
-        "walk_min": 4,
+        "walk_min": 5,
     },
     {
         "id": "20494",
         "name": "Clinton & 9th",
         "subtitle": "Stop #20494 • via Clinton Ave",
-        "walk_min": 2,
+        "walk_min": 3,
     },
 ]
 

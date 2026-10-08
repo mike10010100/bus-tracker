@@ -8,28 +8,29 @@ import time
 import urllib.request
 from typing import Dict, List, Any, Optional
 
-# Closest 3 Citi Bike stations to 919 Park Ave, Hoboken, NJ (40.7484552, -74.0302997)
+# Closest Citi Bike stations to 919 Park Ave, Hoboken, NJ (40.7484552, -74.0302997)
+# Walking times based on actual pedestrian street routing with crosswalks/signals (~65 m/min)
 DEFAULT_STATIONS = [
     {
         "id": "fadf00cf-d84a-49e8-9607-c67154915412",
         "name": "Clinton & 9th",
         "full_name": "Columbus Park - Clinton St & 9 St",
-        "walk_min": 2,
-        "distance_m": 184,
+        "walk_min": 3,
+        "distance_m": 246,
     },
     {
         "id": "f417d8da-0f15-49b0-9e3c-3c3e55c2691d",
         "name": "Washington & 11th",
         "full_name": "11 St & Washington St",
-        "walk_min": 4,
-        "distance_m": 315,
+        "walk_min": 7,
+        "distance_m": 442,
     },
     {
         "id": "519824e4-69ba-4270-a395-17c204f328f8",
         "name": "Washington & 8th",
         "full_name": "8 St & Washington St",
-        "walk_min": 4,
-        "distance_m": 327,
+        "walk_min": 7,
+        "distance_m": 462,
     },
 ]
 
@@ -108,8 +109,8 @@ class CitiBikeTracker:
                 "id": "fadf00cf-d84a-49e8-9607-c67154915412",
                 "name": "Clinton & 9th",
                 "full_name": "Columbus Park - Clinton St & 9 St",
-                "walk_min": 2,
-                "distance_m": 184,
+                "walk_min": 3,
+                "distance_m": 246,
                 "ebikes": 9,
                 "classic": 12,
                 "total_bikes": 21,
@@ -121,8 +122,8 @@ class CitiBikeTracker:
                 "id": "f417d8da-0f15-49b0-9e3c-3c3e55c2691d",
                 "name": "Washington & 11th",
                 "full_name": "11 St & Washington St",
-                "walk_min": 4,
-                "distance_m": 315,
+                "walk_min": 7,
+                "distance_m": 442,
                 "ebikes": 3,
                 "classic": 17,
                 "total_bikes": 20,
@@ -134,8 +135,8 @@ class CitiBikeTracker:
                 "id": "519824e4-69ba-4270-a395-17c204f328f8",
                 "name": "Washington & 8th",
                 "full_name": "8 St & Washington St",
-                "walk_min": 4,
-                "distance_m": 327,
+                "walk_min": 7,
+                "distance_m": 462,
                 "ebikes": 10,
                 "classic": 4,
                 "total_bikes": 14,
