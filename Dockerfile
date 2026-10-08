@@ -20,7 +20,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy server and dashboard rendering application files
-COPY bus_tracker.py render_dashboard.py server.py tracker-arm ./
+COPY bus_tracker.py citibike.py render_dashboard.py server.py tracker-arm ./
 
 # Expose HTTP port and Auto-Discovery UDP port
 EXPOSE 8000/tcp
