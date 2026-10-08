@@ -1,15 +1,22 @@
-.PHONY: all check test vet fmt fmt-check build clean
+.PHONY: all check test test-go test-py vet fmt fmt-check build clean
 
 # Default target
 all: check build
 
 # Run complete verification suite
-check: fmt-check vet test
+check: fmt-check vet test-go test-py
+
+test: test-go test-py
 
 # Run Go tests with race detection and verbose reporting
-test:
+test-go:
 	@echo "==> Running Go unit tests with data race detector..."
 	@cd client-go && go test -v -race ./...
+
+# Run Python unit tests
+test-py:
+	@echo "==> Running Python unit tests..."
+	@python3 -m unittest discover -s . -p "test_*.py" -v
 
 # Run static analysis
 vet:

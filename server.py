@@ -17,6 +17,7 @@ except ImportError:
     ZEROCONF_AVAILABLE = False
 
 from bus_tracker import NJTransitBusTracker
+from citibike import CitiBikeTracker
 from render_dashboard import render_dashboard, STOPS, get_mock_data
 
 PORT = int(os.environ.get("PORT", 8000))
@@ -26,6 +27,7 @@ CACHE_TTL = 30  # Re-fetch from NJ Transit at most once every 30 seconds
 cached_image_bytes = None
 last_render_time = 0
 tracker = None
+cb_tracker = CitiBikeTracker(cache_ttl=30)
 
 
 last_batt_level = None
@@ -73,10 +75,22 @@ def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False
             print(f"[Server] API fetch error ({e}), showing offline state...")
             stops_data = {stop["id"]: [] for stop in STOPS}
 
+    # Fetch live Citi Bike station status
+    cb_data = []
+    if use_mock:
+        cb_data = cb_tracker.get_mock_data()
+    else:
+        try:
+            cb_data = cb_tracker.get_station_status()
+        except Exception as e:
+            print(f"[Server] Citi Bike fetch error ({e}), falling back to cached/mock...")
+            cb_data = cb_tracker.get_mock_data()
+
     # Render base 800x480 dashboard
     img_path = "/tmp/server_dashboard.png"
     render_dashboard(
         stops_data,
+        citibike_data=cb_data,
         output_path=img_path,
         is_mock=use_mock,
         batt_level=batt_level,
