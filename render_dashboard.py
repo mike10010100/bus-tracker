@@ -15,8 +15,8 @@ HEIGHT = 480
 
 # Walk times from home (in minutes)
 WALK_TIMES = {
-    "20512": 3,  # Washington St at 9th St
-    "20494": 4,  # Clinton St at 9th St
+    "20494": 2,  # Clinton St at 9th St (~2 min walk, 2 blocks west from 919 Park Ave)
+    "20512": 4,  # Washington St at 9th St (~4 min walk, 3 blocks east from 919 Park Ave)
 }
 
 STOPS = [
@@ -24,13 +24,13 @@ STOPS = [
         "id": "20512",
         "name": "Washington & 9th",
         "subtitle": "Stop #20512 • via Lincoln Tunnel",
-        "walk_min": 3,
+        "walk_min": 4,
     },
     {
         "id": "20494",
         "name": "Clinton & 9th",
         "subtitle": "Stop #20494 • via Clinton Ave",
-        "walk_min": 4,
+        "walk_min": 2,
     },
 ]
 
@@ -78,6 +78,34 @@ def parse_minutes(eta_text: str) -> Optional[int]:
     if match:
         return int(match.group(1))
     return None
+
+
+def draw_header_badge(
+    draw: ImageDraw.ImageDraw,
+    x0: int,
+    y0: int,
+    text: str,
+    font,
+    pad_x: int = 14,
+    pad_y: int = 5,
+    radius: int = 6,
+) -> int:
+    """
+    Draws an inverted black badge with white text, perfectly centered with generous padding.
+    Returns the right edge (x1) of the badge bounding box.
+    """
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    box_w = tw + 2 * pad_x
+    box_h = 32
+    box_x1 = x0 + box_w
+    box_y1 = y0 + box_h
+    draw.rounded_rectangle([x0, y0, box_x1, box_y1], radius=radius, fill="black")
+    text_x = x0 + (box_w - tw) // 2 - bbox[0]
+    text_y = y0 + (box_h - th) // 2 - bbox[1]
+    draw.text((text_x, text_y), text, fill="white", font=font)
+    return box_x1
 
 
 def draw_rounded_card(draw: ImageDraw.ImageDraw, xy, radius=12, fill="white", outline="black", width=2):
@@ -199,11 +227,9 @@ def render_morning_view(
     now_date_str = now.strftime("%A, %b %-d")
 
     # 1. Header
-    draw.rounded_rectangle([20, 14, 120, 46], radius=6, fill="black")
-    draw.text((28, 18), "CITI BIKE", fill="white", font=font_title)
-
-    draw.text((130, 15), "HOBOKEN COMMUTE • MORNING DOCKS", fill="black", font=font_title)
-    draw.text((130, 39), "919 PARK AVE • CITI BIKE HERO & 126 BUS", fill="#555555", font=font_header_sub)
+    b_x1 = draw_header_badge(draw, 20, 14, "CITI BIKE", font_title, pad_x=12)
+    draw.text((b_x1 + 12, 15), "HOBOKEN COMMUTE • MORNING DOCKS", fill="black", font=font_title)
+    draw.text((b_x1 + 12, 39), "919 PARK AVE • CITI BIKE HERO & 126 BUS", fill="#555555", font=font_header_sub)
 
     time_bbox = draw.textbbox((0, 0), now_time_str, font=font_time)
     time_w = time_bbox[2] - time_bbox[0]
@@ -380,12 +406,10 @@ def render_evening_view(
     now_date_str = now.strftime("%A, %b %-d")
 
     # 1. Header
-    draw.rounded_rectangle([20, 14, 75, 46], radius=6, fill="black")
-    draw.text((31, 18), "126", fill="white", font=font_title)
-
-    draw.text((88, 15), "HOBOKEN → NYC PORT AUTHORITY", fill="black", font=font_title)
+    b_x1 = draw_header_badge(draw, 20, 14, "126", font_title, pad_x=16)
+    draw.text((b_x1 + 12, 15), "HOBOKEN → NYC PORT AUTHORITY", fill="black", font=font_title)
     sub_title = "NJ TRANSIT 126 & CITI BIKE LIVE TRACKER" if has_citibike else "NJ TRANSIT REAL-TIME TRACKER"
-    draw.text((88, 39), sub_title, fill="#555555", font=font_header_sub)
+    draw.text((b_x1 + 12, 39), sub_title, fill="#555555", font=font_header_sub)
 
     time_bbox = draw.textbbox((0, 0), now_time_str, font=font_time)
     time_w = time_bbox[2] - time_bbox[0]
