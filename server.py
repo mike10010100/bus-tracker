@@ -3,6 +3,7 @@ import sys
 import time
 import io
 import urllib.parse
+from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from PIL import Image
 
@@ -90,6 +91,25 @@ def format_for_kindle(base_img, orientation="landscape", rotation=90):
     return base_img.convert("L")
 
 
+def get_astronomical_lighting():
+    """
+    Returns (brightness, warmth) based on Hoboken, NJ local time.
+    Values range from 0 to 24.
+    """
+    now = datetime.now()
+    hour = now.hour + now.minute / 60.0
+
+    # 7:30 AM to 6:30 PM (18.5) -> Daytime: Off (0, 0)
+    if 7.5 <= hour < 18.5:
+        return 0, 0
+    # 6:30 PM to 11:00 PM (23.0) -> Evening: Cozy Warm Glow (8, 12)
+    elif 18.5 <= hour < 23.0:
+        return 8, 12
+    # 11:00 PM to 7:30 AM -> Night: Dark (0, 0)
+    else:
+        return 0, 0
+
+
 tracker_stopped = False
 
 
@@ -140,9 +160,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             img.save(buf, format="PNG")
             img_bytes = buf.getvalue()
 
+            brightness, warmth = get_astronomical_lighting()
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
             self.send_header("Content-Length", str(len(img_bytes)))
+            self.send_header("X-Kindle-Brightness", str(brightness))
+            self.send_header("X-Kindle-Warmth", str(warmth))
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.end_headers()
             self.wfile.write(img_bytes)
