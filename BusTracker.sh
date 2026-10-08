@@ -16,6 +16,9 @@ cleanup() {
     # Re-enable screensaver so Kindle can sleep normally again
     lipc-set-prop -i com.lab126.powerd preventScreenSaver 0 2>/dev/null
 
+    # Clear the e-ink screen so old bus image does not linger
+    eips -c >/dev/null 2>&1
+
     # Tell Kindle UI manager to bring back the Home / Library screen
     lipc-set-prop -i com.lab126.appmgrd start app://com.lab126.booklet.home 2>/dev/null
     exit 0
