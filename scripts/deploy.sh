@@ -39,24 +39,24 @@ fi
 
 IMAGE_TAG="v${VERSION}"
 echo "======================================================================"
-echo "🚌 Deploying NJ Transit Bus Tracker (${IMAGE_TAG})"
+echo "🚌 Deploying Transit Tracker (${IMAGE_TAG})"
 echo "======================================================================"
 
 # Build versioned image (Docker multi-stage compiles tracker-arm automatically)
 export IMAGE_TAG
-${COMPOSE_CMD} build bus-tracker
+${COMPOSE_CMD} build transit-tracker
 
 # Maintain 'latest' tag pointing to the new versioned build
-if docker image inspect "bus-tracker:${IMAGE_TAG}" >/dev/null 2>&1; then
-    docker tag "bus-tracker:${IMAGE_TAG}" "bus-tracker:latest" || true
+if docker image inspect "transit-tracker:${IMAGE_TAG}" >/dev/null 2>&1; then
+    docker tag "transit-tracker:${IMAGE_TAG}" "transit-tracker:latest" || true
 fi
 
 # Launch the stack
-${COMPOSE_CMD} up -d --force-recreate bus-tracker
+${COMPOSE_CMD} up -d --force-recreate transit-tracker
 
-# Wait for bus-tracker to pass healthcheck
-echo "⏳ Waiting for Bus Tracker to pass healthcheck..."
-CONTAINER_NAME="bus-tracker"
+# Wait for transit-tracker to pass healthcheck
+echo "⏳ Waiting for Transit Tracker to pass healthcheck..."
+CONTAINER_NAME="transit-tracker"
 MAX_WAIT_SECS=60
 ELAPSED=0
 HEALTH_STATUS="unknown"
@@ -65,7 +65,7 @@ while [[ ${ELAPSED} -lt ${MAX_WAIT_SECS} ]]; do
     HEALTH_STATUS=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null || echo "starting")
     if [[ "${HEALTH_STATUS}" == "healthy" ]]; then
         echo ""
-        echo "✅ Bus Tracker is healthy and serving dashboard (took ${ELAPSED}s)."
+        echo "✅ Transit Tracker is healthy and serving dashboard (took ${ELAPSED}s)."
         break
     fi
     sleep 2
@@ -78,7 +78,7 @@ if [[ "${HEALTH_STATUS}" != "healthy" ]]; then
     if [[ "${FINAL_STATUS}" == "healthy" ]]; then
         HEALTH_STATUS="healthy"
         echo ""
-        echo "✅ Bus Tracker is healthy and serving dashboard."
+        echo "✅ Transit Tracker is healthy and serving dashboard."
     else
         echo ""
         echo "❌ Error: Container '${CONTAINER_NAME}' did not report healthy within ${MAX_WAIT_SECS}s (status: ${HEALTH_STATUS})." >&2
@@ -88,5 +88,5 @@ if [[ "${HEALTH_STATUS}" != "healthy" ]]; then
 fi
 
 echo "----------------------------------------------------------------------"
-echo "✅ Deployed bus-tracker:${IMAGE_TAG} (and latest) successfully!"
+echo "✅ Deployed transit-tracker:${IMAGE_TAG} (and latest) successfully!"
 echo "======================================================================"

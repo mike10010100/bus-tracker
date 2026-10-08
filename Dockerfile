@@ -1,4 +1,4 @@
-# Multi-architecture Dockerfile for NJ Transit Bus Tracker Server
+# Multi-architecture Dockerfile for Transit Tracker Server
 # Supports linux/amd64 (x86_64 PC/servers) and linux/arm64 (Raspberry Pi 3/4/5, Apple Silicon)
 
 # Stage 1: Compile static Kindle ARM client (tracker-arm)

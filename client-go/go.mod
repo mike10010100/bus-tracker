@@ -1,3 +1,3 @@
-module github.com/mike10010100/bus-tracker/client-go
+module github.com/mike10010100/transit-tracker/client-go
 
 go 1.27.1

@@ -432,7 +432,7 @@ def start_discovery_responder(http_port=PORT, version=SERVER_VERSION):
             try:
                 data, addr = sock.recvfrom(1024)
                 msg = data.decode("utf-8", errors="ignore").strip()
-                if "BUS_TRACKER_DISCOVER" in msg:
+                if "BUS_TRACKER_DISCOVER" in msg or "TRANSIT_TRACKER_DISCOVER" in msg:
                     resp_ip = get_local_ip()
                     reply = f"BUS_TRACKER_OFFER http://{resp_ip}:{http_port} {version}\n".encode("utf-8")
                     sock.sendto(reply, addr)
@@ -482,7 +482,7 @@ if __name__ == "__main__":
     httpd = HTTPServer(server_address, DashboardHandler)
     local_ip = get_local_ip()
     print(f"==================================================")
-    print(f"  NJ Transit Bus Tracker Server Running on Port {PORT}")
+    print(f"  Hoboken Transit Tracker Server Running on Port {PORT}")
     print(f"  Local View:      http://localhost:{PORT}")
     print(f"  Kindle Endpoint: http://{local_ip}:{PORT}/dashboard.png?kindle=pw5")
     print(f"  Auto-Discovery:  UDP Port {DISCOVERY_PORT} & mDNS (_bustracker._tcp.local)")

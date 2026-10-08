@@ -1,8 +1,8 @@
-# NJ Transit 126 Bus Tracker (E-Ink Dashboard & Kindle Client)
+# Hoboken Transit Tracker (E-Ink Dashboard & Kindle Client)
 
-A real-time bus arrival tracker for NJ Transit Route 126 in Hoboken, NJ, tracking NYC-bound buses at:
-- **Washington St at 9th St** (Stop `#20512`)
-- **Clinton St at 9th St** (Stop `#20494`)
+A real-time transit arrival and dock dashboard for Hoboken, NJ, tracking:
+- **NJ Transit Route 126** NYC-bound buses at Washington St & 9th St (`#20512`) and Clinton St & 9th St (`#20494`).
+- **Citi Bike** live dock & e-bike availability at nearby stations (Willow & 12th, Clinton & 7th, Grand & 6th, etc.).
 
 Built for low-power e-ink wall displays and jailbroken Amazon Kindle devices (tested on Kindle Paperwhite 5 / PW5).
 
@@ -15,10 +15,11 @@ flowchart TD
     subgraph Cloud["External APIs"]
         NJT["NJ Transit BUSDV2 API"]
         GQL["NJ Transit GraphQL Fallback"]
+        GBFS["Citi Bike GBFS Feed"]
     end
 
     subgraph Host["Host Server (Mac / Linux / Raspberry Pi)"]
-        Tracker["bus_tracker.py (Dual-Source Poller)"]
+        Tracker["bus_tracker.py & citibike.py"]
         Renderer["render_dashboard.py (8-bit Grayscale Pillow Canvas)"]
         Server["server.py (HTTP Server on Port 8000)"]
         Tracker --> Renderer --> Server
@@ -26,19 +27,20 @@ flowchart TD
 
     subgraph Kindle["Kindle Paperwhite (PW5)"]
         Launcher["BusTracker.sh (Bootstrap Launcher)"]
-        GoClient["tracker-arm (Native Go Client v1.2.1)"]
+        GoClient["tracker-arm (Native Go Client)"]
         EIPS["eips (Native E-Ink Framebuffer)"]
         Touch["pt_mt Multi-Touch Digitizer (/dev/input/event1)"]
         Power["bd71828-pwrkey Power Key (/dev/input/event0)"]
         
         Launcher -->|OTA Hot-Reload| GoClient
         GoClient -->|Push Framebuffer| EIPS
-        Touch -->|Single Tap: Cycle Light\nDouble Tap: Exit| GoClient
+        Touch -->|Tap: Cycle Light / Switch View\nDouble Tap: Exit| GoClient
         Power -->|Hardware Press: Exit| GoClient
     end
 
     NJT --> Tracker
     GQL --> Tracker
+    GBFS --> Tracker
     Server -->|dashboard.png?kindle=pw5| GoClient
     Server -->|tracker-arm (OTA Updates)| Launcher
 ```
@@ -48,8 +50,10 @@ flowchart TD
 ## Features
 
 - **Dual-Redundancy Arrival Engine:** Primary polling against NJ Transit DepartureVision (BUSDV2) with instant automatic fallback to public GraphQL API.
+- **Citi Bike Dock Telemetry:** Live tracking of nearby Citi Bike docks with real-time e-bike availability prioritization.
 - **Native Kindle Paperwhite 5 Support:** Standalone statically linked Go ARM client running in memory (`/tmp/tracker`).
 - **Touch Gestures:**
+  - **Bottom-Left Corner Tap:** Cycle views between NJ Transit Bus departures and Citi Bike dock statuses.
   - **Single Tap Anywhere:** Cycles frontlight brightness (**Off** $\rightarrow$ **Cozy 8** $\rightarrow$ **Bright 18** $\rightarrow$ **Off**) instantly without flickering the e-ink screen.
   - **Double Tap Anywhere (< 380ms):** Clean exit back to the Kindle Library / Home booklet.
   - **Hardware Power Button:** Clean exit to Kindle Library.
@@ -57,7 +61,7 @@ flowchart TD
   - **Top-Left Corner Tap:** Immediate arrival refresh shortcut.
 - **Astronomical Auto-Dimming:** Automatically adjusts frontlight brightness and warmth based on local astronomical time in Hoboken, NJ (Daytime: Off, Evening: Cozy Amber, Overnight: Dark). Manual tap overrides hold for 45 minutes.
 - **Battery Telemetry & Indicator:** Real-time hardware battery percentage and charging state (`⚡`) queried directly via Kindle `lipc` and displayed in the top header and footer status bar.
-- **LAN Auto-Discovery (Zero-Config):** Automatically discovers the running server across the local network via mDNS (`_bustracker._tcp.local`) and UDP broadcast (`BUS_TRACKER_DISCOVER` on port 8001), saving the discovered IP to storage.
+- **LAN Auto-Discovery (Zero-Config):** Automatically discovers the running server across the local network via mDNS (`_bustracker._tcp.local`) and UDP broadcast (`BUS_TRACKER_DISCOVER` / `TRANSIT_TRACKER_DISCOVER` on port 8001), saving the discovered IP to storage.
 - **Wireless Over-The-Air (OTA) Hot-Reloading:** The Kindle polls the server and automatically self-updates its running Go binary in RAM via `syscall.Exec` when a new build is available on the server.
 - **Local Fallback Mode:** Caches the last valid binary and offline notification if the server is unreachable.
 
@@ -71,8 +75,8 @@ Run the server 24/7 as an appliance with automatic restarts on reboot:
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/mike10010100/bus-tracker.git
-cd bus-tracker
+git clone https://github.com/mike10010100/transit-tracker.git
+cd transit-tracker
 
 # 2. (Optional) Configure NJ Transit credentials
 cp .env.example .env
