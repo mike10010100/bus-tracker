@@ -48,9 +48,8 @@ def get_fresh_dashboard_image(use_mock=False):
                     })
                 stops_data[sid] = arrivals
         except Exception as e:
-            print(f"[Server] API fetch error ({e}), falling back to mock data...")
-            stops_data = get_mock_data()
-            use_mock = True
+            print(f"[Server] API fetch error ({e}), showing offline state...")
+            stops_data = {stop["id"]: [] for stop in STOPS}
 
     # Render base 800x480 dashboard
     img_path = "/tmp/server_dashboard.png"

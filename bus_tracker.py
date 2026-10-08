@@ -74,26 +74,86 @@ class NJTransitBusTracker:
 
         return self.token
 
-    def get_arrivals(self, stop_id: str, route: str = "126") -> List[Dict[str, Any]]:
+    GRAPHQL_URL = "https://www.njtransit.com/api/graphql/graphql"
+    GRAPHQL_QUERY = """
+    query BusArrivalsByStopID($stopID: ID!) {
+      getBusArrivalsByStopID(stopID: $stopID) {
+        publicRoute
+        header
+        lanegate
+        departuretime
+        departurestatus
+        schedDepTime
+        vehicleId
+        passload
+      }
+    }
+    """
+
+    def get_arrivals_graphql(self, stop_id: str, route: str = "126") -> List[Dict[str, Any]]:
         """
-        Fetches upcoming bus arrivals for a specific stop number and route.
+        Fetches live arrivals via NJ Transit's public web GraphQL API.
+        No token or authentication required; highly reliable fallback.
         """
-        token = self.get_token()
         resp = self.session.post(
-            self.bus_dv_url,
-            data={
-                "token": token,
-                "stop": str(stop_id),
-                "route": route,
-                "direction": "",
-                "IP": "",
+            self.GRAPHQL_URL,
+            json={
+                "operationName": "BusArrivalsByStopID",
+                "variables": {"stopID": str(stop_id)},
+                "query": self.GRAPHQL_QUERY,
             },
+            headers={"User-Agent": "Mozilla/5.0"},
             timeout=10,
         )
         resp.raise_for_status()
-        data = resp.json()
-        trips = data.get("DVTrip") or []
-        return trips
+        data = resp.json().get("data", {}).get("getBusArrivalsByStopID") or []
+        results = []
+        for item in data:
+            pub_route = item.get("publicRoute") or ""
+            if route and pub_route.strip() != route.strip():
+                continue
+            results.append({
+                "public_route": pub_route,
+                "header": item.get("header"),
+                "lanegate": item.get("lanegate"),
+                "departuretime": item.get("departuretime"),
+                "departurestatus": item.get("departurestatus"),
+                "sched_dep_time": item.get("schedDepTime"),
+                "vehicle_id": item.get("vehicleId"),
+                "passload": item.get("passload"),
+            })
+        return results
+
+    def get_arrivals(self, stop_id: str, route: str = "126") -> List[Dict[str, Any]]:
+        """
+        Fetches upcoming bus arrivals for a specific stop number and route.
+        Tries Developer BUSDV2 API first, automatically falling back to
+        the public GraphQL API if the developer server is in maintenance.
+        """
+        try:
+            token = self.get_token()
+            resp = self.session.post(
+                self.bus_dv_url,
+                data={
+                    "token": token,
+                    "stop": str(stop_id),
+                    "route": route,
+                    "direction": "",
+                    "IP": "",
+                },
+                timeout=8,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            trips = data.get("DVTrip") or []
+            return trips
+        except Exception as e:
+            # Automatic fallback to official website GraphQL API
+            try:
+                return self.get_arrivals_graphql(stop_id=stop_id, route=route)
+            except Exception as e2:
+                print(f"[Tracker] Both BUSDV2 ({e}) and GraphQL ({e2}) failed.")
+                return []
 
     def get_summary(self, stops: Dict[str, str], route: str = "126") -> Dict[str, List[Dict[str, str]]]:
         """
