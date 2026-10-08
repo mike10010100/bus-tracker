@@ -2,6 +2,9 @@
 # Name: 126 Bus Tracker
 # Author: Antigravity
 
+# Silence all standard error so nothing ever prints over the e-ink display
+exec 2>/dev/null
+
 # Ensure clean exit and restore Kindle UI on any exit signal
 cleanup() {
     # Stop background watchers
@@ -78,8 +81,8 @@ find_touch_dev() {
         dd if="$TOUCH_DEV" bs=64 count=1 >/dev/null 2>&1
         [ -f /tmp/stop_tracker ] && break
 
-        # Debounce: drain event stream for 0.4s so one tap isn't multi-triggered
-        sleep 0.4
+        # Debounce: drain event stream so one tap isn't multi-triggered
+        usleep 400000 2>/dev/null || sleep 1 2>/dev/null
         dd if="$TOUCH_DEV" bs=2048 count=1 >/dev/null 2>&1
 
         # Cycle frontlight brightness: Off (0) -> Cozy (8) -> Bright (18) -> Off (0)
