@@ -279,7 +279,7 @@ def render_dashboard(
     sync_status = "● LIVE FEED CONNECTED" if not is_mock else "● PREVIEW MODE (MOCK DATA)"
     draw.text((20, footer_y + 12), sync_status, fill="black", font=font_footer)
 
-    center_text = f"Last Synced: {now.strftime('%-I:%M:%S %p')}  •  Auto-refreshes every 60s"
+    center_text = f"Double-tap: Exit  •  Tap: Light  •  Last Synced: {now.strftime('%-I:%M %p')}"
     cb = draw.textbbox((0, 0), center_text, font=font_footer)
     cw = cb[2] - cb[0]
     draw.text(((WIDTH - cw) // 2, footer_y + 12), center_text, fill="#555555", font=font_footer)

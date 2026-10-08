@@ -114,6 +114,9 @@ tracker_stopped = False
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self.do_GET()
+
     def do_GET(self):
         global tracker_stopped
         parsed = urllib.parse.urlparse(self.path)
@@ -139,20 +142,35 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.wfile.write(msg)
             return
 
-        if parsed.path == "/client.sh":
-            client_path = os.path.join(os.path.dirname(__file__), "client.sh")
-            try:
-                with open(client_path, "rb") as f:
-                    content = f.read()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/x-sh")
-                self.send_header("Content-Length", str(len(content)))
-                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        if parsed.path in ["/tracker-arm", "/client.sh"]:
+            filename = "tracker-arm" if parsed.path == "/tracker-arm" else "client.sh"
+            content_type = "application/octet-stream" if filename == "tracker-arm" else "text/x-sh"
+            file_path = os.path.join(os.path.dirname(__file__), filename)
+            if not os.path.exists(file_path):
+                self.send_response(404)
                 self.end_headers()
-                self.wfile.write(content)
-            except Exception as e:
-                self.send_response(500)
+                return
+
+            stat = os.stat(file_path)
+            last_mod = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime(stat.st_mtime))
+
+            # Handle conditional request (If-Modified-Since)
+            ims = self.headers.get("If-Modified-Since")
+            if ims == last_mod:
+                self.send_response(304)
                 self.end_headers()
+                return
+
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(stat.st_size))
+            self.send_header("Last-Modified", last_mod)
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+
+            if self.command == "GET":
+                with open(file_path, "rb") as f:
+                    self.wfile.write(f.read())
             return
 
         if parsed.path in ["/dashboard.png", "/bus.png"]:

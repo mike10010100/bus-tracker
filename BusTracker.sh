@@ -1,36 +1,36 @@
 #!/bin/sh
 # Name: 126 Bus Tracker
 # Author: Antigravity
-# Ultra-lightweight OTA Bootstrap Loader - Never needs to be updated via USB!
+# Permanent OTA Bootstrap Launcher - Downloads & launches native Go binary
 
 exec 2>/dev/null
 
 SERVER="http://192.168.86.193:8000"
-RUNNER="/tmp/client.sh"
-FALLBACK="/mnt/us/documents/client_backup.sh"
+BINARY="/tmp/tracker"
+BACKUP="/mnt/us/documents/tracker_backup"
 
-# 1. Fetch latest runner script directly from Mac into RAM
-curl -s -m 8 "$SERVER/client.sh" -o "$RUNNER"
+# 1. Download compiled binary if updated (conditional curl -z)
+curl -s -m 15 -z "$BINARY" "$SERVER/tracker-arm" -o "$BINARY"
 
-# 2. If successfully downloaded, back it up locally and run it
-if [ -s "$RUNNER" ]; then
-    cp "$RUNNER" "$FALLBACK" 2>/dev/null
-    chmod +x "$RUNNER"
-    exec sh "$RUNNER"
+# 2. If valid binary in RAM, cache it to storage and execute it
+if [ -s "$BINARY" ]; then
+    chmod +x "$BINARY"
+    cp "$BINARY" "$BACKUP" 2>/dev/null
+    exec "$BINARY"
 fi
 
-# 3. If Mac server is offline, run cached local backup if available
-if [ -s "$FALLBACK" ]; then
-    cp "$FALLBACK" "$RUNNER"
-    chmod +x "$RUNNER"
-    exec sh "$RUNNER"
+# 3. If Mac server is offline, launch cached backup
+if [ -s "$BACKUP" ]; then
+    cp "$BACKUP" "$BINARY" 2>/dev/null
+    chmod +x "$BINARY"
+    exec "$BINARY"
 fi
 
-# 4. If completely offline with no cache, show clean notification and exit
+# 4. Offline message
 eips -c
-eips 15 18 "Cannot reach Bus Tracker server at:"
+eips 15 18 "Cannot connect to Bus Tracker server at:"
 eips 15 20 "$SERVER"
-eips 15 23 "Please check Wi-Fi or start server on Mac."
+eips 15 23 "Please start server on Mac and retry."
 sleep 8
 eips -c
 lipc-set-prop -i com.lab126.appmgrd start app://com.lab126.booklet.home 2>/dev/null
