@@ -303,10 +303,48 @@ func TestGatherLauncherInfo_ListsPaths(t *testing.T) {
 	osReadFile = func(string) ([]byte, error) { return nil, os.ErrNotExist }
 
 	out := gatherLauncherInfo()
-	for _, want := range []string{"/etc/upstart", "/mnt/us/emergency.sh", "--- process tree ---"} {
+	for _, want := range []string{
+		"/etc/upstart",
+		"/mnt/us/emergency.sh",
+		"--- /etc/crontab/root ---",
+		"--- /var/local/kmc/run_hotfix.sh ---",
+		"--- /mnt/us/documents/BusTracker.sh ---",
+		"--- process tree ---",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("launcher info missing %q\n%s", want, out)
 		}
+	}
+}
+
+func TestGatherLauncherInfo_DumpsSchedulerContents(t *testing.T) {
+	origCmdCtx := execCommandContext
+	origGlob := globInputs
+	t.Cleanup(func() {
+		execCommandContext = origCmdCtx
+		globInputs = origGlob
+	})
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+		return exec.Command("echo", name)
+	}
+	globInputs = func(string) ([]string, error) { return nil, nil }
+	osStat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	osReadFile = func(path string) ([]byte, error) {
+		if path == "/var/local/kmc/run_hotfix.sh" {
+			return []byte("#!/bin/sh\nexec BusTracker.sh\n"), nil
+		}
+		if path == "/etc/crontab/root" {
+			return []byte("# cron dir\n"), nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	out := gatherLauncherInfo()
+	if !strings.Contains(out, "exec BusTracker.sh") {
+		t.Errorf("expected KMC hotifx contents, got:\n%s", out)
+	}
+	if !strings.Contains(out, "# cron dir") {
+		t.Errorf("expected crontab contents, got:\n%s", out)
 	}
 }
 

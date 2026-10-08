@@ -285,10 +285,39 @@ func gatherLauncherInfo() string {
 		}
 	}
 
+	// Dump the files that actually govern launching/scheduling, discovered from
+	// the process tree: the crond spool, the KMC launcher, and our own launcher
+	// script. These are the places a sleep-mode change would live.
+	for _, f := range schedulerProbeFiles {
+		content := readPathOrMissing(f)
+		if content == "<missing>" {
+			fmt.Fprintf(&b, "--- %s ---\n  <missing>\n", f)
+			continue
+		}
+		if content == "<directory>" {
+			listing := runProbeCmd("ls", "-la", f)
+			fmt.Fprintf(&b, "--- %s (dir) ---\n%s\n", f, indent(listing))
+			continue
+		}
+		fmt.Fprintf(&b, "--- %s ---\n%s\n", f, indent(truncate(content, 3000)))
+	}
+
 	// The running process tree can reveal the parent of our launcher.
 	fmt.Fprintf(&b, "--- process tree ---\n%s\n", indent(runProbeCmd("ps", "-ef")))
 
 	return strings.TrimSpace(b.String())
+}
+
+// schedulerProbeFiles are the concrete text files/paths worth dumping to
+// understand how the tracker is launched and how jobs are scheduled here.
+var schedulerProbeFiles = []string{
+	"/etc/crontab/root",                    // crond's actual spool file
+	"/var/local/kmc/kmc.conf",              // KMC config
+	"/var/local/kmc/run_hotfix.sh",         // KMC hotfix runner
+	"/var/local/kmc/sbin",                  // KMC helper binaries
+	"/var/local/kmc/system_patches",        // KMC patches
+	"/mnt/us/documents/BusTracker.sh",      // our bootstrap launcher
+	"/mnt/us/documents/tracker_server.txt", // persisted server URL
 }
 
 func truncate(s string, n int) string {
