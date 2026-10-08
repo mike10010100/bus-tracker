@@ -22,7 +22,7 @@ from render_dashboard import render_dashboard, STOPS, get_mock_data, resolve_vie
 
 PORT = int(os.environ.get("PORT", 8000))
 DISCOVERY_PORT = 8001
-SERVER_VERSION = "1.5.3"
+SERVER_VERSION = "1.5.4"
 CACHE_TTL = 30  # Re-fetch from NJ Transit at most once every 30 seconds
 cached_image_bytes = None
 last_render_time = 0

@@ -67,12 +67,12 @@ def get_font(size: int, bold: bool = False):
 def parse_minutes(eta_text: str) -> Optional[int]:
     """
     Extracts the arrival minute countdown from ETA strings like:
-    'in 9 mins (11:36 PM)', 'in 3 mins', 'APPROACHING', etc.
+    'in 9 mins (11:36 PM)', 'in 3 mins', 'APPROACHING', 'All Aboard', etc.
     """
     if not eta_text:
         return None
     text = eta_text.lower()
-    if "approach" in text or "due" in text or "now" in text:
+    if "approach" in text or "due" in text or "now" in text or "all aboard" in text or "board" in text:
         return 0
     match = re.search(r"(\d+)\s*min", text)
     if match:
@@ -280,13 +280,25 @@ def render_morning_view(
         draw.rectangle([cx0 + 1, cb_y0 + pill_h - 12, cx1 - 1, cb_y0 + pill_h], fill="#f2f2f2")
         draw.line([(cx0, cb_y0 + pill_h), (cx1, cb_y0 + pill_h)], fill="black", width=2)
 
-        draw.text((cx0 + 10, cb_y0 + 6), c["name"].upper(), fill="black", font=font_card_title)
-
         walk_text = f"{c['walk_min']} MIN"
         wb = draw.textbbox((0, 0), walk_text, font=font_walk)
         ww = wb[2] - wb[0]
-        draw.rounded_rectangle([cx1 - ww - 16, cb_y0 + 11, cx1 - 8, cb_y0 + 33], radius=4, fill="black")
+        badge_x0 = cx1 - ww - 16
+        draw.rounded_rectangle([badge_x0, cb_y0 + 11, cx1 - 8, cb_y0 + 33], radius=4, fill="black")
         draw.text((cx1 - ww - 12, cb_y0 + 15), walk_text, fill="white", font=font_walk)
+
+        card_title_font = font_card_title
+        max_title_w = badge_x0 - (cx0 + 10) - 6
+        for size in [16 if is_tall else 15, 14, 13, 12]:
+            candidate_font = get_font(size, bold=True)
+            tb = draw.textbbox((0, 0), c["name"].upper(), font=candidate_font)
+            if (tb[2] - tb[0]) <= max_title_w:
+                card_title_font = candidate_font
+                break
+        else:
+            card_title_font = get_font(11, bold=True)
+
+        draw.text((cx0 + 10, cb_y0 + 6), c["name"].upper(), fill="black", font=card_title_font)
 
         if c.get("is_offline"):
             draw.text((cx0 + 14, cb_y0 + (90 if is_tall else 80)), "STATION OFFLINE", fill="#666666", font=font_card_title)
@@ -515,7 +527,11 @@ def render_evening_view(
                     cd_str = str(first_min)
                     unit_str = "MIN"
             else:
-                cd_str = first_eta_raw[:5] if first_eta_raw else "--"
+                time_match = re.search(r"\b(\d{1,2}:\d{2}(?:\s*[AP]M)?)\b", first_eta_raw, re.IGNORECASE)
+                if time_match:
+                    cd_str = time_match.group(1)
+                else:
+                    cd_str = first_eta_raw[:7].strip() if first_eta_raw else "--"
                 unit_str = ""
 
             draw.text((x0 + 14, cy), cd_str, fill="black", font=font_countdown_num)
@@ -527,7 +543,11 @@ def render_evening_view(
 
             badge_y = cy + (14 if has_citibike else 18)
             if first_min is not None:
-                if first_min <= walk_min:
+                if "board" in first_eta_raw.lower() or "all aboard" in first_eta_raw.lower():
+                    badge_label = "ALL ABOARD"
+                    badge_bg = "black"
+                    badge_fg = "white"
+                elif first_min <= walk_min:
                     badge_label = "RUN! LEAVING SOON"
                     badge_bg = "black"
                     badge_fg = "white"
