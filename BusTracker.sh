@@ -34,9 +34,9 @@ lipc-set-prop -i com.lab126.powerd preventScreenSaver 1 2>/dev/null
 # Clean up any leftover temporary files
 rm -f /tmp/stop_tracker /tmp/manual_light_override /tmp/headers.txt
 
-# Start background watcher: single click of the power button exits cleanly!
+# Start background watcher: power button press exits cleanly!
 (
-    lipc-wait-event com.lab126.powerd PowerButtonQuickPress >/dev/null 2>&1
+    lipc-wait-event com.lab126.powerd goingToScreenSaver >/dev/null 2>&1
     touch /tmp/stop_tracker
     kill -TERM $$ 2>/dev/null
 ) &
@@ -72,20 +72,35 @@ find_touch_dev() {
     echo "$dev"
 }
 
-# Start background touch listener: tap anywhere to cycle frontlight!
+# Start background touch listener:
+# Single tap = cycle frontlight (Off -> Cozy -> Bright -> Off)
+# Double tap (within 2 seconds) = EXIT to Home Screen!
 (
     TOUCH_DEV=$(find_touch_dev)
+    LAST_TAP=0
 
     while [ ! -f /tmp/stop_tracker ]; do
         # Block until touch detected
         dd if="$TOUCH_DEV" bs=64 count=1 >/dev/null 2>&1
         [ -f /tmp/stop_tracker ] && break
 
+        NOW=$(date +%s)
+        DIFF=$((NOW - LAST_TAP))
+
         # Debounce: drain event stream so one tap isn't multi-triggered
         usleep 400000 2>/dev/null || sleep 1 2>/dev/null
         dd if="$TOUCH_DEV" bs=2048 count=1 >/dev/null 2>&1
 
-        # Cycle frontlight brightness: Off (0) -> Cozy (8) -> Bright (18) -> Off (0)
+        # Double tap within 2 seconds = EXIT!
+        if [ $DIFF -le 2 ] && [ $DIFF -ge 0 ]; then
+            touch /tmp/stop_tracker
+            kill -TERM $$ 2>/dev/null
+            break
+        fi
+
+        LAST_TAP=$NOW
+
+        # Single tap: cycle frontlight brightness
         CURR=$(lipc-get-prop com.lab126.powerd flIntensity 2>/dev/null)
         case "$CURR" in
             0|"")
