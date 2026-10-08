@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	Version            = "1.5.2"
+	Version            = "1.5.3"
 	BinaryPath         = "/tmp/tracker"
 	ImagePath          = "/tmp/dashboard.png"
 	PollInterval       = 45 * time.Second

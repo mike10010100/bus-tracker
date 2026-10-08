@@ -22,7 +22,7 @@ from render_dashboard import render_dashboard, STOPS, get_mock_data, resolve_vie
 
 PORT = int(os.environ.get("PORT", 8000))
 DISCOVERY_PORT = 8001
-SERVER_VERSION = "1.5.2"
+SERVER_VERSION = "1.5.3"
 CACHE_TTL = 30  # Re-fetch from NJ Transit at most once every 30 seconds
 cached_image_bytes = None
 last_render_time = 0
@@ -33,13 +33,15 @@ cb_tracker = CitiBikeTracker(cache_ttl=30)
 last_batt_level = None
 last_is_charging = False
 last_view = "auto"
+last_width = 800
+last_height = 480
 
 
-def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False, view="auto"):
-    global cached_image_bytes, last_render_time, tracker, last_batt_level, last_is_charging, last_view
+def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False, view="auto", width=800, height=480):
+    global cached_image_bytes, last_render_time, tracker, last_batt_level, last_is_charging, last_view, last_width, last_height
     now = time.time()
 
-    # Return cached image if fresh and battery status/view unchanged
+    # Return cached image if fresh and battery status/view/dimensions unchanged
     if (
         cached_image_bytes
         and (now - last_render_time < CACHE_TTL)
@@ -47,6 +49,8 @@ def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False
         and (batt_level == last_batt_level)
         and (is_charging == last_is_charging)
         and (view == last_view)
+        and (width == last_width)
+        and (height == last_height)
     ):
         return Image.open(io.BytesIO(cached_image_bytes))
 
@@ -88,7 +92,7 @@ def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False
             print(f"[Server] Citi Bike fetch error ({e}), falling back to cached/mock...")
             cb_data = cb_tracker.get_mock_data()
 
-    # Render base 800x480 dashboard
+    # Render dashboard
     img_path = "/tmp/server_dashboard.png"
     render_dashboard(
         stops_data,
@@ -98,6 +102,8 @@ def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False
         is_mock=use_mock,
         batt_level=batt_level,
         is_charging=is_charging,
+        width=width,
+        height=height,
     )
 
     with open(img_path, "rb") as f:
@@ -106,6 +112,8 @@ def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False
     last_batt_level = batt_level
     last_is_charging = is_charging
     last_view = view
+    last_width = width
+    last_height = height
 
     return Image.open(io.BytesIO(cached_image_bytes))
 
@@ -288,14 +296,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             is_charging = str(charging_param).lower() in ["1", "true", "yes"]
 
+            is_kindle = kindle_mode == "pw5" or "kindle" in params
+            render_w = 800
+            render_h = 600 if is_kindle else 480
+
             img = get_fresh_dashboard_image(
                 use_mock=use_mock,
                 batt_level=batt_level,
                 is_charging=is_charging,
                 view=view_param,
+                width=render_w,
+                height=render_h,
             )
 
-            if kindle_mode == "pw5" or "kindle" in params:
+            if is_kindle:
                 img = format_for_kindle(img, orientation="landscape", rotation=rot_val)
 
             buf = io.BytesIO()
