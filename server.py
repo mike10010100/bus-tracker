@@ -139,6 +139,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.wfile.write(msg)
             return
 
+        if parsed.path == "/client.sh":
+            client_path = os.path.join(os.path.dirname(__file__), "client.sh")
+            try:
+                with open(client_path, "rb") as f:
+                    content = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/x-sh")
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                self.end_headers()
+                self.wfile.write(content)
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+            return
+
         if parsed.path in ["/dashboard.png", "/bus.png"]:
             if tracker_stopped:
                 # 205 Reset Content signals the Kindle scriptlet to exit cleanly
