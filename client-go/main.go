@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	Version            = "1.5.1"
+	Version            = "1.5.2"
 	BinaryPath         = "/tmp/tracker"
 	ImagePath          = "/tmp/dashboard.png"
 	PollInterval       = 45 * time.Second
@@ -28,11 +28,13 @@ type TrackerClient struct {
 	serverURL         string
 	client            *http.Client
 	manualLightTime   time.Time
+	manualViewTime    time.Time
 	mu                sync.Mutex
 	refreshCh         chan struct{}
 	lastBinaryMod     string
 	consecutiveErrors int
 	viewMode          string
+	lastRenderedView  string
 }
 
 func NewTrackerClient(server string, initialView string) *TrackerClient {
@@ -52,7 +54,12 @@ func NewTrackerClient(server string, initialView string) *TrackerClient {
 func (tc *TrackerClient) getViewMode() string {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-	if tc.viewMode == "" {
+	if tc.viewMode == "" || tc.viewMode == "auto" {
+		return "auto"
+	}
+	// Manual view override reverts to auto after 45 minutes of inactivity
+	if !tc.manualViewTime.IsZero() && time.Since(tc.manualViewTime) > ManualHoldDuration {
+		tc.viewMode = "auto"
 		return "auto"
 	}
 	return tc.viewMode
@@ -61,14 +68,23 @@ func (tc *TrackerClient) getViewMode() string {
 func (tc *TrackerClient) cycleViewMode() string {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-	switch tc.viewMode {
-	case "morning":
+
+	current := tc.viewMode
+	if current == "auto" || current == "" {
+		if tc.lastRenderedView != "" {
+			current = tc.lastRenderedView
+		} else {
+			current = "evening"
+		}
+	}
+
+	// Clean 2-way toggle between Morning (Citi Bike) and Evening (Bus) views
+	if current == "morning" {
 		tc.viewMode = "evening"
-	case "evening":
-		tc.viewMode = "auto"
-	default: // "auto" or empty
+	} else {
 		tc.viewMode = "morning"
 	}
+	tc.manualViewTime = time.Now()
 	return tc.viewMode
 }
 
@@ -399,6 +415,12 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	if canonical := resp.Header.Get("X-Tracker-Server"); canonical != "" && canonical != server {
 		tc.setServerURL(canonical)
 		_ = SaveServerURL(canonical)
+	}
+
+	if resView := resp.Header.Get("X-Resolved-View"); resView != "" {
+		tc.mu.Lock()
+		tc.lastRenderedView = resView
+		tc.mu.Unlock()
 	}
 
 	// HTTP 205 signals remote stop command

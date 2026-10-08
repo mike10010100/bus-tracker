@@ -1,0 +1,64 @@
+package main
+
+import (
+	"testing"
+	"time"
+)
+
+func TestCycleViewMode(t *testing.T) {
+	t.Run("Default auto with evening rendered cycles to morning", func(t *testing.T) {
+		tc := NewTrackerClient("http://localhost:8000", "auto")
+		tc.lastRenderedView = "evening"
+
+		mode1 := tc.cycleViewMode()
+		if mode1 != "morning" {
+			t.Errorf("cycleViewMode() = %q, want %q", mode1, "morning")
+		}
+
+		mode2 := tc.cycleViewMode()
+		if mode2 != "evening" {
+			t.Errorf("cycleViewMode() = %q, want %q", mode2, "evening")
+		}
+
+		mode3 := tc.cycleViewMode()
+		if mode3 != "morning" {
+			t.Errorf("cycleViewMode() = %q, want %q", mode3, "morning")
+		}
+	})
+
+	t.Run("Default auto with morning rendered cycles to evening", func(t *testing.T) {
+		tc := NewTrackerClient("http://localhost:8000", "auto")
+		tc.lastRenderedView = "morning"
+
+		mode1 := tc.cycleViewMode()
+		if mode1 != "evening" {
+			t.Errorf("cycleViewMode() = %q, want %q", mode1, "evening")
+		}
+
+		mode2 := tc.cycleViewMode()
+		if mode2 != "morning" {
+			t.Errorf("cycleViewMode() = %q, want %q", mode2, "morning")
+		}
+
+		mode3 := tc.cycleViewMode()
+		if mode3 != "evening" {
+			t.Errorf("cycleViewMode() = %q, want %q", mode3, "evening")
+		}
+	})
+
+	t.Run("Manual hold expiration reverts to auto", func(t *testing.T) {
+		tc := NewTrackerClient("http://localhost:8000", "auto")
+		tc.lastRenderedView = "evening"
+
+		tc.cycleViewMode() // sets to morning and manualViewTime = now
+		if tc.getViewMode() != "morning" {
+			t.Errorf("getViewMode() = %q, want %q", tc.getViewMode(), "morning")
+		}
+
+		// Simulate 46 minutes passing
+		tc.manualViewTime = time.Now().Add(-46 * time.Minute)
+		if tc.getViewMode() != "auto" {
+			t.Errorf("getViewMode() after hold = %q, want %q", tc.getViewMode(), "auto")
+		}
+	})
+}

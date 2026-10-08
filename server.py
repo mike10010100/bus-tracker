@@ -18,11 +18,11 @@ except ImportError:
 
 from bus_tracker import NJTransitBusTracker
 from citibike import CitiBikeTracker
-from render_dashboard import render_dashboard, STOPS, get_mock_data
+from render_dashboard import render_dashboard, STOPS, get_mock_data, resolve_view
 
 PORT = int(os.environ.get("PORT", 8000))
 DISCOVERY_PORT = 8001
-SERVER_VERSION = "1.5.1"
+SERVER_VERSION = "1.5.2"
 CACHE_TTL = 30  # Re-fetch from NJ Transit at most once every 30 seconds
 cached_image_bytes = None
 last_render_time = 0
@@ -310,6 +310,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("X-Kindle-Warmth", str(warmth))
             self.send_header("X-Tracker-Server", f"http://{get_local_ip()}:{PORT}")
             self.send_header("X-Tracker-View", view_param)
+            self.send_header("X-Resolved-View", resolve_view(view_param))
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.end_headers()
             self.wfile.write(img_bytes)

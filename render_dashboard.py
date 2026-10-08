@@ -227,15 +227,12 @@ def render_morning_view(
     now_date_str = now.strftime("%A, %b %-d")
 
     # 1. Header
-    b_x1 = draw_header_badge(draw, 20, 14, "CITI BIKE", font_title, pad_x=12)
-    draw.text((b_x1 + 12, 15), "HOBOKEN COMMUTE • MORNING DOCKS", fill="black", font=font_title)
-    draw.text((b_x1 + 12, 39), "919 PARK AVE • CITI BIKE HERO & 126 BUS", fill="#555555", font=font_header_sub)
-
     time_bbox = draw.textbbox((0, 0), now_time_str, font=font_time)
     time_w = time_bbox[2] - time_bbox[0]
     time_x = WIDTH - 20 - time_w
     draw.text((time_x, 15), now_time_str, fill="black", font=font_time)
 
+    batt_x = time_x
     if batt_level is not None:
         font_batt = get_font(13, bold=True)
         label = f"{batt_level}%"
@@ -245,6 +242,16 @@ def render_morning_view(
         total_batt_w = bolt_w + label_w + 6 + 28 + 3
         batt_x = time_x - total_batt_w - 18
         draw_battery_indicator(draw, batt_x, 16, batt_level, is_charging=is_charging, font=font_batt)
+
+    b_x1 = draw_header_badge(draw, 20, 14, "CITI BIKE", font_title, pad_x=12)
+    morning_title = "HOBOKEN MORNING DOCKS"
+    # Ensure title never collides with battery indicator
+    max_title_w = (batt_x - 16) - (b_x1 + 12)
+    tb = draw.textbbox((0, 0), morning_title, font=font_title)
+    if (tb[2] - tb[0]) > max_title_w:
+        morning_title = "MORNING DOCKS"
+    draw.text((b_x1 + 12, 15), morning_title, fill="black", font=font_title)
+    draw.text((b_x1 + 12, 39), "919 PARK AVE • CITI BIKE HERO & 126 BUS", fill="#555555", font=font_header_sub)
 
     date_bbox = draw.textbbox((0, 0), now_date_str, font=font_header_sub)
     date_w = date_bbox[2] - date_bbox[0]
