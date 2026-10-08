@@ -17,12 +17,22 @@ last_render_time = 0
 tracker = None
 
 
-def get_fresh_dashboard_image(use_mock=False):
-    global cached_image_bytes, last_render_time, tracker
+last_batt_level = None
+last_is_charging = False
+
+
+def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False):
+    global cached_image_bytes, last_render_time, tracker, last_batt_level, last_is_charging
     now = time.time()
 
-    # Return cached image if fresh
-    if cached_image_bytes and (now - last_render_time < CACHE_TTL) and not use_mock:
+    # Return cached image if fresh and battery status unchanged
+    if (
+        cached_image_bytes
+        and (now - last_render_time < CACHE_TTL)
+        and not use_mock
+        and (batt_level == last_batt_level)
+        and (is_charging == last_is_charging)
+    ):
         return Image.open(io.BytesIO(cached_image_bytes))
 
     stops_data = {}
@@ -54,11 +64,19 @@ def get_fresh_dashboard_image(use_mock=False):
 
     # Render base 800x480 dashboard
     img_path = "/tmp/server_dashboard.png"
-    render_dashboard(stops_data, output_path=img_path, is_mock=use_mock)
+    render_dashboard(
+        stops_data,
+        output_path=img_path,
+        is_mock=use_mock,
+        batt_level=batt_level,
+        is_charging=is_charging,
+    )
 
     with open(img_path, "rb") as f:
         cached_image_bytes = f.read()
     last_render_time = now
+    last_batt_level = batt_level
+    last_is_charging = is_charging
 
     return Image.open(io.BytesIO(cached_image_bytes))
 
@@ -189,7 +207,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(stat.st_size))
             self.send_header("Last-Modified", last_mod)
-            self.send_header("X-Tracker-Version", "1.2.1")
+            self.send_header("X-Tracker-Version", "1.3.0")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
 
@@ -213,7 +231,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
             kindle_mode = params.get("kindle", [None])[0]
             rot_val = int(params.get("rotate", [90])[0])
 
-            img = get_fresh_dashboard_image(use_mock=use_mock)
+            # Extract battery and charging status from query params or headers
+            batt_param = params.get("batt", params.get("battery", [self.headers.get("X-Kindle-Battery")]))[0]
+            charging_param = params.get("charging", [self.headers.get("X-Kindle-Charging")])[0]
+
+            batt_level = None
+            if batt_param and str(batt_param).strip().lstrip("-").isdigit():
+                val = int(batt_param)
+                if 0 <= val <= 100:
+                    batt_level = val
+
+            is_charging = str(charging_param).lower() in ["1", "true", "yes"]
+
+            img = get_fresh_dashboard_image(
+                use_mock=use_mock,
+                batt_level=batt_level,
+                is_charging=is_charging,
+            )
 
             if kindle_mode == "pw5" or "kindle" in params:
                 img = format_for_kindle(img, orientation="landscape", rotation=rot_val)

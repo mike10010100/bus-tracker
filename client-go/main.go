@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	Version            = "1.2.1"
+	Version            = "1.3.0"
 	BinaryPath         = "/tmp/tracker"
 	ImagePath          = "/tmp/dashboard.png"
 	PollInterval       = 45 * time.Second
@@ -295,11 +295,19 @@ func (tc *TrackerClient) checkOTAUpdate(ctx context.Context) bool {
 
 // fetchAndDrawDashboard fetches dashboard PNG, applies lighting, and pushes to e-ink
 func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel context.CancelFunc) {
-	url := fmt.Sprintf("%s/dashboard.png?kindle=pw5&t=%d", tc.serverURL, time.Now().Unix())
+	batt := GetBatteryInfo()
+	chargeVal := 0
+	if batt.IsCharging {
+		chargeVal = 1
+	}
+
+	url := fmt.Sprintf("%s/dashboard.png?kindle=pw5&batt=%d&charging=%d&t=%d", tc.serverURL, batt.Level, chargeVal, time.Now().Unix())
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return
 	}
+	req.Header.Set("X-Kindle-Battery", strconv.Itoa(batt.Level))
+	req.Header.Set("X-Kindle-Charging", strconv.Itoa(chargeVal))
 
 	resp, err := tc.client.Do(req)
 	if err != nil {

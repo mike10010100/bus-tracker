@@ -78,10 +78,72 @@ def draw_rounded_card(draw: ImageDraw.ImageDraw, xy, radius=12, fill="white", ou
     draw.rounded_rectangle(xy, radius=radius, fill=fill, outline=outline, width=width)
 
 
+def draw_battery_indicator(
+    draw: ImageDraw.ImageDraw,
+    x: int,
+    y: int,
+    level: Optional[int],
+    is_charging: bool = False,
+    font=None,
+) -> int:
+    """
+    Draws a clean, high-contrast e-ink battery icon with percentage text and optional charging bolt.
+    xy specifies top-left of the overall indicator.
+    Returns the total width drawn.
+    """
+    if level is None or level < 0:
+        return 0
+
+    curr_x = x
+
+    # Draw crisp vector lightning bolt if charging
+    if is_charging:
+        bolt_pts = [
+            (curr_x + 5, y),
+            (curr_x + 1, y + 7),
+            (curr_x + 4, y + 7),
+            (curr_x + 2, y + 13),
+            (curr_x + 8, y + 5),
+            (curr_x + 5, y + 5),
+        ]
+        draw.polygon(bolt_pts, fill="black")
+        curr_x += 12
+
+    label = f"{level}%"
+    if font:
+        bbox = draw.textbbox((0, 0), label, font=font)
+        label_w = bbox[2] - bbox[0]
+        draw.text((curr_x, y), label, fill="black", font=font)
+        curr_x += label_w + 6
+    else:
+        curr_x += 6
+
+    bw, bh = 28, 14
+    term_w, term_h = 3, 6
+    icon_x = curr_x
+    icon_y = y + 1
+
+    # Outer battery shell
+    draw.rounded_rectangle([icon_x, icon_y, icon_x + bw, icon_y + bh], radius=3, outline="black", width=2)
+    # Terminal cap on right edge
+    term_y = icon_y + (bh - term_h) // 2
+    draw.rounded_rectangle([icon_x + bw, term_y, icon_x + bw + term_w, term_y + term_h], radius=1, fill="black")
+
+    # Inner charge bar
+    inner_pad = 3
+    max_fill_w = bw - (inner_pad * 2) - 1
+    fill_w = max(2, int(max_fill_w * (min(level, 100) / 100.0)))
+    draw.rectangle([icon_x + inner_pad, icon_y + inner_pad, icon_x + inner_pad + fill_w, icon_y + bh - inner_pad], fill="black")
+
+    return (icon_x + bw + term_w) - x
+
+
 def render_dashboard(
     stops_data: Dict[str, List[Dict[str, Any]]],
     output_path: str = "dashboard.png",
     is_mock: bool = False,
+    batt_level: Optional[int] = None,
+    is_charging: bool = False,
 ):
     """
     Renders an 800x480 high-contrast black-and-white image
@@ -119,11 +181,24 @@ def render_dashboard(
     draw.text((88, 17), "HOBOKEN → NYC PORT AUTHORITY", fill="black", font=font_title)
     draw.text((88, 43), "NJ TRANSIT REAL-TIME TRACKER", fill="#555555", font=font_header_sub)
 
-    # Clock & Date on right
+    # Clock on right
     time_bbox = draw.textbbox((0, 0), now_time_str, font=font_time)
     time_w = time_bbox[2] - time_bbox[0]
-    draw.text((WIDTH - 20 - time_w, 16), now_time_str, fill="black", font=font_time)
+    time_x = WIDTH - 20 - time_w
+    draw.text((time_x, 16), now_time_str, fill="black", font=font_time)
 
+    # Battery indicator to the left of the clock (if available)
+    if batt_level is not None:
+        font_batt = get_font(13, bold=True)
+        label = f"{batt_level}%"
+        bbox = draw.textbbox((0, 0), label, font=font_batt)
+        label_w = bbox[2] - bbox[0]
+        bolt_w = 12 if is_charging else 0
+        total_batt_w = bolt_w + label_w + 6 + 28 + 3
+        batt_x = time_x - total_batt_w - 18
+        draw_battery_indicator(draw, batt_x, 18, batt_level, is_charging=is_charging, font=font_batt)
+
+    # Date beneath clock
     date_bbox = draw.textbbox((0, 0), now_date_str, font=font_header_sub)
     date_w = date_bbox[2] - date_bbox[0]
     draw.text((WIDTH - 20 - date_w, 42), now_date_str, fill="#555555", font=font_header_sub)
@@ -284,7 +359,11 @@ def render_dashboard(
     cw = cb[2] - cb[0]
     draw.text(((WIDTH - cw) // 2, footer_y + 12), center_text, fill="#555555", font=font_footer)
 
-    right_text = "E-INK DISPLAY READY"
+    if batt_level is not None:
+        charge_str = " (CHARGING)" if is_charging else ""
+        right_text = f"BATTERY: {batt_level}%{charge_str}  •  READY"
+    else:
+        right_text = "E-INK DISPLAY READY"
     rb = draw.textbbox((0, 0), right_text, font=font_footer)
     rw = rb[2] - rb[0]
     draw.text((WIDTH - 20 - rw, footer_y + 12), right_text, fill="black", font=font_footer)
