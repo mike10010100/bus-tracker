@@ -28,10 +28,10 @@ class NJTransitBusTracker:
     DEFAULT_BASE_URL = os.environ.get("NJT_BASE_URL", "https://testpcsdata.njtransit.com")
 
     def __init__(self, username: Optional[str] = None, password: Optional[str] = None, base_url: Optional[str] = None):
-        raw_user = username or os.environ.get("NJT_USERNAME", "")
+        raw_user = username or os.environ.get("NJT_USERNAME") or os.environ.get("NJT_API_USERNAME") or ""
         # NJ Transit API requires username handle, not email
         self.username = raw_user.split("@")[0] if "@" in raw_user else raw_user
-        self.password = password or os.environ.get("NJT_PASSWORD")
+        self.password = password or os.environ.get("NJT_PASSWORD") or os.environ.get("NJT_API_PASSWORD")
         self.base_url = (base_url or self.DEFAULT_BASE_URL).rstrip("/")
         self.token: Optional[str] = None
         self.token_expiry: float = 0

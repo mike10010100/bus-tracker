@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import io
+import json
 import urllib.parse
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -165,6 +166,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         global tracker_stopped
         parsed = urllib.parse.urlparse(self.path)
         params = urllib.parse.parse_qs(parsed.query)
+
+        if parsed.path in ["/healthz", "/health"]:
+            payload = json.dumps({
+                "status": "ok",
+                "version": SERVER_VERSION,
+                "stopped": tracker_stopped,
+            }).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
 
         if parsed.path == "/log":
             msg = params.get("msg", [""])[0]

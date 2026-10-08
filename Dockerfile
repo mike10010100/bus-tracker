@@ -2,10 +2,11 @@
 # Supports linux/amd64 (x86_64 PC/servers) and linux/arm64 (Raspberry Pi 3/4/5, Apple Silicon)
 FROM python:3.11-slim
 
-# Install system fonts so Pillow renders DejaVu Sans with pixel-perfection
+# Install system fonts and curl for container health checks
 RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-dejavu-core \
     tzdata \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Set default timezone to US Eastern for accurate schedule countdowns

@@ -2,7 +2,10 @@ version: "3.8"
 
 services:
   bus-tracker:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bus-tracker:${IMAGE_TAG:-latest}
     container_name: bus-tracker
     restart: unless-stopped
     # On Linux servers (Raspberry Pi, mini PC, NAS, Unraid), network_mode: host
@@ -11,11 +14,20 @@ services:
     # 2. Receiving Kindle UDP discovery broadcasts (port 8001) without NAT traversal
     network_mode: host
     environment:
-      - PORT=8000
-      - TZ=America/New_York
-      - NJT_API_KEY=${NJT_API_KEY}
-      - NJT_API_USERNAME=${NJT_API_USERNAME}
-      - NJT_API_PASSWORD=${NJT_API_PASSWORD}
+      - PORT=${PORT:-8000}
+      - TZ=${TZ:-America/New_York}
+      - NJT_USERNAME=${NJT_USERNAME:-}
+      - NJT_PASSWORD=${NJT_PASSWORD:-}
+      - NJT_API_USERNAME=${NJT_API_USERNAME:-}
+      - NJT_API_PASSWORD=${NJT_API_PASSWORD:-}
+      - NJT_API_KEY=${NJT_API_KEY:-}
     env_file:
       - path: .env
         required: false
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
