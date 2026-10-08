@@ -55,6 +55,27 @@ python render_dashboard.py --mock
 ```
 This saves `dashboard.png` in the project root.
 
+### 5. Running the Local Dashboard Server
+Start the local server that generates and serves images over your Wi-Fi network:
+```bash
+python server.py
+```
+* **Web View (Auto-reloading):** `http://localhost:8000`
+* **Kindle Endpoint:** `http://<YOUR_MAC_IP>:8000/dashboard.png?kindle=pw5`
+
+---
+
+## Kindle Paperwhite Dashboard Setup
+
+If using a jailbroken **Kindle Paperwhite (PW5)**:
+
+1. Copy `BusTracker.sh` to your Kindle's `documents/` folder.
+2. In your Kindle Library, tap **"126 Bus Tracker"**.
+3. The script will:
+   * Disable the screensaver timeout.
+   * Auto-fetch `dashboard.png?kindle=pw5` from your Mac server every 45 seconds.
+   * Render it directly to the e-ink screen using Kindle's native `eips` framebuffer tool.
+
 ---
 
 ## Roadmap
@@ -62,6 +83,6 @@ This saves `dashboard.png` in the project root.
 - [x] Feasibility research & API reverse-engineering
 - [x] Core Python API client with automatic token refresh
 - [x] High-contrast 800×480 E-Ink graphic renderer ([render_dashboard.py](file:///Users/mike10010100/git/bus-tracker/render_dashboard.py))
-- [ ] Lightweight local web server / image endpoint (HTTP GET `/dashboard.png`)
-- [ ] Hardware deployment (TRMNL plugin, Waveshare on Pi/ESP32, or LilyGO T5)
+- [x] Local HTTP image server with caching and Kindle PW5 rotation ([server.py](file:///Users/mike10010100/git/bus-tracker/server.py))
+- [x] Native Kindle Paperwhite scriptlet ([BusTracker.sh](file:///Users/mike10010100/git/bus-tracker/BusTracker.sh))
 - [ ] Smart scheduling (e.g. active refreshes during 6:30 AM – 9:30 AM commute hours)

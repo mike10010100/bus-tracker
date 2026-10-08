@@ -3,3 +3,5 @@ scratch/
 __pycache__/
 .env
 dashboard*.png
+nosebleed.zip
+fill_storage.py
