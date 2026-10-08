@@ -88,6 +88,37 @@ class TestHealthAndRoot(ServerHTTPTestBase):
         self.assertEqual(status, 200)
 
 
+class TestKeepAlive(ServerHTTPTestBase):
+    def test_multiple_requests_on_one_connection(self):
+        # HTTP/1.1 keep-alive: the client can reuse a connection across polls
+        # rather than waking the radio to rebuild TCP each time.
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            for _ in range(3):
+                conn.request("GET", "/healthz")
+                resp = conn.getresponse()
+                self.assertEqual(resp.status, 200)
+                self.assertTrue(resp.read())
+        finally:
+            conn.close()
+
+    def test_head_has_no_body_and_keeps_connection_usable(self):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            conn.request("HEAD", "/dashboard.png?mock=1")
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.read(), b"")
+            self.assertIsNotNone(resp.getheader("Content-Length"))
+            # Connection still usable afterwards.
+            conn.request("GET", "/healthz")
+            self.assertEqual(conn.getresponse().status, 200)
+        finally:
+            conn.close()
+
+
 class TestLogEndpoint(ServerHTTPTestBase):
     def test_post_log_returns_200(self):
         status, _headers, _body = _http(method="POST", port=self.port, path="/log", body=b"hello from kindle")
@@ -159,6 +190,39 @@ class TestDashboardRoute(ServerHTTPTestBase):
         img = Image.open(io.BytesIO(body))
         self.assertEqual(img.size, (1236, 1648))
         self.assertEqual(server.sanitize_kindle_panel(3296, 1248), server.PW5_LANDSCAPE)
+
+    def test_dashboard_carries_version_and_sha_headers(self):
+        # The dashboard response must advertise the server version and the OTA
+        # binary digest so the client can make the OTA decision without a
+        # separate per-cycle HEAD request.
+        binary = os.path.join(os.path.dirname(server.__file__), "tracker-arm")
+        existed = os.path.exists(binary)
+        if not existed:
+            with open(binary, "wb") as f:
+                f.write(b"FAKEARM")
+        try:
+            status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
+            self.assertEqual(status, 200)
+            self.assertEqual(headers.get("X-Tracker-Version"), server.SERVER_VERSION)
+            self.assertEqual(headers.get("X-Tracker-SHA256"), server.sha256_file(binary))
+        finally:
+            if not existed:
+                os.remove(binary)
+
+    def test_dashboard_etag_and_304(self):
+        status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1")
+        self.assertEqual(status, 200)
+        etag = headers.get("ETag")
+        self.assertTrue(etag)
+
+        # Conditional request with the same ETag must return 304 with no body.
+        status2, headers2, body2 = _http_get(
+            self.port, "/dashboard.png?mock=1", headers={"If-None-Match": etag}
+        )
+        self.assertEqual(status2, 304)
+        self.assertEqual(body2, b"")
+        self.assertEqual(headers2.get("ETag"), etag)
+        self.assertIn("X-Kindle-Poll-Interval", headers2)
 
     def test_battery_clamped(self):
         # Out-of-range battery must be ignored (rendered without battery), not crash
@@ -367,6 +431,8 @@ class TestForbiddenResponse(unittest.TestCase):
         captured = {}
 
         class FakeHandler(DashboardHandler):
+            command = "GET"
+
             def __init__(self):
                 pass
 

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -57,21 +58,26 @@ func tempFileCreate(t *testing.T) func(string) (*os.File, error) {
 	}
 }
 
-func TestCheckOTAUpdate_ValidChecksumExecs(t *testing.T) {
+// otaServer serves the binary at /tracker-arm with an optional digest header.
+func otaServer(t *testing.T, binary []byte, digest string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tracker-arm" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("X-Tracker-SHA256", digest)
+		w.WriteHeader(http.StatusOK)
+		w.Write(binary)
+	}))
+}
+
+func TestMaybeUpdateBinary_ValidChecksumExecs(t *testing.T) {
 	patchRuntime(t)
 	binary := []byte("NEWBINARY-BYTES")
 	sum := sha256.Sum256(binary)
 	digest := hex.EncodeToString(sum[:])
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Tracker-Version", "9.9.9")
-		w.Header().Set("Last-Modified", "Wed, 01 Jan 2026 00:00:00 GMT")
-		w.Header().Set("X-Tracker-SHA256", digest)
-		w.WriteHeader(http.StatusOK)
-		if r.Method == http.MethodGet {
-			w.Write(binary)
-		}
-	}))
+	srv := otaServer(t, binary, digest)
 	defer srv.Close()
 
 	osOpenFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
@@ -87,7 +93,7 @@ func TestCheckOTAUpdate_ValidChecksumExecs(t *testing.T) {
 	}
 
 	tc := NewTrackerClient(srv.URL, "auto")
-	if !tc.checkOTAUpdate(context.Background()) {
+	if !tc.maybeUpdateBinary(context.Background(), "9.9.9", digest) {
 		t.Fatal("expected verified OTA update to be applied")
 	}
 	if !execCalled {
@@ -95,17 +101,9 @@ func TestCheckOTAUpdate_ValidChecksumExecs(t *testing.T) {
 	}
 }
 
-func TestCheckOTAUpdate_ChecksumMismatchRejects(t *testing.T) {
+func TestMaybeUpdateBinary_ChecksumMismatchRejects(t *testing.T) {
 	patchRuntime(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Tracker-Version", "9.9.9")
-		w.Header().Set("Last-Modified", "Wed, 01 Jan 2026 00:00:00 GMT")
-		w.Header().Set("X-Tracker-SHA256", "deadbeef")
-		w.WriteHeader(http.StatusOK)
-		if r.Method == http.MethodGet {
-			w.Write([]byte("TAMPERED"))
-		}
-	}))
+	srv := otaServer(t, []byte("TAMPERED"), "deadbeef")
 	defer srv.Close()
 
 	var removed bool
@@ -119,7 +117,7 @@ func TestCheckOTAUpdate_ChecksumMismatchRejects(t *testing.T) {
 	}
 
 	tc := NewTrackerClient(srv.URL, "auto")
-	if tc.checkOTAUpdate(context.Background()) {
+	if tc.maybeUpdateBinary(context.Background(), "9.9.9", "deadbeef") {
 		t.Fatal("OTA must be rejected on checksum mismatch")
 	}
 	if !removed {
@@ -127,16 +125,9 @@ func TestCheckOTAUpdate_ChecksumMismatchRejects(t *testing.T) {
 	}
 }
 
-func TestCheckOTAUpdate_MissingDigestFailsClosed(t *testing.T) {
+func TestMaybeUpdateBinary_MissingDigestFailsClosed(t *testing.T) {
 	patchRuntime(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Tracker-Version", "9.9.9")
-		w.Header().Set("Last-Modified", "Wed, 01 Jan 2026 00:00:00 GMT")
-		w.WriteHeader(http.StatusOK)
-		if r.Method == http.MethodGet {
-			w.Write([]byte("NO DIGEST"))
-		}
-	}))
+	srv := otaServer(t, []byte("NO DIGEST"), "")
 	defer srv.Close()
 
 	osOpenFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
@@ -149,22 +140,26 @@ func TestCheckOTAUpdate_MissingDigestFailsClosed(t *testing.T) {
 	}
 
 	tc := NewTrackerClient(srv.URL, "auto")
-	if tc.checkOTAUpdate(context.Background()) {
+	if tc.maybeUpdateBinary(context.Background(), "9.9.9", "") {
 		t.Fatal("OTA without digest must fail closed")
 	}
 }
 
-func TestCheckOTAUpdate_NoUpdateWhenVersionMatches(t *testing.T) {
+func TestMaybeUpdateBinary_NoUpdateWhenVersionMatches(t *testing.T) {
 	patchRuntime(t)
+	var contacted bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Tracker-Version", Version)
+		contacted = true
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
 	tc := NewTrackerClient(srv.URL, "auto")
-	if tc.checkOTAUpdate(context.Background()) {
+	if tc.maybeUpdateBinary(context.Background(), Version, "whatever") {
 		t.Fatal("no update expected when versions match")
+	}
+	if contacted {
+		t.Error("matching version must not perform any network I/O")
 	}
 }
 
@@ -238,6 +233,69 @@ func TestGetPanelSize_CachesDetection(t *testing.T) {
 	_ = tc.getPanelSize()
 	if calls != 1 {
 		t.Errorf("expected panel size detected once, got %d reads", calls)
+	}
+}
+
+func TestFetchAndDrawDashboard_304SkipsRefresh(t *testing.T) {
+	patchRuntime(t)
+	var sentETag string
+	var eipsCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sentETag = r.Header.Get("If-None-Match")
+		w.Header().Set("ETag", `"abc123"`)
+		w.Header().Set("X-Kindle-Poll-Interval", "600")
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer srv.Close()
+	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
+	orig := execCommand
+	execCommand = func(name string, arg ...string) *exec.Cmd {
+		if name == "eips" {
+			eipsCalled = true
+		}
+		return orig("true")
+	}
+	defer func() { execCommand = orig }()
+
+	tc := NewTrackerClient(srv.URL, "auto")
+	tc.lastETag = `"abc123"`
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if got := tc.fetchAndDrawDashboard(ctx, cancel); got != 600 {
+		t.Errorf("expected poll interval 600 on 304, got %d", got)
+	}
+	if sentETag != `"abc123"` {
+		t.Errorf("expected If-None-Match to be sent, got %q", sentETag)
+	}
+	if eipsCalled {
+		t.Error("304 must not trigger an eips refresh")
+	}
+}
+
+func TestFetchAndDrawDashboard_StoresETag(t *testing.T) {
+	patchRuntime(t)
+	png := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"newtag"`)
+		w.Header().Set("X-Kindle-Poll-Interval", "45")
+		w.WriteHeader(http.StatusOK)
+		w.Write(png)
+	}))
+	defer srv.Close()
+	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
+	osCreate = tempFileCreate(t)
+
+	tc := NewTrackerClient(srv.URL, "auto")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tc.fetchAndDrawDashboard(ctx, cancel)
+
+	tc.mu.Lock()
+	tag := tc.lastETag
+	tc.mu.Unlock()
+	if tag != `"newtag"` {
+		t.Errorf("expected ETag stored, got %q", tag)
 	}
 }
 
@@ -390,7 +448,7 @@ func TestConfigureGestureHandlers_AllButtonsAndCorners(t *testing.T) {
 
 	tc.configureGestureHandlers(gd, cancel)
 
-	// Light button cycles the frontlight and marks manual interaction.
+	// Light button cycles the frontlight.
 	gd.OnLightTap(0, 0)
 	// Top-left and refresh enqueue refresh signals.
 	gd.OnTopLeftTap(0, 0)
@@ -401,7 +459,7 @@ func TestConfigureGestureHandlers_AllButtonsAndCorners(t *testing.T) {
 	if tc.getViewMode() != "morning" && tc.getViewMode() != "evening" {
 		t.Errorf("unexpected view after bottom-left tap: %s", tc.getViewMode())
 	}
-	// Single tap should not panic and marks interaction.
+	// Single tap should not panic.
 	gd.OnSingleTap(0, 0)
 	// Top-right exits.
 	gd.OnTopRightTap(0, 0)
@@ -409,6 +467,78 @@ func TestConfigureGestureHandlers_AllButtonsAndCorners(t *testing.T) {
 	case <-ctx.Done():
 	case <-time.After(time.Second):
 		t.Fatal("top-right tap should cancel")
+	}
+}
+
+func TestScreenOnlyActionsDoNotArmFastPoll(t *testing.T) {
+	patchRuntime(t)
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	gd := NewGestureDetector(DefaultGestureConfig())
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	origCmd := execCommand
+	execCommand = func(name string, arg ...string) *exec.Cmd { return origCmd("true") }
+	defer func() { execCommand = origCmd }()
+
+	tc.configureGestureHandlers(gd, cancel)
+
+	// Frontlight actions are screen-only: they must NOT pin fast polling.
+	gd.OnSingleTap(0, 0)
+	gd.OnLightTap(0, 0)
+	tc.mu.Lock()
+	armed := !tc.lastDataInteraction.IsZero()
+	tc.mu.Unlock()
+	if armed {
+		t.Error("screen-only actions must not arm the fast-poll hold")
+	}
+
+	// Data-affecting actions DO arm it.
+	gd.OnRefreshTap(0, 0)
+	tc.mu.Lock()
+	armed = !tc.lastDataInteraction.IsZero()
+	tc.mu.Unlock()
+	if !armed {
+		t.Error("refresh must arm the fast-poll hold")
+	}
+}
+
+func TestLogRemoteQueueDoesNotBlockAndDropsWhenFull(t *testing.T) {
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	// Never started the sender, so nothing drains the queue.
+	for i := 0; i < cap(tc.logCh)+50; i++ {
+		tc.logRemote("msg") // must not block even when full
+	}
+	if len(tc.logCh) != cap(tc.logCh) {
+		t.Errorf("expected queue to fill to capacity %d, got %d", cap(tc.logCh), len(tc.logCh))
+	}
+}
+
+func TestLogSenderDrainsQueue(t *testing.T) {
+	patchRuntime(t)
+	var received int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/log" {
+			atomic.AddInt32(&received, 1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	tc := NewTrackerClient(srv.URL, "auto")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tc.startLogSender(ctx)
+
+	for i := 0; i < 3; i++ {
+		tc.logRemote("hello")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&received) < 3 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := atomic.LoadInt32(&received); got != 3 {
+		t.Errorf("expected 3 logs delivered, got %d", got)
 	}
 }
 

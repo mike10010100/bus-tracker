@@ -21,17 +21,17 @@ func TestGetNextPollInterval(t *testing.T) {
 	})
 
 	t.Run("Manual interaction boosts to 45s even if server requests 10m", func(t *testing.T) {
-		tc.markManualInteraction()
+		tc.dataInteraction()
 		interval := tc.getNextPollInterval(600)
 		if interval != 45*time.Second {
 			t.Errorf("Expected 45s boost after manual interaction, got %v", interval)
 		}
 	})
 
-	t.Run("Manual boost expires after ManualHoldDuration", func(t *testing.T) {
+	t.Run("Manual boost expires after FastPollHoldDuration (10m)", func(t *testing.T) {
 		tc.mu.Lock()
-		// Simulate manual tap 46 minutes ago
-		tc.manualRefreshTime = time.Now().Add(-46 * time.Minute)
+		// Simulate a data interaction 11 minutes ago.
+		tc.lastDataInteraction = time.Now().Add(-11 * time.Minute)
 		tc.mu.Unlock()
 
 		interval := tc.getNextPollInterval(600)
@@ -40,9 +40,19 @@ func TestGetNextPollInterval(t *testing.T) {
 		}
 	})
 
+	t.Run("Manual boost still active within FastPollHoldDuration", func(t *testing.T) {
+		tc.mu.Lock()
+		tc.lastDataInteraction = time.Now().Add(-9 * time.Minute)
+		tc.mu.Unlock()
+
+		if interval := tc.getNextPollInterval(600); interval != 45*time.Second {
+			t.Errorf("Expected 45s within boost window, got %v", interval)
+		}
+	})
+
 	t.Run("Fallback interval when server sends 0 uses local time", func(t *testing.T) {
 		tc.mu.Lock()
-		tc.manualRefreshTime = time.Time{}
+		tc.lastDataInteraction = time.Time{}
 		tc.mu.Unlock()
 
 		interval := tc.getNextPollInterval(0)

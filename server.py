@@ -44,6 +44,30 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
+BINARY_PATH = os.path.join(os.path.dirname(__file__), "tracker-arm")
+_binary_info_cache = {"mtime": None, "sha256": "", "size": 0}
+_binary_info_lock = threading.Lock()
+
+
+def get_binary_info():
+    """
+    Returns (exists, mtime, sha256, size) for the OTA binary, caching the
+    (expensive) SHA-256 digest and keying the cache on mtime so repeated
+    dashboard requests don't re-hash the 6MB binary every cycle.
+    """
+    try:
+        stat = os.stat(BINARY_PATH)
+    except OSError:
+        return False, 0, "", 0
+
+    with _binary_info_lock:
+        if _binary_info_cache["mtime"] == stat.st_mtime:
+            return True, stat.st_mtime, _binary_info_cache["sha256"], _binary_info_cache["size"]
+        digest = sha256_file(BINARY_PATH)
+        _binary_info_cache.update({"mtime": stat.st_mtime, "sha256": digest, "size": stat.st_size})
+    return True, stat.st_mtime, _binary_info_cache["sha256"], _binary_info_cache["size"]
+
+
 def is_private_address(addr: str) -> bool:
     """Returns True for loopback, link-local and RFC1918 private addresses."""
     import ipaddress
@@ -267,13 +291,34 @@ tracker_stopped = False
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
+    # HTTP/1.1 enables keep-alive so the client can reuse one connection across
+    # its periodic requests instead of waking the radio + rebuilding a TCP
+    # connection for each one.
+    protocol_version = "HTTP/1.1"
+    # Reap idle keep-alive connections so they don't hold worker threads open
+    # indefinitely (each connection is handled by its own thread).
+    timeout = 30
+
     def _send_forbidden(self):
         msg = b"<h1>403 Forbidden</h1><p>Control endpoint requires a token or a private-network origin.</p>"
         self.send_response(403)
         self.send_header("Content-Type", "text/html")
         self.send_header("Content-Length", str(len(msg)))
         self.end_headers()
-        self.wfile.write(msg)
+        if self.command != "HEAD":
+            self.wfile.write(msg)
+
+    def _send_empty(self, code):
+        # Content-Length is required to keep an HTTP/1.1 connection usable.
+        self.send_response(code)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _write_body(self, data: bytes):
+        """Writes a response body, suppressing it for HEAD requests so the
+        HTTP/1.1 connection framing (Content-Length) stays valid."""
+        if self.command != "HEAD":
+            self.wfile.write(data)
 
     def do_HEAD(self):
         self.do_GET()
@@ -287,12 +332,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 print(f"[Kindle Log] {body}")
             except Exception as e:
                 print(f"[Server] Error reading log: {e}")
-            self.send_response(200)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
+            self._send_empty(200)
             return
-        self.send_response(404)
-        self.end_headers()
+        self._send_empty(404)
 
     def do_GET(self):
         global tracker_stopped
@@ -309,7 +351,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
-            self.wfile.write(payload)
+            self._write_body(payload)
             return
 
         if parsed.path == "/log":
@@ -330,7 +372,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html")
             self.send_header("Content-Length", str(len(msg)))
             self.end_headers()
-            self.wfile.write(msg)
+            self._write_body(msg)
             return
 
         if parsed.path == "/resume" or parsed.path == "/start":
@@ -343,18 +385,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html")
             self.send_header("Content-Length", str(len(msg)))
             self.end_headers()
-            self.wfile.write(msg)
+            self._write_body(msg)
             return
 
         if parsed.path == "/tracker-arm":
-            file_path = os.path.join(os.path.dirname(__file__), "tracker-arm")
-            if not os.path.exists(file_path):
+            exists, mtime, digest, size = get_binary_info()
+            if not exists:
                 self.send_response(404)
                 self.end_headers()
                 return
 
-            stat = os.stat(file_path)
-            last_mod = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime(stat.st_mtime))
+            last_mod = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime(mtime))
             print(f"[Server OTA] client={self.address_string()} cmd={self.command} version={SERVER_VERSION} ims={self.headers.get('If-Modified-Since')}")
 
             # Handle conditional request (If-Modified-Since)
@@ -366,18 +407,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(stat.st_size))
+            self.send_header("Content-Length", str(size))
             self.send_header("Last-Modified", last_mod)
             self.send_header("X-Tracker-Version", SERVER_VERSION)
             self.send_header("X-Tracker-Server", f"http://{get_local_ip()}:{PORT}")
-            self.send_header("X-Tracker-SHA256", sha256_file(file_path))
+            self.send_header("X-Tracker-SHA256", digest)
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
 
             if self.command == "GET":
                 try:
-                    with open(file_path, "rb") as f:
-                        self.wfile.write(f.read())
+                    with open(BINARY_PATH, "rb") as f:
+                        self._write_body(f.read())
                 except (BrokenPipeError, ConnectionResetError):
                     pass
             return
@@ -451,20 +492,41 @@ class DashboardHandler(BaseHTTPRequestHandler):
             img.save(buf, format="PNG")
             img_bytes = buf.getvalue()
 
+            # Fingerprint the rendered image so an unchanged dashboard can be
+            # answered with 304 Not Modified: the client then skips both the
+            # ~90KB transfer and the eips refresh, saving radio + panel power.
+            etag = '"%s"' % hashlib.sha256(img_bytes).hexdigest()[:16]
+
             brightness, warmth = get_commute_lighting()
             poll_interval = get_target_poll_interval()
+            _exists, _mtime, bin_sha, _size = get_binary_info()
+
+            if self.headers.get("If-None-Match") == etag:
+                self.send_response(304)
+                self.send_header("ETag", etag)
+                self.send_header("X-Tracker-Version", SERVER_VERSION)
+                self.send_header("X-Tracker-SHA256", bin_sha)
+                self.send_header("X-Kindle-Poll-Interval", str(poll_interval))
+                self.send_header("X-Tracker-Server", f"http://{get_local_ip()}:{PORT}")
+                self.send_header("X-Resolved-View", resolve_view(view_param))
+                self.end_headers()
+                return
+
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
             self.send_header("Content-Length", str(len(img_bytes)))
+            self.send_header("ETag", etag)
             self.send_header("X-Kindle-Brightness", str(brightness))
             self.send_header("X-Kindle-Warmth", str(warmth))
             self.send_header("X-Kindle-Poll-Interval", str(poll_interval))
             self.send_header("X-Tracker-Server", f"http://{get_local_ip()}:{PORT}")
+            self.send_header("X-Tracker-Version", SERVER_VERSION)
+            self.send_header("X-Tracker-SHA256", bin_sha)
             self.send_header("X-Tracker-View", view_param)
             self.send_header("X-Resolved-View", resolve_view(view_param))
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.end_headers()
-            self.wfile.write(img_bytes)
+            self._write_body(img_bytes)
 
         elif parsed.path in ["/", "/index.html"]:
             current_view = params.get("view", ["auto"])[0]
@@ -528,11 +590,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html")
             self.send_header("Content-Length", str(len(html.encode("utf-8"))))
             self.end_headers()
-            self.wfile.write(html.encode("utf-8"))
+            self._write_body(html.encode("utf-8"))
 
         else:
-            self.send_response(404)
-            self.end_headers()
+            self._send_empty(404)
 
     def log_message(self, format, *args):
         # Concise logging

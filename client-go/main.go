@@ -22,27 +22,35 @@ import (
 var Version = "0.0.0"
 
 const (
-	BinaryPath         = "/tmp/tracker"
-	ImagePath          = "/tmp/dashboard.png"
-	PeakPollInterval   = 45 * time.Second
-	EcoPollInterval    = 10 * time.Minute
+	BinaryPath       = "/tmp/tracker"
+	ImagePath        = "/tmp/dashboard.png"
+	PeakPollInterval = 45 * time.Second
+	EcoPollInterval  = 10 * time.Minute
+	// ManualHoldDuration bounds the view-override hold and the manual-lighting
+	// hold (how long a user's explicit choice survives before auto resumes).
 	ManualHoldDuration = 45 * time.Minute
+	// FastPollHoldDuration bounds how long a *data-affecting* interaction
+	// (view switch / refresh) keeps the radio polling at the fast cadence.
+	// Screen-only actions (frontlight, exit) deliberately do not arm it.
+	FastPollHoldDuration = 10 * time.Minute
 )
 
 type TrackerClient struct {
-	serverURL         string
-	client            *http.Client
-	manualLightTime   time.Time
-	manualViewTime    time.Time
-	manualRefreshTime time.Time
-	mu                sync.Mutex
-	refreshCh         chan struct{}
-	lastBinaryMod     string
-	consecutiveErrors int
-	viewMode          string
-	lastRenderedView  string
-	panelOnce         sync.Once
-	panelSize         PanelSize
+	serverURL           string
+	client              *http.Client
+	manualLightTime     time.Time
+	manualViewTime      time.Time
+	lastDataInteraction time.Time
+	mu                  sync.Mutex
+	refreshCh           chan struct{}
+	lastETag            string
+	consecutiveErrors   int
+	viewMode            string
+	lastRenderedView    string
+	panelOnce           sync.Once
+	panelSize           PanelSize
+	logCh               chan string
+	logStarted          sync.Once
 }
 
 func NewTrackerClient(server string, initialView string) *TrackerClient {
@@ -56,6 +64,7 @@ func NewTrackerClient(server string, initialView string) *TrackerClient {
 			Timeout: 15 * time.Second,
 		},
 		refreshCh: make(chan struct{}, 1),
+		logCh:     make(chan string, 64),
 	}
 }
 
@@ -104,18 +113,21 @@ func (tc *TrackerClient) setExplicitViewMode(target string) string {
 	return tc.viewMode
 }
 
-func (tc *TrackerClient) markManualInteraction() {
+// dataInteraction records a user action that changes what is fetched/rendered
+// (view switch or explicit refresh). It arms the fast-poll hold. Screen-only
+// actions (frontlight, exit) deliberately do not call this.
+func (tc *TrackerClient) dataInteraction() {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-	tc.manualRefreshTime = time.Now()
+	tc.lastDataInteraction = time.Now()
 }
 
 func (tc *TrackerClient) getNextPollInterval(serverIntervalSec int) time.Duration {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 
-	// If manual interaction occurred within last 45 minutes, stay in fast 45s mode
-	if !tc.manualRefreshTime.IsZero() && time.Since(tc.manualRefreshTime) < ManualHoldDuration {
+	// If a data-affecting interaction occurred recently, stay in fast mode.
+	if !tc.lastDataInteraction.IsZero() && time.Since(tc.lastDataInteraction) < FastPollHoldDuration {
 		return PeakPollInterval
 	}
 
@@ -153,19 +165,45 @@ func (tc *TrackerClient) setServerURL(url string) {
 	tc.serverURL = url
 }
 
-// logRemote sends non-blocking diagnostic logs to the active server
+// logRemote enqueues a diagnostic log for the single background sender.
+// It never blocks the caller and never spawns a goroutine per call, so a burst
+// of taps cannot open a burst of radio-waking connections. If the queue is
+// full the message is dropped (diagnostics are best-effort).
 func (tc *TrackerClient) logRemote(msg string) {
-	server := tc.getServerURL()
-	go func() {
-		req, err := http.NewRequest("POST", server+"/log", strings.NewReader(msg))
-		if err == nil {
-			req.Header.Set("Content-Type", "text/plain")
-			resp, err := tc.client.Do(req)
-			if err == nil {
-				resp.Body.Close()
+	select {
+	case tc.logCh <- msg:
+	default:
+	}
+}
+
+// startLogSender launches the one goroutine that serializes log delivery.
+func (tc *TrackerClient) startLogSender(ctx context.Context) {
+	tc.logStarted.Do(func() {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case msg := <-tc.logCh:
+					tc.postLog(msg)
+				}
 			}
-		}
-	}()
+		}()
+	})
+}
+
+// postLog performs a single synchronous diagnostic POST.
+func (tc *TrackerClient) postLog(msg string) {
+	server := tc.getServerURL()
+	req, err := http.NewRequest("POST", server+"/log", strings.NewReader(msg))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "text/plain")
+	resp, err := tc.client.Do(req)
+	if err == nil {
+		resp.Body.Close()
+	}
 }
 
 func (tc *TrackerClient) handleNetworkError(ctx context.Context) {
@@ -253,7 +291,8 @@ func (tc *TrackerClient) configureGestureHandlers(gd *GestureDetector, cancel co
 	gd.OnLog = func(msg string) { tc.logRemote(msg) }
 
 	gd.OnSingleTap = func(x, y int32) {
-		tc.markManualInteraction()
+		// Screen-only action: cycleFrontlight() arms the lighting hold itself;
+		// do not arm the fast-poll hold (nothing on the wire changed).
 		tc.logRemote(fmt.Sprintf("Single tap recognized at (%d, %d)", x, y))
 		tc.cycleFrontlight()
 	}
@@ -266,35 +305,35 @@ func (tc *TrackerClient) configureGestureHandlers(gd *GestureDetector, cancel co
 		cancel()
 	}
 	gd.OnTopLeftTap = func(x, y int32) {
-		tc.markManualInteraction()
+		tc.dataInteraction()
 		tc.logRemote(fmt.Sprintf("Top-Left corner tapped at (%d, %d)! Refreshing...", x, y))
 		refresh()
 	}
 	gd.OnBottomLeftTap = func(x, y int32) {
-		tc.markManualInteraction()
+		tc.dataInteraction()
 		newMode := tc.cycleViewMode()
 		tc.logRemote(fmt.Sprintf("Bottom-Left corner tapped at (%d, %d)! View mode cycled to: %s. Refreshing...", x, y, newMode))
 		refresh()
 	}
 	gd.OnBusesTap = func(x, y int32) {
-		tc.markManualInteraction()
+		tc.dataInteraction()
 		newMode := tc.setExplicitViewMode("evening")
 		tc.logRemote(fmt.Sprintf("BUSES button tapped at (%d, %d)! View set to: %s. Refreshing...", x, y, newMode))
 		refresh()
 	}
 	gd.OnBikesTap = func(x, y int32) {
-		tc.markManualInteraction()
+		tc.dataInteraction()
 		newMode := tc.setExplicitViewMode("morning")
 		tc.logRemote(fmt.Sprintf("CITI BIKE button tapped at (%d, %d)! View set to: %s. Refreshing...", x, y, newMode))
 		refresh()
 	}
 	gd.OnLightTap = func(x, y int32) {
-		tc.markManualInteraction()
+		// Screen-only action: no fast-poll hold (see OnSingleTap).
 		tc.logRemote(fmt.Sprintf("LIGHT button tapped at (%d, %d)! Cycling frontlight...", x, y))
 		tc.cycleFrontlight()
 	}
 	gd.OnRefreshTap = func(x, y int32) {
-		tc.markManualInteraction()
+		tc.dataInteraction()
 		tc.logRemote(fmt.Sprintf("REFRESH button tapped at (%d, %d)! Refreshing...", x, y))
 		refresh()
 	}
@@ -398,96 +437,70 @@ func (tc *TrackerClient) startPowerListener(ctx context.Context, exitCancel cont
 	}
 }
 
-// checkOTAUpdate checks if server has a newer binary build and hot-swaps in-place
-func (tc *TrackerClient) checkOTAUpdate(ctx context.Context) bool {
+// maybeUpdateBinary downloads and installs a new binary if the version
+// advertised by the server (learned from the dashboard response headers)
+// differs from the one currently running. Returns true only when it hands off
+// control to the freshly-exec'd binary. This is normally a no-op and performs
+// no network I/O.
+func (tc *TrackerClient) maybeUpdateBinary(ctx context.Context, serverVer, serverSHA string) bool {
+	if serverVer == "" {
+		return false
+	}
+	should, reason := ShouldUpdate(serverVer, Version, "", "")
+	if !should {
+		return false
+	}
+	tc.logRemote(fmt.Sprintf("OTA update triggered: %s. Hot-reloading...", reason))
+
 	server := tc.getServerURL()
-	req, err := http.NewRequestWithContext(ctx, "HEAD", server+"/tracker-arm", nil)
+	updatePath := "/tmp/tracker.update"
+	getReq, err := http.NewRequestWithContext(ctx, "GET", server+"/tracker-arm", nil)
 	if err != nil {
 		return false
 	}
-	resp, err := tc.client.Do(req)
+	getResp, err := tc.client.Do(getReq)
+	if err != nil || getResp.StatusCode != http.StatusOK {
+		return false
+	}
+	defer getResp.Body.Close()
+
+	out, err := osOpenFile(updatePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
+	hasher := sha256.New()
+	_, err = io.Copy(io.MultiWriter(out, hasher), getResp.Body)
+	out.Close()
+	if err != nil {
+		_ = osRemove(updatePath)
 		return false
 	}
 
-	if canonical := resp.Header.Get("X-Tracker-Server"); canonical != "" && canonical != server {
-		if AdoptableServerURL(canonical) {
-			tc.setServerURL(canonical)
-			_ = SaveServerURL(canonical)
-			server = canonical
+	// Prefer the digest advertised on the dashboard response; fall back to the
+	// one carried by the download response itself.
+	expected := serverSHA
+	if expected == "" {
+		expected = getResp.Header.Get("X-Tracker-SHA256")
+	}
+	actual := hex.EncodeToString(hasher.Sum(nil))
+	if !VerifySHA256(actual, expected) {
+		if expected == "" {
+			tc.logRemote("OTA response carried no X-Tracker-SHA256; skipping update for safety.")
 		} else {
-			tc.logRemote(fmt.Sprintf("Ignoring untrusted X-Tracker-Server header: %s", canonical))
+			tc.logRemote(fmt.Sprintf("OTA checksum mismatch (expected %s, got %s). Discarding update.", expected, actual))
 		}
+		_ = osRemove(updatePath)
+		return false
 	}
 
-	serverVer := resp.Header.Get("X-Tracker-Version")
-	lastMod := resp.Header.Get("Last-Modified")
-	if lastMod == "" {
-		lastMod = resp.Header.Get("ETag")
-	}
-	if lastMod == "" {
-		lastMod = resp.Header.Get("Content-Length")
-	}
+	_ = osRename(updatePath, BinaryPath)
+	_ = osChmod(BinaryPath, 0755)
+	_ = SaveServerURL(server)
 
-	should, reason := ShouldUpdate(serverVer, Version, lastMod, tc.lastBinaryMod)
-
-	if tc.lastBinaryMod == "" {
-		tc.lastBinaryMod = lastMod
-	}
-
-	if should {
-		tc.logRemote(fmt.Sprintf("OTA update triggered: %s. Hot-reloading...", reason))
-
-		updatePath := "/tmp/tracker.update"
-		getReq, _ := http.NewRequestWithContext(ctx, "GET", server+"/tracker-arm", nil)
-		getResp, err := tc.client.Do(getReq)
-		if err != nil || getResp.StatusCode != http.StatusOK {
-			return false
-		}
-		defer getResp.Body.Close()
-
-		out, err := osOpenFile(updatePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-		if err != nil {
-			return false
-		}
-		hasher := sha256.New()
-		_, err = io.Copy(io.MultiWriter(out, hasher), getResp.Body)
-		out.Close()
-		if err != nil {
-			_ = osRemove(updatePath)
-			return false
-		}
-
-		// Verify the downloaded binary against the server's advertised digest.
-		// This prevents a corrupted or tampered image from being exec'd.
-		expected := resp.Header.Get("X-Tracker-SHA256")
-		actual := hex.EncodeToString(hasher.Sum(nil))
-		if !VerifySHA256(actual, expected) {
-			if expected == "" {
-				tc.logRemote("OTA response carried no X-Tracker-SHA256; skipping update for safety.")
-			} else {
-				tc.logRemote(fmt.Sprintf("OTA checksum mismatch (expected %s, got %s). Discarding update.", expected, actual))
-			}
-			_ = osRemove(updatePath)
-			return false
-		}
-
-		_ = osRename(updatePath, BinaryPath)
-		_ = osChmod(BinaryPath, 0755)
-
-		_ = SaveServerURL(server)
-
-		newArgs := []string{BinaryPath, "-server", server, "-view", tc.getViewMode()}
-		tc.logRemote("Executing updated binary via syscall.Exec...")
-		_ = sysExec(BinaryPath, newArgs, os.Environ())
-		return true
-	}
-	return false
+	newArgs := []string{BinaryPath, "-server", server, "-view", tc.getViewMode()}
+	tc.logRemote("Executing updated binary via syscall.Exec...")
+	_ = sysExec(BinaryPath, newArgs, os.Environ())
+	return true
 }
 
 // fetchAndDrawDashboard fetches dashboard PNG, applies lighting, and pushes to e-ink.
@@ -513,6 +526,15 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	req.Header.Set("X-Kindle-Charging", strconv.Itoa(chargeVal))
 	req.Header.Set("X-Tracker-View", viewMode)
 
+	tc.mu.Lock()
+	etag := tc.lastETag
+	tc.mu.Unlock()
+	if etag != "" {
+		// Ask the server to answer 304 if the dashboard is unchanged, so we can
+		// skip both the image transfer and the eips refresh.
+		req.Header.Set("If-None-Match", etag)
+	}
+
 	resp, err := tc.client.Do(req)
 	if err != nil {
 		tc.handleNetworkError(ctx)
@@ -531,11 +553,31 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 		tc.mu.Unlock()
 	}
 
+	// The dashboard response carries the server's binary version/digest, so the
+	// OTA decision needs no separate request. A mismatch hands off control.
+	serverVer := resp.Header.Get("X-Tracker-Version")
+	serverSHA := resp.Header.Get("X-Tracker-SHA256")
+
 	// HTTP 205 signals remote stop command
 	if resp.StatusCode == 205 {
 		tc.logRemote("Server sent HTTP 205 Stop signal. Exiting cleanly...")
 		exitCancel()
 		return 0
+	}
+
+	// HTTP 304: dashboard unchanged. Skip the transfer and the screen refresh.
+	if resp.StatusCode == http.StatusNotModified {
+		tc.mu.Lock()
+		tc.consecutiveErrors = 0
+		tc.mu.Unlock()
+		var pollSec int
+		if pStr := resp.Header.Get("X-Kindle-Poll-Interval"); pStr != "" {
+			pollSec, _ = strconv.Atoi(pStr)
+		}
+		if tc.maybeUpdateBinary(ctx, serverVer, serverSHA) {
+			return 0 // exec'd into the new binary
+		}
+		return pollSec
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -550,6 +592,9 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 
 	tc.mu.Lock()
 	tc.consecutiveErrors = 0
+	if newTag := resp.Header.Get("ETag"); newTag != "" {
+		tc.lastETag = newTag
+	}
 	tc.mu.Unlock()
 
 	// Write image to /tmp/dashboard.png
@@ -589,6 +634,11 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 			tc.logRemote(fmt.Sprintf("Commute auto-lighting applied: warmth %s -> %s", currW, warmStr))
 		}
 	}
+
+	// New version: download and exec it (no-op on the common path).
+	if tc.maybeUpdateBinary(ctx, serverVer, serverSHA) {
+		return 0
+	}
 	return serverPollSec
 }
 
@@ -609,6 +659,7 @@ func run(parent context.Context) {
 	defer cancel()
 
 	tc := NewTrackerClient(serverURL, initialView)
+	tc.startLogSender(ctx)
 	_ = osWriteFile("/tmp/tracker_server.txt", []byte(serverURL), 0644)
 	_ = osWriteFile("/mnt/us/documents/tracker_server.txt", []byte(serverURL), 0644)
 
@@ -657,11 +708,9 @@ func (tc *TrackerClient) runPollLoop(ctx context.Context, cancel context.CancelF
 			ticker.Reset(tc.getNextPollInterval(serverPollSec))
 
 		case <-ticker.C:
-			// 1. Check for OTA binary update on server
-			if tc.checkOTAUpdate(ctx) {
-				return // Replaced by new binary via syscall.Exec
-			}
-			// 2. Fetch and render latest dashboard
+			// Fetch (and, if the server advertises a new build, OTA-update).
+			// There is no separate per-cycle OTA check: the dashboard response
+			// carries the server version, so a normal tick is one request.
 			serverPollSec := tc.fetchAndDrawDashboard(ctx, cancel)
 			ticker.Reset(tc.getNextPollInterval(serverPollSec))
 		}
