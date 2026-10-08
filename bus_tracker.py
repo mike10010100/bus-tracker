@@ -7,29 +7,49 @@ try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass
+    # Native fallback if python-dotenv is not installed
+    env_file = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.exists(env_file):
+        with open(env_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip("'\"")
+                    if k not in os.environ:
+                        os.environ[k] = v
 
 class NJTransitBusTracker:
     """
     Client for NJ Transit Bus DepartureVision (BUSDV2) API.
     Handles automated 24-hour token minting and renewal.
     """
-    AUTH_URL = "https://pcsdata.njtransit.com/api/BUSDV2/authenticateUser"
-    BUS_DV_URL = "https://pcsdata.njtransit.com/api/BUSDV2/getBusDV"
+    DEFAULT_BASE_URL = os.environ.get("NJT_BASE_URL", "https://testpcsdata.njtransit.com")
 
-    def __init__(self, username: Optional[str] = None, password: Optional[str] = None):
-        self.username = username or os.environ.get("NJT_USERNAME")
+    def __init__(self, username: Optional[str] = None, password: Optional[str] = None, base_url: Optional[str] = None):
+        raw_user = username or os.environ.get("NJT_USERNAME", "")
+        # NJ Transit API requires username handle, not email
+        self.username = raw_user.split("@")[0] if "@" in raw_user else raw_user
         self.password = password or os.environ.get("NJT_PASSWORD")
+        self.base_url = (base_url or self.DEFAULT_BASE_URL).rstrip("/")
         self.token: Optional[str] = None
         self.token_expiry: float = 0
         self.session = requests.Session()
+
+    @property
+    def auth_url(self) -> str:
+        return f"{self.base_url}/api/BUSDV2/authenticateUser"
+
+    @property
+    def bus_dv_url(self) -> str:
+        return f"{self.base_url}/api/BUSDV2/getBusDV"
 
     def get_token(self) -> str:
         """
         Retrieves a valid token. If expired or not present, automatically
         authenticates with NJ Transit to obtain a new 24-hour token.
         """
-        # Refresh 1 hour before the 24h expiry to be safe
         if not self.token or time.time() > self.token_expiry:
             if not self.username or not self.password:
                 raise ValueError(
@@ -38,7 +58,7 @@ class NJTransitBusTracker:
                 )
 
             resp = self.session.post(
-                self.AUTH_URL,
+                self.auth_url,
                 data={"username": self.username, "password": self.password},
                 timeout=10,
             )
@@ -60,7 +80,7 @@ class NJTransitBusTracker:
         """
         token = self.get_token()
         resp = self.session.post(
-            self.BUS_DV_URL,
+            self.bus_dv_url,
             data={
                 "token": token,
                 "stop": str(stop_id),
@@ -85,10 +105,14 @@ class NJTransitBusTracker:
             trips = self.get_arrivals(stop_id=stop_id, route=route)
             arrivals = []
             for t in trips:
+                status = (t.get("departurestatus") or "").strip()
+                dep_time = (t.get("departuretime") or "").strip()
+                eta_str = f"{status} ({dep_time})" if status and dep_time else (status or dep_time or "Scheduled")
+
                 arrivals.append({
                     "route": t.get("public_route"),
                     "destination": (t.get("header") or "").strip(),
-                    "eta": t.get("departuretime"),
+                    "eta": eta_str,
                     "occupancy": t.get("passload"),
                     "vehicle_id": t.get("vehicle_id"),
                 })
@@ -103,19 +127,18 @@ if __name__ == "__main__":
         "Clinton St at 9th St (Stop #20494)": "20494",
     }
 
-    username = os.environ.get("NJT_USERNAME", "YOUR_USERNAME")
-    password = os.environ.get("NJT_PASSWORD", "YOUR_PASSWORD")
-
-    if username == "YOUR_USERNAME":
-        print("Note: Set NJT_USERNAME and NJT_PASSWORD in your environment or .env file.")
-        print("Example usage when credentials are provided:")
-        print("  python bus_tracker.py")
-    else:
-        tracker = NJTransitBusTracker(username, password)
+    tracker = NJTransitBusTracker()
+    try:
         results = tracker.get_summary(STOPS_TO_TRACK, route="126")
         for name, arrivals in results.items():
             print(f"\n=== {name} ===")
             if not arrivals:
                 print("  No buses reported in the next hour.")
             for a in arrivals:
-                print(f"  [{a['route']}] {a['destination']} -> {a['eta']} (Load: {a['occupancy'] or 'N/A'})")
+                load = f" [Occupancy: {a['occupancy']}]" if a['occupancy'] and a['occupancy'] != "EMPTY" else ""
+                bus_num = f" (Bus #{a['vehicle_id']})" if a['vehicle_id'] else ""
+                print(f"  [{a['route']}] {a['destination']} -> {a['eta']}{bus_num}{load}")
+    except ValueError as e:
+        print(f"Setup error: {e}")
+    except Exception as e:
+        print(f"Error fetching arrivals: {e}")
