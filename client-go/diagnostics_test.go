@@ -427,6 +427,27 @@ func TestActionInputWakeProbe_EnumeratesDevices(t *testing.T) {
 	}
 }
 
+func TestActionTouchWakeProbe_ReportsDeviceAndIRQ(t *testing.T) {
+	patchRuntime(t)
+	var scripts []string
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+		if name == "sh" && len(arg) >= 2 {
+			scripts = append(scripts, arg[1])
+		}
+		return exec.Command("echo", "2-0024 name=pt_mt irq=42/1")
+	}
+	out := actionTouchWakeProbe(context.Background())
+	joined := strings.Join(scripts, "\n")
+	for _, want := range []string{"/proc/bus/input/devices", "2-0024", "power/wakeup", "/proc/interrupts", "wakeup_sources", "dmesg"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("touch-wake-probe missing %q\nran:\n%s", want, joined)
+		}
+	}
+	if out == "" {
+		t.Error("expected non-empty probe output")
+	}
+}
+
 func TestActionTouchWakeTest_ArmsSafetyAndTogglesWakeup(t *testing.T) {
 	patchRuntime(t)
 	var scripts []string
@@ -451,7 +472,7 @@ func TestActionTouchWakeTest_ArmsSafetyAndTogglesWakeup(t *testing.T) {
 }
 
 func TestDeviceActions_AreAllRegistered(t *testing.T) {
-	for _, name := range []string{"disable-ads", "stop-framework", "start-framework", "framework-state", "sleep-test", "rtc-suspend", "input-wake-probe", "touch-wake-test"} {
+	for _, name := range []string{"disable-ads", "stop-framework", "start-framework", "framework-state", "sleep-test", "rtc-suspend", "input-wake-probe", "touch-wake-test", "touch-wake-probe"} {
 		if _, ok := deviceActions[name]; !ok {
 			t.Errorf("action %q not registered", name)
 		}

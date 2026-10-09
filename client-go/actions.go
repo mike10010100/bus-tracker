@@ -30,6 +30,7 @@ var deviceActions = map[string]DeviceAction{
 	"rtc-suspend":      {Fn: actionRTCSuspend, Timeout: 5 * time.Minute},
 	"input-wake-probe": {Fn: actionInputWakeProbe},
 	"touch-wake-test":  {Fn: actionTouchWakeTest, Timeout: 5 * time.Minute},
+	"touch-wake-probe": {Fn: actionTouchWakeProbe},
 }
 
 // runAction executes a named action and returns a human-readable result.
@@ -143,6 +144,38 @@ func actionRTCSuspend(ctx context.Context) string {
 	b.WriteString("wifi on: " + shell(ctx, "lipc-set-prop com.lab126.cmd wirelessEnable 1 2>&1; echo done") + "\n")
 	b.WriteString(fmt.Sprintf("RESULT: suspended+resumed in %s (if ~90s, the RTC wake worked)", elapsed.Round(time.Second)))
 	return b.String()
+}
+
+// actionTouchWakeProbe digs into whether the touch panel can actually wake the
+// SoC: the i2c device's power attributes and IRQ, /proc/interrupts, debugfs
+// wakeup_sources, and relevant dmesg. Read-only; no user interaction needed.
+func actionTouchWakeProbe(ctx context.Context) string {
+	var b strings.Builder
+	b.WriteString("input devices:\n")
+	b.WriteString(shell(ctx, "grep -E 'Name|Handlers' /proc/bus/input/devices 2>/dev/null") + "\n")
+
+	b.WriteString("touch i2c device (2-0024) power/irq:\n")
+	b.WriteString(shell(ctx, "d=/sys/bus/i2c/devices/2-0024; "+
+		"echo \"name=$(cat $d/name 2>/dev/null)\"; "+
+		"echo \"driver=$(readlink -f $d/driver 2>/dev/null)\"; "+
+		"echo \"wakeup=$(cat $d/power/wakeup 2>/dev/null)\"; "+
+		"echo \"control=$(cat $d/power/control 2>/dev/null)\"; "+
+		"echo \"irq=$(cat $d/irq 2>/dev/null)\"; "+
+		"ls $d/power 2>/dev/null") + "\n")
+
+	b.WriteString("all i2c devices with wakeup:\n")
+	b.WriteString(shell(ctx, "for d in /sys/bus/i2c/devices/*; do "+
+		"[ -e \"$d/power/wakeup\" ] && echo \"  $(basename $d) [$(cat $d/name 2>/dev/null)] wakeup=$(cat $d/power/wakeup 2>/dev/null)\"; done") + "\n")
+
+	b.WriteString("interrupts (i2c/touch):\n")
+	b.WriteString(shell(ctx, "grep -iE 'i2c|touch|2-0024|pt_mt|goodix|cyttsp|elan' /proc/interrupts 2>/dev/null") + "\n")
+
+	b.WriteString("debugfs wakeup_sources:\n")
+	b.WriteString(shell(ctx, "cat /sys/kernel/debug/wakeup_sources 2>/dev/null | head -50 || echo '<no debugfs>'") + "\n")
+
+	b.WriteString("dmesg (touch/i2c):\n")
+	b.WriteString(shell(ctx, "dmesg 2>/dev/null | grep -iE 'touch|pt_mt|2-0024|cyttsp|goodix|elan|i2c-2' | tail -25 || echo '<no dmesg>'") + "\n")
+	return strings.TrimSpace(b.String())
 }
 
 // actionInputWakeProbe is read-only: it enumerates every input device, its name,
