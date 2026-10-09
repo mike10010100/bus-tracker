@@ -279,16 +279,37 @@ def format_for_kindle(base_img, orientation="landscape", rotation=90, target=Non
     return base_img.convert("L")
 
 
+def _parse_hour_env(name, default):
+    """Parses a decimal-hour env var (e.g. '9.5' or '10'), falling back to
+    default on any error."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+# Peak commute windows are configurable so the schedule can be tuned without a
+# code change (e.g. extending the morning window while testing on the device).
+PEAK_AM_START = _parse_hour_env("PEAK_AM_START", 7.5)
+PEAK_AM_END = _parse_hour_env("PEAK_AM_END", 9.5)
+PEAK_PM_START = _parse_hour_env("PEAK_PM_START", 16.5)
+PEAK_PM_END = _parse_hour_env("PEAK_PM_END", 19.0)
+
+
 def is_peak_commute_hours(dt=None):
     """
-    Returns True during peak commute windows in Hoboken, NJ:
+    Returns True during peak commute windows in Hoboken, NJ. Defaults:
     - Morning commute: 7:30 AM - 9:30 AM
     - Evening commute: 4:30 PM - 7:00 PM (16:30 - 19:00)
+    Override with PEAK_AM_START/PEAK_AM_END/PEAK_PM_START/PEAK_PM_END.
     """
     if dt is None:
         dt = datetime.now()
     hour = dt.hour + dt.minute / 60.0
-    return (7.5 <= hour < 9.5) or (16.5 <= hour < 19.0)
+    return (PEAK_AM_START <= hour < PEAK_AM_END) or (PEAK_PM_START <= hour < PEAK_PM_END)
 
 
 def get_commute_lighting(dt=None):
@@ -593,12 +614,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
             # them. diag is "" (none), "1" (passive) or "full" (passive + active).
             diag_header = ""
             mode_header = ""
+            # The client reports the mode it's actually running via
+            # X-Tracker-Mode. If it matches the desired mode, the switch landed
+            # and we stop requesting. If the client reports a *different* mode we
+            # keep requesting (self-healing retry). A client that reports nothing
+            # (older build) is treated as one-shot to avoid a relaunch loop.
+            client_mode = self.headers.get("X-Tracker-Mode", "")
             if is_kindle:
                 with _diag_lock:
                     diag_header = _diag_requested
                     _diag_requested = ""
-                    mode_header = _mode_requested
-                    _mode_requested = ""
+                    if _mode_requested:
+                        if client_mode == _mode_requested:
+                            print(f"[Mode] client confirmed mode '{client_mode}'")
+                            _mode_requested = ""
+                        else:
+                            mode_header = _mode_requested
+                            if client_mode == "":
+                                # Legacy client (doesn't report its mode): send once.
+                                _mode_requested = ""
 
             if self.headers.get("If-None-Match") == etag:
                 self.send_response(304)

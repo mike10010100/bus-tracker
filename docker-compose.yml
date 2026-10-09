@@ -20,6 +20,11 @@ services:
       - NJT_PASSWORD=${NJT_PASSWORD:-}
       - NJT_API_USERNAME=${NJT_API_USERNAME:-}
       - NJT_API_PASSWORD=${NJT_API_PASSWORD:-}
+      # Peak commute windows (decimal hours), overridable without a rebuild.
+      - PEAK_AM_START=${PEAK_AM_START:-7.5}
+      - PEAK_AM_END=${PEAK_AM_END:-9.5}
+      - PEAK_PM_START=${PEAK_PM_START:-16.5}
+      - PEAK_PM_END=${PEAK_PM_END:-19.0}
     env_file:
       - path: .env
         required: false

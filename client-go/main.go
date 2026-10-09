@@ -630,6 +630,9 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	req.Header.Set("X-Kindle-Battery", strconv.Itoa(batt.Level))
 	req.Header.Set("X-Kindle-Charging", strconv.Itoa(chargeVal))
 	req.Header.Set("X-Tracker-View", viewMode)
+	// Report the mode we're actually running, so the server can confirm a mode
+	// switch landed and keep requesting it until it does.
+	req.Header.Set("X-Tracker-Mode", currentModeName())
 
 	tc.mu.Lock()
 	etag := tc.lastETag
@@ -670,16 +673,21 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	}
 
 	// The server can ask the client to relaunch in a different run mode via a
-	// header (resident/oneshot/sleep/sleep-suspend). This lets us flip modes on a
-	// device with no shell access. We only re-exec when the requested mode
-	// differs from the one we're already running, so it settles after one hop.
+	// header (resident/oneshot/sleep/sleep-suspend). We only re-exec when the
+	// requested mode differs from the one we're running. sysExec only returns on
+	// failure; if it does, log loudly and fall through (the server keeps
+	// re-requesting until our next poll reports the new mode, so a transient
+	// failure self-heals).
 	if want := resp.Header.Get("X-Tracker-Mode"); want != "" && want != currentModeName() {
-		flags := modeFlags(want)
-		if flags != nil {
+		if flags := modeFlags(want); flags != nil {
 			tc.logRemote(fmt.Sprintf("Server requested run mode %q; relaunching.", want))
 			newArgs := append([]string{BinaryPath, "-server", server, "-view", tc.getViewMode()}, flags...)
-			_ = sysExec(BinaryPath, newArgs, os.Environ())
-			return 0
+			// sysExec replaces this process on success and never returns; if it
+			// returns, the exec failed, so log and fall through (the server keeps
+			// re-requesting until a later poll reports the new mode).
+			if err := sysExec(BinaryPath, newArgs, os.Environ()); err != nil {
+				tc.logRemote(fmt.Sprintf("Mode relaunch exec FAILED (%v); staying in %q.", err, currentModeName()))
+			}
 		}
 	}
 

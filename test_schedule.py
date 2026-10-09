@@ -36,6 +36,11 @@ class TestCommuteSchedule(unittest.TestCase):
         self.assertEqual(get_commute_lighting(dt), (0, 0))
         self.assertEqual(get_target_poll_interval(dt), 600)
 
+    def test_peak_window_end_is_exclusive(self):
+        # Defaults: morning peak ends at 9:30 (exclusive).
+        self.assertTrue(is_peak_commute_hours(datetime(2026, 10, 8, 9, 29)))
+        self.assertFalse(is_peak_commute_hours(datetime(2026, 10, 8, 9, 30)))
+
 
 if __name__ == "__main__":
     unittest.main()

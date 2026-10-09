@@ -209,10 +209,27 @@ class TestRunModeEndpoint(ServerHTTPTestBase):
         self.assertIsNone(wheaders.get("X-Tracker-Mode"))
         self.assertEqual(server._mode_requested, "sleep")
 
-        # The Kindle poll forwards and clears it.
+        # A legacy Kindle poll (no reported mode) forwards it once, then stops.
         status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
         self.assertEqual(headers.get("X-Tracker-Mode"), "sleep")
         self.assertEqual(server._mode_requested, "")
+
+    def test_mode_persists_until_client_confirms(self):
+        # If the client reports a mode different from the desired one, the server
+        # keeps requesting until it reports the target.
+        _http_get(self.port, "/mode?set=sleep")
+        _status, headers, _body = _http_get(
+            self.port, "/dashboard.png?mock=1&kindle=pw5", headers={"X-Tracker-Mode": "resident"}
+        )
+        self.assertEqual(headers.get("X-Tracker-Mode"), "sleep")
+        self.assertEqual(server._mode_requested, "sleep")  # still pending
+
+        # Once the client reports the target mode, the request clears.
+        _status, headers, _body = _http_get(
+            self.port, "/dashboard.png?mock=1&kindle=pw5", headers={"X-Tracker-Mode": "sleep"}
+        )
+        self.assertEqual(server._mode_requested, "")
+        self.assertIsNone(headers.get("X-Tracker-Mode"))
 
     def test_mode_invalid_value_ignored(self):
         _http_get(self.port, "/mode?set=bogus")
@@ -227,7 +244,8 @@ class TestRunModeEndpoint(ServerHTTPTestBase):
         etag = headers.get("ETag")
         _http_get(self.port, "/mode?set=oneshot")
         status, headers2, _body2 = _http_get(
-            self.port, "/dashboard.png?mock=1&kindle=pw5", headers={"If-None-Match": etag}
+            self.port, "/dashboard.png?mock=1&kindle=pw5",
+            headers={"If-None-Match": etag, "X-Tracker-Mode": "resident"},
         )
         self.assertEqual(status, 304)
         self.assertEqual(headers2.get("X-Tracker-Mode"), "oneshot")
