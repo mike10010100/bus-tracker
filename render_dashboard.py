@@ -859,6 +859,10 @@ def render_evening_view(
                 bus_meta = f"Bus #{bus_num}  •  {load_clean}"
             elif bus_num:
                 bus_meta = f"Bus #{bus_num}"
+            elif load_clean:
+                bus_meta = f"Status: {load_clean}"
+            elif first_bus.get("live"):
+                bus_meta = "Live prediction"
             else:
                 bus_meta = "Scheduled — no live vehicle"
             bus_meta = ellipsize_to_width(draw, bus_meta, font_detail, card_text_max_w)
