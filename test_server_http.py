@@ -183,6 +183,52 @@ class TestDiagnosticsEndpoints(ServerHTTPTestBase):
         self.assertEqual(headers2.get("X-Tracker-Diag"), "1")
 
 
+class TestRunModeEndpoint(ServerHTTPTestBase):
+    def setUp(self):
+        with server._diag_lock:
+            server._mode_requested = ""
+
+    def tearDown(self):
+        with server._diag_lock:
+            server._mode_requested = ""
+
+    def test_mode_get_reports_valid_and_pending(self):
+        status, _headers, body = _http_get(self.port, "/mode")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["pending"], "")
+        self.assertIn("sleep", payload["valid"])
+
+    def test_mode_set_and_forwarded_on_kindle_poll(self):
+        status, _headers, body = _http_get(self.port, "/mode?set=sleep")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["pending"], "sleep")
+
+        # A web request must not consume it.
+        _status, wheaders, _body = _http_get(self.port, "/dashboard.png?mock=1")
+        self.assertIsNone(wheaders.get("X-Tracker-Mode"))
+        self.assertEqual(server._mode_requested, "sleep")
+
+        # The Kindle poll forwards and clears it.
+        status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
+        self.assertEqual(headers.get("X-Tracker-Mode"), "sleep")
+        self.assertEqual(server._mode_requested, "")
+
+    def test_mode_invalid_value_ignored(self):
+        _http_get(self.port, "/mode?set=bogus")
+        self.assertEqual(server._mode_requested, "")
+
+    def test_mode_forwarded_on_304(self):
+        _status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
+        etag = headers.get("ETag")
+        _http_get(self.port, "/mode?set=oneshot")
+        status, headers2, _body2 = _http_get(
+            self.port, "/dashboard.png?mock=1&kindle=pw5", headers={"If-None-Match": etag}
+        )
+        self.assertEqual(status, 304)
+        self.assertEqual(headers2.get("X-Tracker-Mode"), "oneshot")
+
+
 class TestKeepAlive(ServerHTTPTestBase):
     def test_multiple_requests_on_one_connection(self):
         # HTTP/1.1 keep-alive: the client can reuse a connection across polls

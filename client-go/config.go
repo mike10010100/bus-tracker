@@ -125,6 +125,10 @@ const (
 	ModeSleep
 )
 
+// currentRunMode holds the mode this process is running in, so the fetch path
+// can compare it against a server-requested mode and relaunch on change.
+var currentRunMode = ModeResident
+
 // String renders the mode for logging.
 func (m RunMode) String() string {
 	switch m {

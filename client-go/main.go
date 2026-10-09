@@ -632,6 +632,17 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 		tc.postDiagnostics(diag == "full")
 	}
 
+	// The server can ask the client to relaunch in a different run mode via a
+	// header (resident/oneshot/sleep). This lets us flip modes on a device with
+	// no shell access. A mismatch only triggers one re-exec; the new process
+	// carries the mode flag, so the server can stop sending it.
+	if want := resp.Header.Get("X-Tracker-Mode"); want != "" && want != currentRunMode.String() {
+		tc.logRemote(fmt.Sprintf("Server requested run mode %q; relaunching.", want))
+		newArgs := []string{BinaryPath, "-server", server, "-view", tc.getViewMode(), "-" + want}
+		_ = sysExec(BinaryPath, newArgs, os.Environ())
+		return 0
+	}
+
 	// HTTP 205 signals remote stop command
 	if resp.StatusCode == 205 {
 		tc.logRemote("Server sent HTTP 205 Stop signal. Exiting cleanly...")
@@ -729,6 +740,7 @@ func main() {
 // wake, and cycles through device suspend.
 func run(parent context.Context) {
 	mode := ResolveRunMode(os.Args)
+	currentRunMode = mode
 
 	serverURL := GetServerURL()
 	initialView := ResolveViewMode(os.Args)

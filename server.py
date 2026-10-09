@@ -101,6 +101,11 @@ _diag_lock = threading.Lock()
 _last_diagnostics = {"text": "", "time": 0.0, "battery": None, "charging": None}
 _diag_requested = ""
 
+# A run-mode change the server wants the client to adopt on its next poll
+# ("" = none, else "resident"/"oneshot"/"sleep"). One-shot, like the diag flag.
+VALID_RUN_MODES = ("resident", "oneshot", "sleep")
+_mode_requested = ""
+
 
 def parse_diag_battery(text):
     """
@@ -377,7 +382,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._send_empty(404)
 
     def do_GET(self):
-        global tracker_stopped, _diag_requested
+        global tracker_stopped, _diag_requested, _mode_requested
         parsed = urllib.parse.urlparse(self.path)
         params = urllib.parse.parse_qs(parsed.query)
 
@@ -420,6 +425,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
             payload = f"# diagnostics captured {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))}\n{text}".encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self._write_body(payload)
+            return
+
+        if parsed.path == "/mode":
+            # Request that the next Kindle poll relaunch the client in a given
+            # run mode (resident/oneshot/sleep). GET with no ?set= reports the
+            # pending request.
+            want = params.get("set", [""])[0].lower()
+            if want in VALID_RUN_MODES:
+                with _diag_lock:
+                    _mode_requested = want
+                print(f"[Mode] requested client mode '{want}' on the next poll")
+            with _diag_lock:
+                pending = _mode_requested
+            payload = json.dumps({"pending": pending, "valid": list(VALID_RUN_MODES)}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self._write_body(payload)
@@ -564,15 +588,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             poll_interval = get_target_poll_interval()
             _exists, _mtime, bin_sha, _size = get_binary_info()
 
-            # Consume a pending diagnostics request (one-shot) so a *Kindle*
-            # client uploads a fresh device report on this poll. Desktop/web
-            # requests for /dashboard.png must not consume it. The stored value
-            # is "" (none), "1" (passive) or "full" (passive + active probe).
+            # Consume pending one-shot requests so a *Kindle* client acts on them
+            # this poll. Desktop/web requests for /dashboard.png must not consume
+            # them. diag is "" (none), "1" (passive) or "full" (passive + active).
             diag_header = ""
+            mode_header = ""
             if is_kindle:
                 with _diag_lock:
                     diag_header = _diag_requested
                     _diag_requested = ""
+                    mode_header = _mode_requested
+                    _mode_requested = ""
 
             if self.headers.get("If-None-Match") == etag:
                 self.send_response(304)
@@ -584,6 +610,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_header("X-Resolved-View", resolve_view(view_param))
                 if diag_header:
                     self.send_header("X-Tracker-Diag", diag_header)
+                if mode_header:
+                    self.send_header("X-Tracker-Mode", mode_header)
                 self.end_headers()
                 return
 
@@ -601,6 +629,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("X-Resolved-View", resolve_view(view_param))
             if diag_header:
                 self.send_header("X-Tracker-Diag", diag_header)
+            if mode_header:
+                self.send_header("X-Tracker-Mode", mode_header)
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.end_headers()
             self._write_body(img_bytes)
