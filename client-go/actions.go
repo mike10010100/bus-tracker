@@ -222,6 +222,15 @@ func actionTouchWakeTest(ctx context.Context) string {
 
 	b.WriteString("stop framework: " + shell(ctx, "stop lab126_gui 2>&1; echo done") + "\n")
 	b.WriteString("unload screensaver: " + shell(ctx, "lipc-set-prop com.lab126.blanket unload screensaver 2>&1; echo done") + "\n")
+
+	// Visible cue: blink the frontlight 3x so the person at the device knows the
+	// moment to start tapping. powerd is still up (we only stop lab126_gui).
+	for i := 0; i < 3; i++ {
+		runQuiet(ctx, "lipc-set-prop", "-i", "com.lab126.powerd", "flIntensity", "18")
+		time.Sleep(700 * time.Millisecond)
+		runQuiet(ctx, "lipc-set-prop", "-i", "com.lab126.powerd", "flIntensity", "0")
+		time.Sleep(700 * time.Millisecond)
+	}
 	b.WriteString("frontlight off: " + shell(ctx, "lipc-set-prop -i com.lab126.powerd flIntensity 0 2>&1; echo done") + "\n")
 
 	b.WriteString("wifi off: " + shell(ctx, "lipc-set-prop com.lab126.cmd wirelessEnable 0 2>&1; echo done") + "\n")
@@ -234,6 +243,8 @@ func actionTouchWakeTest(ctx context.Context) string {
 	// The decisive signal: when the RTC alarm fires it clears itself. If it is
 	// still set after resume, the RTC did NOT wake us -> something else did.
 	alarmAfter := strings.TrimSpace(shell(ctx, "cat /sys/class/rtc/rtc0/wakealarm 2>/dev/null"))
+	// Disarm the safety net so it can't fire a spurious wake after we're back.
+	runQuiet(ctx, "sh", "-c", "echo 0 > /sys/class/rtc/rtc0/wakealarm")
 
 	b.WriteString("wifi on: " + shell(ctx, "lipc-set-prop com.lab126.cmd wirelessEnable 1 2>&1; echo done") + "\n")
 
