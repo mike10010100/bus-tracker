@@ -207,29 +207,30 @@ class TestRunModeEndpoint(ServerHTTPTestBase):
         # A web request must not consume it.
         _status, wheaders, _body = _http_get(self.port, "/dashboard.png?mock=1")
         self.assertIsNone(wheaders.get("X-Tracker-Mode"))
-        self.assertEqual(server._mode_requested, "sleep")
 
-        # A legacy Kindle poll (no reported mode) forwards it once, then stops.
-        status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
-        self.assertEqual(headers.get("X-Tracker-Mode"), "sleep")
-        self.assertEqual(server._mode_requested, "")
-
-    def test_mode_persists_until_client_confirms(self):
-        # If the client reports a mode different from the desired one, the server
-        # keeps requesting until it reports the target.
-        _http_get(self.port, "/mode?set=sleep")
-        _status, headers, _body = _http_get(
+        # A Kindle poll reporting a different mode is asked to change.
+        status, headers, _body = _http_get(
             self.port, "/dashboard.png?mock=1&kindle=pw5", headers={"X-Tracker-Mode": "resident"}
         )
         self.assertEqual(headers.get("X-Tracker-Mode"), "sleep")
-        self.assertEqual(server._mode_requested, "sleep")  # still pending
 
-        # Once the client reports the target mode, the request clears.
+    def test_mode_is_sticky_across_client_restarts(self):
+        # The desired mode persists (so an OTA restart re-adopts it): once the
+        # client confirms being in the mode, we stop requesting it, but a later
+        # poll reporting a different mode is asked again.
+        _http_get(self.port, "/mode?set=sleep")
+        # Client confirms it's already in sleep -> no header.
         _status, headers, _body = _http_get(
             self.port, "/dashboard.png?mock=1&kindle=pw5", headers={"X-Tracker-Mode": "sleep"}
         )
-        self.assertEqual(server._mode_requested, "")
         self.assertIsNone(headers.get("X-Tracker-Mode"))
+        self.assertEqual(server._mode_requested, "sleep")  # still sticky
+
+        # Client restarts (OTA) and reports resident -> server re-requests sleep.
+        _status, headers2, _body2 = _http_get(
+            self.port, "/dashboard.png?mock=1&kindle=pw5", headers={"X-Tracker-Mode": "resident"}
+        )
+        self.assertEqual(headers2.get("X-Tracker-Mode"), "sleep")
 
     def test_mode_invalid_value_ignored(self):
         _http_get(self.port, "/mode?set=bogus")

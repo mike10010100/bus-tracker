@@ -101,10 +101,15 @@ _diag_lock = threading.Lock()
 _last_diagnostics = {"text": "", "time": 0.0, "battery": None, "charging": None}
 _diag_requested = ""
 
-# A run-mode change the server wants the client to adopt on its next poll
-# ("" = none, else "resident"/"oneshot"/"sleep"). One-shot, like the diag flag.
+# The run mode the server wants clients to be in ("" = don't care, else one of
+# VALID_RUN_MODES). This is STICKY: it is re-asserted on every poll where the
+# client reports a different mode, so a client that restarts (e.g. after an OTA)
+# falls back into the desired mode automatically. Set at startup from
+# TRACKER_DEFAULT_MODE and changed at runtime via /mode?set=...
 VALID_RUN_MODES = ("resident", "oneshot", "sleep", "sleep-suspend")
-_mode_requested = ""
+_mode_requested = os.environ.get("TRACKER_DEFAULT_MODE", "").strip().lower()
+if _mode_requested not in VALID_RUN_MODES:
+    _mode_requested = ""
 
 # A named device action to forward to the next polling client (one-shot).
 # The set of valid actions is enforced on the client (allowlist in actions.go);
@@ -684,15 +689,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     _diag_requested = ""
                     action_header = _device_action
                     _device_action = ""
-                    if _mode_requested:
-                        if client_mode == _mode_requested:
-                            print(f"[Mode] client confirmed mode '{client_mode}'")
-                            _mode_requested = ""
-                        else:
-                            mode_header = _mode_requested
-                            if client_mode == "":
-                                # Legacy client: send once.
-                                _mode_requested = ""
+                    # Sticky desired mode: request it whenever the client isn't
+                    # already in it (covers fresh OTA restarts). Don't clear on
+                    # confirmation -- it must outlive the client process. A
+                    # client that reports nothing (legacy) gets it once.
+                    if _mode_requested and client_mode != _mode_requested:
+                        mode_header = _mode_requested
 
             if self.headers.get("If-None-Match") == etag:
                 self.send_response(304)
