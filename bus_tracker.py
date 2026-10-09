@@ -179,7 +179,15 @@ class NJTransitBusTracker:
             )
             resp.raise_for_status()
             data = resp.json()
-            trips = data.get("DVTrip") or []
+            trips = data.get("DVTrip")
+            # BUSDV2 can answer 200 with an error payload (e.g. {"message":
+            # {"message":"unknown user"}, "DVTrip":null}) when the account is not
+            # provisioned for DepartureVision. Treat a null trip list or an error
+            # message as unusable and fall through to the public GraphQL, which
+            # still returns the next departure per route -- better than reporting
+            # zero buses. A genuine empty list ([]) stays EMPTY.
+            if trips is None or data.get("message"):
+                raise RuntimeError(f"BUSDV2 unusable ({data.get('message')})")
         except Exception as e:
             # Automatic fallback to official website GraphQL API
             try:

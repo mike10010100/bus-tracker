@@ -82,9 +82,13 @@ class TestInitAndURLs(unittest.TestCase):
 
 class TestGetToken(unittest.TestCase):
     def test_missing_credentials_raises_value_error(self):
-        t = NJTransitBusTracker(username="", password="")
-        with self.assertRaises(ValueError):
-            t.get_token()
+        with patch.dict("os.environ", {
+            "NJT_USERNAME": "", "NJT_PASSWORD": "",
+            "NJT_API_USERNAME": "", "NJT_API_PASSWORD": "",
+        }):
+            t = NJTransitBusTracker(username="", password="")
+            with self.assertRaises(ValueError):
+                t.get_token()
 
     def test_successful_auth_mints_token(self):
         t = NJTransitBusTracker(username="u", password="p")
@@ -144,6 +148,19 @@ class TestGetArrivalsWithStatus(unittest.TestCase):
         status, trips = t.get_arrivals_with_status("20512")
         self.assertEqual(status, NJTransitBusTracker.STATUS_EMPTY)
         self.assertEqual(trips, [])
+
+    def test_busdv2_unknown_user_falls_back_to_graphql(self):
+        # 200 with an error payload ("unknown user", DVTrip null) must fall back,
+        # not silently report zero buses.
+        t = NJTransitBusTracker(username="u", password="p")
+        t.token = "tok"
+        t.token_expiry = 9_999_999_999
+        t.session.post = MagicMock(return_value=FakeResponse(
+            {"message": {"message": "unknown user"}, "DVTrip": None}))
+        t.get_arrivals_graphql = MagicMock(return_value=[{"public_route": "126"}])
+        status, trips = t.get_arrivals_with_status("20512")
+        self.assertEqual(status, NJTransitBusTracker.STATUS_OK)
+        self.assertEqual(len(trips), 1)
 
     def test_busdv2_failure_falls_back_to_graphql(self):
         t = NJTransitBusTracker(username="u", password="p")
