@@ -153,6 +153,47 @@ func TestWantsSuspend(t *testing.T) {
 	}
 }
 
+func TestModeFlags(t *testing.T) {
+	cases := map[string][]string{
+		"resident":      {"-resident"},
+		"oneshot":       {"-oneshot"},
+		"sleep":         {"-sleep"},
+		"sleep-suspend": {"-sleep", "-suspend"},
+		"bogus":         nil,
+	}
+	for name, want := range cases {
+		got := modeFlags(name)
+		if len(got) != len(want) {
+			t.Errorf("modeFlags(%q) = %v, want %v", name, got, want)
+			continue
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("modeFlags(%q) = %v, want %v", name, got, want)
+			}
+		}
+	}
+}
+
+func TestCurrentModeName(t *testing.T) {
+	origMode, origArgs := currentRunMode, os.Args
+	defer func() { currentRunMode, os.Args = origMode, origArgs }()
+
+	currentRunMode = ModeResident
+	if got := currentModeName(); got != "resident" {
+		t.Errorf("got %q, want resident", got)
+	}
+	currentRunMode = ModeSleep
+	os.Args = []string{"/tmp/tracker", "-sleep"}
+	if got := currentModeName(); got != "sleep" {
+		t.Errorf("got %q, want sleep", got)
+	}
+	os.Args = []string{"/tmp/tracker", "-sleep", "-suspend"}
+	if got := currentModeName(); got != "sleep-suspend" {
+		t.Errorf("got %q, want sleep-suspend", got)
+	}
+}
+
 func TestRunModeString(t *testing.T) {
 	if ModeResident.String() != "resident" || ModeOneshot.String() != "oneshot" || ModeSleep.String() != "sleep" {
 		t.Errorf("unexpected mode strings: %s %s %s", ModeResident, ModeOneshot, ModeSleep)

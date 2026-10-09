@@ -218,6 +218,10 @@ class TestRunModeEndpoint(ServerHTTPTestBase):
         _http_get(self.port, "/mode?set=bogus")
         self.assertEqual(server._mode_requested, "")
 
+    def test_mode_accepts_sleep_suspend(self):
+        _http_get(self.port, "/mode?set=sleep-suspend")
+        self.assertEqual(server._mode_requested, "sleep-suspend")
+
     def test_mode_forwarded_on_304(self):
         _status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
         etag = headers.get("ETag")

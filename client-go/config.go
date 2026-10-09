@@ -142,6 +142,32 @@ func wantsSuspend(args []string) bool {
 // can compare it against a server-requested mode and relaunch on change.
 var currentRunMode = ModeResident
 
+// currentModeName returns the name of the running mode, including the distinct
+// "sleep-suspend" variant, for comparison against server-requested modes.
+func currentModeName() string {
+	if currentRunMode == ModeSleep && wantsSuspend(os.Args) {
+		return "sleep-suspend"
+	}
+	return currentRunMode.String()
+}
+
+// modeFlags maps a server-requested mode name to the CLI flags that select it.
+// Returns nil for an unknown mode.
+func modeFlags(name string) []string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "resident":
+		return []string{"-resident"}
+	case "oneshot":
+		return []string{"-oneshot"}
+	case "sleep":
+		return []string{"-sleep"}
+	case "sleep-suspend":
+		return []string{"-sleep", "-suspend"}
+	default:
+		return nil
+	}
+}
+
 // String renders the mode for logging.
 func (m RunMode) String() string {
 	switch m {

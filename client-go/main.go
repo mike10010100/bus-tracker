@@ -644,14 +644,17 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	}
 
 	// The server can ask the client to relaunch in a different run mode via a
-	// header (resident/oneshot/sleep). This lets us flip modes on a device with
-	// no shell access. A mismatch only triggers one re-exec; the new process
-	// carries the mode flag, so the server can stop sending it.
-	if want := resp.Header.Get("X-Tracker-Mode"); want != "" && want != currentRunMode.String() {
-		tc.logRemote(fmt.Sprintf("Server requested run mode %q; relaunching.", want))
-		newArgs := []string{BinaryPath, "-server", server, "-view", tc.getViewMode(), "-" + want}
-		_ = sysExec(BinaryPath, newArgs, os.Environ())
-		return 0
+	// header (resident/oneshot/sleep/sleep-suspend). This lets us flip modes on a
+	// device with no shell access. We only re-exec when the requested mode
+	// differs from the one we're already running, so it settles after one hop.
+	if want := resp.Header.Get("X-Tracker-Mode"); want != "" && want != currentModeName() {
+		flags := modeFlags(want)
+		if flags != nil {
+			tc.logRemote(fmt.Sprintf("Server requested run mode %q; relaunching.", want))
+			newArgs := append([]string{BinaryPath, "-server", server, "-view", tc.getViewMode()}, flags...)
+			_ = sysExec(BinaryPath, newArgs, os.Environ())
+			return 0
+		}
 	}
 
 	// HTTP 205 signals remote stop command

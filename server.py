@@ -103,7 +103,7 @@ _diag_requested = ""
 
 # A run-mode change the server wants the client to adopt on its next poll
 # ("" = none, else "resident"/"oneshot"/"sleep"). One-shot, like the diag flag.
-VALID_RUN_MODES = ("resident", "oneshot", "sleep")
+VALID_RUN_MODES = ("resident", "oneshot", "sleep", "sleep-suspend")
 _mode_requested = ""
 
 
