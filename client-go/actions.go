@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -29,7 +30,7 @@ var deviceActions = map[string]DeviceAction{
 	"sleep-test":       {Fn: actionSleepTest},
 	"rtc-suspend":      {Fn: actionRTCSuspend, Timeout: 5 * time.Minute},
 	"input-wake-probe": {Fn: actionInputWakeProbe},
-	"touch-wake-test":  {Fn: actionTouchWakeTest, Timeout: 5 * time.Minute},
+	"touch-wake-test":  {Fn: actionTouchWakeTest, Timeout: 7 * time.Minute},
 	"touch-wake-probe": {Fn: actionTouchWakeProbe},
 }
 
@@ -227,8 +228,14 @@ func actionInputWakeProbe(ctx context.Context) string {
 func actionTouchWakeTest(ctx context.Context) string {
 	var b strings.Builder
 
+	// Snapshot the two wakeup sources that matter (touch panel + RTC) so we can
+	// compare event/wakeup counters across the suspend. Independent of timing.
+	wakeupBefore := wakeupSourceSnapshot(ctx)
+	b.WriteString("wakeup_sources before:\n" + wakeupBefore + "\n")
+
 	// Safety net: arm the RTC first so we always wake even if nothing else does.
-	b.WriteString("arm rtc safety: " + shell(ctx, "echo 0 > /sys/class/rtc/rtc0/wakealarm; echo +120 > /sys/class/rtc/rtc0/wakealarm; echo rc=$?; cat /sys/class/rtc/rtc0/wakealarm") + "\n")
+	// A long 300s window gives a distracted human plenty of time to tap.
+	b.WriteString("arm rtc safety: " + shell(ctx, "echo 0 > /sys/class/rtc/rtc0/wakealarm; echo +300 > /sys/class/rtc/rtc0/wakealarm; echo rc=$?; cat /sys/class/rtc/rtc0/wakealarm") + "\n")
 
 	// Snapshot every wakeup-capable ancestor of an input device, then enable
 	// wakeup on all of them. Snapshotting lets us restore the exact prior state
@@ -273,11 +280,16 @@ func actionTouchWakeTest(ctx context.Context) string {
 	b.WriteString("suspend: " + shell(ctx, "echo mem > /sys/power/state 2>&1; echo rc=$?") + "\n")
 	elapsed := time.Since(before)
 
-	// The decisive signal: when the RTC alarm fires it clears itself. If it is
+	// Decisive signal #1: when the RTC alarm fires it clears itself. If it is
 	// still set after resume, the RTC did NOT wake us -> something else did.
 	alarmAfter := strings.TrimSpace(shell(ctx, "cat /sys/class/rtc/rtc0/wakealarm 2>/dev/null"))
 	// Disarm the safety net so it can't fire a spurious wake after we're back.
 	runQuiet(ctx, "sh", "-c", "echo 0 > /sys/class/rtc/rtc0/wakealarm")
+
+	// Decisive signal #2: did the touch wakeup source's counters move? If a tap
+	// generated a wake event during suspend, event_count/wakeup_count rises.
+	wakeupAfter := wakeupSourceSnapshot(ctx)
+	b.WriteString("wakeup_sources after:\n" + wakeupAfter + "\n")
 
 	b.WriteString("wifi on: " + shell(ctx, "lipc-set-prop com.lab126.cmd wirelessEnable 1 2>&1; echo done") + "\n")
 
@@ -288,15 +300,53 @@ func actionTouchWakeTest(ctx context.Context) string {
 			"echo \"  $path restored to $(cat $path 2>/dev/null)\"; "+
 			"done < /tmp/wakeup_before; rm -f /tmp/wakeup_before; echo done") + "\n")
 
+	touchMoved := wakeupCountersChanged(wakeupBefore, wakeupAfter, "2-0024")
+	rtcMoved := wakeupCountersChanged(wakeupBefore, wakeupAfter, "bd70528-rtc")
+
 	verdict := "INCONCLUSIVE"
 	switch {
 	case alarmAfter != "" && alarmAfter != "0":
-		verdict = "NON-RTC WAKE (RTC alarm still armed) -- touch woke the SoC; tap-to-wake is possible"
-	case elapsed < 110*time.Second:
-		verdict = "TOUCH WOKE IT (resumed before the 120s RTC safety) -- tap-to-wake is possible"
+		verdict = "NON-RTC WAKE (RTC alarm still armed) -- touch/power woke the SoC; tap-to-wake POSSIBLE"
+	case elapsed < 280*time.Second:
+		verdict = "TOUCH WOKE IT (resumed well before the 300s RTC safety) -- tap-to-wake POSSIBLE"
 	default:
-		verdict = "RTC WOKE IT (alarm cleared at ~120s) -- touch cannot wake the SoC; only power/RTC can"
+		verdict = "RTC WOKE IT (alarm cleared at ~300s) -- touch did NOT wake the SoC"
 	}
-	b.WriteString(fmt.Sprintf("RESULT: resumed after %s; rtc alarm now %q. %s", elapsed.Round(time.Second), alarmAfter, verdict))
+	b.WriteString(fmt.Sprintf(
+		"RESULT: resumed after %s; rtc alarm now %q; touch counters moved=%v, rtc counters moved=%v. %s",
+		elapsed.Round(time.Second), alarmAfter, touchMoved, rtcMoved, verdict))
 	return b.String()
+}
+
+// wakeupSourceSnapshot returns the debugfs wakeup_sources lines for the touch
+// panel (2-0024) and RTC (bd70528-rtc), the two sources that matter here.
+func wakeupSourceSnapshot(ctx context.Context) string {
+	out := strings.TrimSpace(shell(ctx, "grep -E '^(2-0024|bd70528-rtc)' /sys/kernel/debug/wakeup_sources 2>/dev/null"))
+	if out == "" {
+		return "<unavailable>"
+	}
+	return out
+}
+
+// wakeupCountersChanged reports whether the named wakeup source's event_count or
+// wakeup_count column increased between two snapshot blobs. The columns are:
+// name active_count event_count wakeup_count expire_count ...
+func wakeupCountersChanged(before, after, name string) bool {
+	parse := func(blob, name string) (int, int) {
+		for _, line := range strings.Split(blob, "\n") {
+			f := strings.Fields(strings.TrimSpace(line))
+			if len(f) >= 4 && f[0] == name {
+				e, _ := strconv.Atoi(f[2])
+				w, _ := strconv.Atoi(f[3])
+				return e, w
+			}
+		}
+		return -1, -1
+	}
+	be, bw := parse(before, name)
+	ae, aw := parse(after, name)
+	if ae < 0 || be < 0 {
+		return false
+	}
+	return ae > be || aw > bw
 }

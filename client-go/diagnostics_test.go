@@ -427,6 +427,28 @@ func TestActionInputWakeProbe_EnumeratesDevices(t *testing.T) {
 	}
 }
 
+func TestWakeupCountersChanged(t *testing.T) {
+	before := "2-0024 0 0 0 0\nbd70528-rtc 0 4 4 0"
+	afterTouch := "2-0024 0 3 3 0\nbd70528-rtc 0 4 4 0"
+	afterRtc := "2-0024 0 0 0 0\nbd70528-rtc 0 5 5 0"
+
+	if !wakeupCountersChanged(before, afterTouch, "2-0024") {
+		t.Error("touch counters should read as moved")
+	}
+	if wakeupCountersChanged(before, afterTouch, "bd70528-rtc") {
+		t.Error("rtc counters should not read as moved")
+	}
+	if !wakeupCountersChanged(before, afterRtc, "bd70528-rtc") {
+		t.Error("rtc counters should read as moved")
+	}
+	if wakeupCountersChanged(before, "<unavailable>", "2-0024") {
+		t.Error("unavailable snapshot must not read as moved")
+	}
+	if wakeupCountersChanged(before, before, "2-0024") {
+		t.Error("identical snapshots must not read as moved")
+	}
+}
+
 func TestActionTouchWakeProbe_ReportsDeviceAndIRQ(t *testing.T) {
 	patchRuntime(t)
 	var scripts []string
