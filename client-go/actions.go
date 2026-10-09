@@ -22,12 +22,14 @@ var defaultActionTimeout = 60 * time.Second
 
 // deviceActions maps action names to their implementations.
 var deviceActions = map[string]DeviceAction{
-	"disable-ads":     {Fn: actionDisableAds},
-	"stop-framework":  {Fn: actionStopFramework},
-	"start-framework": {Fn: actionStartFramework},
-	"framework-state": {Fn: actionFrameworkState},
-	"sleep-test":      {Fn: actionSleepTest},
-	"rtc-suspend":     {Fn: actionRTCSuspend, Timeout: 5 * time.Minute},
+	"disable-ads":      {Fn: actionDisableAds},
+	"stop-framework":   {Fn: actionStopFramework},
+	"start-framework":  {Fn: actionStartFramework},
+	"framework-state":  {Fn: actionFrameworkState},
+	"sleep-test":       {Fn: actionSleepTest},
+	"rtc-suspend":      {Fn: actionRTCSuspend, Timeout: 5 * time.Minute},
+	"input-wake-probe": {Fn: actionInputWakeProbe},
+	"touch-wake-test":  {Fn: actionTouchWakeTest, Timeout: 5 * time.Minute},
 }
 
 // runAction executes a named action and returns a human-readable result.
@@ -140,5 +142,90 @@ func actionRTCSuspend(ctx context.Context) string {
 
 	b.WriteString("wifi on: " + shell(ctx, "lipc-set-prop com.lab126.cmd wirelessEnable 1 2>&1; echo done") + "\n")
 	b.WriteString(fmt.Sprintf("RESULT: suspended+resumed in %s (if ~90s, the RTC wake worked)", elapsed.Round(time.Second)))
+	return b.String()
+}
+
+// actionInputWakeProbe is read-only: it enumerates every input device, its name,
+// and whether it is (or can be) registered as a wakeup source. This tells us if
+// a screen tap could ever resume the SoC from suspend, or only the power button
+// and RTC can.
+func actionInputWakeProbe(ctx context.Context) string {
+	var b strings.Builder
+	b.WriteString("input devices:\n")
+	b.WriteString(shell(ctx, "for d in /sys/class/input/event*; do "+
+		"name=$(cat $d/device/name 2>/dev/null); "+
+		"echo \"  $(basename $d): $name\"; done") + "\n")
+
+	b.WriteString("wakeup capability (device/power/wakeup):\n")
+	b.WriteString(shell(ctx, "for d in /sys/class/input/event*; do "+
+		"name=$(cat $d/device/name 2>/dev/null); "+
+		"w=$(cat $d/device/power/wakeup 2>/dev/null || echo '<none>'); "+
+		"c=$(cat $d/device/power/control 2>/dev/null || echo '<none>'); "+
+		"echo \"  $(basename $d) [$name] wakeup=$w control=$c\"; done") + "\n")
+
+	b.WriteString("armed wakeup sources (from /sys/power/wakeup_count + wake_lock):\n")
+	b.WriteString(shell(ctx, "echo '  wake_lock:'; sed 's/^/    /' /sys/power/wake_lock 2>/dev/null; "+
+		"echo '  touch-like devices:'; "+
+		"for d in /sys/class/input/event*; do "+
+		"n=$(cat $d/device/name 2>/dev/null); "+
+		"case \"$n\" in *ouch*|*yttsp*|*orce*|*lan*|*ynaptics*) echo \"    $d: $n\";; esac; done") + "\n")
+	return strings.TrimSpace(b.String())
+}
+
+// actionTouchWakeTest is the decisive experiment: register any touch input device
+// as a wakeup source, then suspend with a short RTC alarm as a SAFETY NET so the
+// device can never stay stuck. If the device resumes before the RTC fires, a
+// touch woke it (tap-to-wake is possible). If it resumes at ~the RTC delay, only
+// the RTC woke it. Wi-Fi is disabled so the "WLAN timeout" source can't muddy the
+// result. Read-only w.r.t. persistent state except the wakeup toggle, which it
+// restores afterward.
+func actionTouchWakeTest(ctx context.Context) string {
+	var b strings.Builder
+
+	// Safety net: arm the RTC first so we always wake even if nothing else does.
+	b.WriteString("arm rtc safety: " + shell(ctx, "echo 0 > /sys/class/rtc/rtc0/wakealarm; echo +120 > /sys/class/rtc/rtc0/wakealarm; echo rc=$?; cat /sys/class/rtc/rtc0/wakealarm") + "\n")
+
+	// Find touch input device(s) and enable wakeup on them. Names vary by panel.
+	b.WriteString("enable touch wakeup: " + shell(ctx,
+		"for d in /sys/class/input/event*; do "+
+			"n=$(cat $d/device/name 2>/dev/null); "+
+			"case \"$n\" in *ouch*|*yttsp*|*orce*|*lan*|*ynaptics*) "+
+			"echo enabled > $d/device/power/wakeup 2>/dev/null; "+
+			"echo \"  $d [$n] -> wakeup=$(cat $d/device/power/wakeup 2>/dev/null)\";; esac; done; echo done") + "\n")
+
+	b.WriteString("stop framework: " + shell(ctx, "stop lab126_gui 2>&1; echo done") + "\n")
+	b.WriteString("unload screensaver: " + shell(ctx, "lipc-set-prop com.lab126.blanket unload screensaver 2>&1; echo done") + "\n")
+	b.WriteString("frontlight off: " + shell(ctx, "lipc-set-prop -i com.lab126.powerd flIntensity 0 2>&1; echo done") + "\n")
+
+	b.WriteString("wifi off: " + shell(ctx, "lipc-set-prop com.lab126.cmd wirelessEnable 0 2>&1; echo done") + "\n")
+	time.Sleep(1 * time.Second)
+
+	before := time.Now()
+	b.WriteString("suspend: " + shell(ctx, "echo mem > /sys/power/state 2>&1; echo rc=$?") + "\n")
+	elapsed := time.Since(before)
+
+	// The decisive signal: when the RTC alarm fires it clears itself. If it is
+	// still set after resume, the RTC did NOT wake us -> something else did.
+	alarmAfter := strings.TrimSpace(shell(ctx, "cat /sys/class/rtc/rtc0/wakealarm 2>/dev/null"))
+
+	b.WriteString("wifi on: " + shell(ctx, "lipc-set-prop com.lab126.cmd wirelessEnable 1 2>&1; echo done") + "\n")
+
+	// Restore the wakeup source we toggled.
+	b.WriteString("restore wakeup: " + shell(ctx,
+		"for d in /sys/class/input/event*; do "+
+			"n=$(cat $d/device/name 2>/dev/null); "+
+			"case \"$n\" in *ouch*|*yttsp*|*orce*|*lan*|*ynaptics*) "+
+			"echo disabled > $d/device/power/wakeup 2>/dev/null;; esac; done; echo done") + "\n")
+
+	verdict := "INCONCLUSIVE"
+	switch {
+	case alarmAfter != "" && alarmAfter != "0":
+		verdict = "NON-RTC WAKE (RTC alarm still armed) -- touch woke the SoC; tap-to-wake is possible"
+	case elapsed < 110*time.Second:
+		verdict = "TOUCH WOKE IT (resumed before the 120s RTC safety) -- tap-to-wake is possible"
+	default:
+		verdict = "RTC WOKE IT (alarm cleared at ~120s) -- touch cannot wake the SoC; only power/RTC can"
+	}
+	b.WriteString(fmt.Sprintf("RESULT: resumed after %s; rtc alarm now %q. %s", elapsed.Round(time.Second), alarmAfter, verdict))
 	return b.String()
 }

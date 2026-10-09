@@ -406,8 +406,52 @@ func TestActionRTCSuspend_RunsSequence(t *testing.T) {
 	}
 }
 
+func TestActionInputWakeProbe_EnumeratesDevices(t *testing.T) {
+	patchRuntime(t)
+	var scripts []string
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+		if name == "sh" && len(arg) >= 2 {
+			scripts = append(scripts, arg[1])
+		}
+		return exec.Command("echo", "event0 touchscreen")
+	}
+	out := actionInputWakeProbe(context.Background())
+	joined := strings.Join(scripts, "\n")
+	for _, want := range []string{"/sys/class/input/event*", "wakeup", "control"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("input-wake-probe missing %q\nran:\n%s", want, joined)
+		}
+	}
+	if out == "" {
+		t.Error("expected non-empty probe output")
+	}
+}
+
+func TestActionTouchWakeTest_ArmsSafetyAndTogglesWakeup(t *testing.T) {
+	patchRuntime(t)
+	var scripts []string
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+		if name == "sh" && len(arg) >= 2 {
+			scripts = append(scripts, arg[1])
+		}
+		return exec.Command("echo", "ok")
+	}
+	out := actionTouchWakeTest(context.Background())
+	joined := strings.Join(scripts, "\n")
+	// Must arm the RTC before suspending (safety net), toggle touch wakeup,
+	// suspend, and restore the wakeup toggle afterward.
+	for _, want := range []string{"wakealarm", "power/wakeup", "wirelessEnable 0", "/sys/power/state", "wirelessEnable 1"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("touch-wake-test missing %q\nran:\n%s", want, joined)
+		}
+	}
+	if !strings.Contains(out, "RESULT:") {
+		t.Errorf("expected a RESULT line, got:\n%s", out)
+	}
+}
+
 func TestDeviceActions_AreAllRegistered(t *testing.T) {
-	for _, name := range []string{"disable-ads", "stop-framework", "start-framework", "framework-state", "sleep-test", "rtc-suspend"} {
+	for _, name := range []string{"disable-ads", "stop-framework", "start-framework", "framework-state", "sleep-test", "rtc-suspend", "input-wake-probe", "touch-wake-test"} {
 		if _, ok := deviceActions[name]; !ok {
 			t.Errorf("action %q not registered", name)
 		}
