@@ -527,7 +527,7 @@ func TestArmRTCWake_WritesSysfsAlarm(t *testing.T) {
 		t.Errorf("expected sysfs.wakealarm, got %q", mech)
 	}
 	// Should clear then set the alarm.
-	if len(writes) < 2 || writes[0] != RTCWakePath+"=0" || writes[1] != RTCWakePath+"=+90" {
+	if len(writes) < 2 || writes[0] != SysfsWakePath+"=0" || writes[1] != SysfsWakePath+"=+90" {
 		t.Errorf("unexpected writes: %v", writes)
 	}
 }
@@ -560,6 +560,59 @@ func TestArmRTCWake_ClampsMinimum(t *testing.T) {
 	}
 }
 
+func TestSuspendViaPowerd_HappyPath(t *testing.T) {
+	patchRuntime(t)
+	var pressed, woke string
+	origCtx := execCommandContext
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+		if name == "lipc-wait-event" {
+			// Emulate powerd announcing it is ready to suspend.
+			return exec.Command("echo", "readyToSuspend")
+		}
+		return origCtx(ctx, name, arg...)
+	}
+	orig := execCommand
+	execCommand = func(name string, arg ...string) *exec.Cmd {
+		if name == "lipc-set-prop" && len(arg) >= 4 {
+			switch arg[2] {
+			case "powerButton":
+				pressed = arg[3]
+			case "rtcWakeup":
+				woke = arg[3]
+			}
+		}
+		return orig("true")
+	}
+	defer func() { execCommand = orig; execCommandContext = origCtx }()
+
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	if mech := tc.suspendViaPowerd(context.Background(), 600*time.Second); mech != "powerd.rtcWakeup" {
+		t.Fatalf("expected powerd.rtcWakeup, got %q", mech)
+	}
+	if pressed != "1" {
+		t.Errorf("expected powerButton=1, got %q", pressed)
+	}
+	if woke != "600" {
+		t.Errorf("expected rtcWakeup=600, got %q", woke)
+	}
+}
+
+func TestSuspendViaPowerd_NoReadyAborts(t *testing.T) {
+	patchRuntime(t)
+	origCtx := execCommandContext
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+		if name == "lipc-wait-event" {
+			return exec.Command("echo", "readyToSuspendFailed")
+		}
+		return origCtx(ctx, name, arg...)
+	}
+	defer func() { execCommandContext = origCtx }()
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	if mech := tc.suspendViaPowerd(context.Background(), 600*time.Second); mech != "" {
+		t.Errorf("expected empty on readyToSuspendFailed, got %q", mech)
+	}
+}
+
 func TestEnterSuspend_WritesMem(t *testing.T) {
 	patchRuntime(t)
 	var path, val string
@@ -568,11 +621,11 @@ func TestEnterSuspend_WritesMem(t *testing.T) {
 		return nil
 	}
 	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-	if !tc.enterSuspend() {
-		t.Fatal("expected enterSuspend to report success")
+	if ok, err := tc.enterSuspend(); !ok || err != nil {
+		t.Fatalf("expected enterSuspend success, got ok=%v err=%v", ok, err)
 	}
-	if path != PowerStatePath || val != "mem" {
-		t.Errorf("expected %s=mem, got %s=%s", PowerStatePath, path, val)
+	if path != "/sys/power/state" || val != "mem" {
+		t.Errorf("expected %s=mem, got %s=%s", "/sys/power/state", path, val)
 	}
 }
 
@@ -580,7 +633,7 @@ func TestEnterSuspend_FailureReturnsFalse(t *testing.T) {
 	patchRuntime(t)
 	osWriteFile = func(string, []byte, os.FileMode) error { return os.ErrPermission }
 	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-	if tc.enterSuspend() {
+	if ok, _ := tc.enterSuspend(); ok {
 		t.Error("expected enterSuspend to report failure")
 	}
 }

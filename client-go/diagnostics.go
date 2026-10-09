@@ -276,6 +276,17 @@ func probeRTCWake() string {
 	rcwake := runProbeCmd("rtcwake", "-d", "/dev/rtc0", "-m", "no", "-s", "120")
 	fmt.Fprintf(&b, "rtcwake -m no: %q\n", rcwake)
 
+	// Suspend support: what does /sys/power/state advertise, and is there a
+	// kernel reason the last suspend failed?
+	states := runProbeCmd("cat", "/sys/power/state")
+	fmt.Fprintf(&b, "/sys/power/state: %q\n", states)
+	dmesgTail := runProbeCmd("sh", "-c", "dmesg | tail -n 15")
+	fmt.Fprintf(&b, "dmesg (tail):\n%s\n", dmesgTail)
+	// A write of "mem" that fails silently often leaves no trace; show whether
+	// the node is writable at all.
+	writable := runProbeCmd("sh", "-c", "[ -w /sys/power/state ] && echo writable || echo not-writable")
+	fmt.Fprintf(&b, "/sys/power/state writable: %s\n", writable)
+
 	return strings.TrimSpace(b.String())
 }
 
