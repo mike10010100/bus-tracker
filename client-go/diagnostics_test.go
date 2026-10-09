@@ -348,6 +348,23 @@ func TestGatherLauncherInfo_DumpsSchedulerContents(t *testing.T) {
 	}
 }
 
+func TestProbeRTCWake_FormatsResults(t *testing.T) {
+	origCmdCtx := execCommandContext
+	t.Cleanup(func() { execCommandContext = origCmdCtx })
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+		if name == "lipc-get-prop" {
+			return exec.Command("echo", "120")
+		}
+		return exec.Command("echo", name)
+	}
+	out := probeRTCWake()
+	for _, want := range []string{"powerd.rtcWakeup:", "sysfs", "rtcwake -m no:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("probeRTCWake missing %q\n%s", want, out)
+		}
+	}
+}
+
 func TestIndent(t *testing.T) {
 	if got := indent(""); got != "  <empty>" {
 		t.Errorf("indent empty = %q", got)

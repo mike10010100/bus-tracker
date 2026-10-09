@@ -122,6 +122,7 @@ type CapabilityProbe struct {
 	Crontab    string   // crontab -l output
 	RTCDevices []string // /dev/rtc* present
 	RTCInfo    string   // listing of /sys/class/rtc/*/name etc.
+	RTCTest    string   // result of actively testing RTC wake mechanisms
 	Upstart    string   // /etc/upstart/custom-login contents
 	LipcProps  string   // relevant powerd properties
 	Launcher   string   // enumeration of candidate boot-hook locations
@@ -165,6 +166,7 @@ func RunActiveProbe() CapabilityProbe {
 		}
 		p.RTCInfo = strings.TrimSpace(b.String())
 	}
+	p.RTCTest = probeRTCWake()
 
 	// The boot persistence hook, if present and readable.
 	p.Upstart = func() string {
@@ -221,6 +223,9 @@ func (p CapabilityProbe) Format() string {
 	if p.RTCInfo != "" {
 		fmt.Fprintf(&b, "--- rtc sysfs ---\n%s\n", indent(p.RTCInfo))
 	}
+	if p.RTCTest != "" {
+		fmt.Fprintf(&b, "--- rtc wake test (active) ---\n%s\n", indent(p.RTCTest))
+	}
 	fmt.Fprintf(&b, "--- /etc/upstart/custom-login ---\n%s\n", indent(p.Upstart))
 	fmt.Fprintf(&b, "--- launcher hunt ---\n%s\n", indent(p.Launcher))
 	fmt.Fprintf(&b, "--- powerd lipc props ---\n%s\n", indent(p.LipcProps))
@@ -247,6 +252,31 @@ var launcherProbePaths = []string{
 	"/mnt/us/extensions",
 	"/mnt/us/mrpackages",
 	"/usr/share/webkit-1.0/pillow/debug_cmds.json",
+}
+
+// probeRTCWake actively tests the available RTC-wake mechanisms and clears them
+// afterward, so we learn definitively which one works on this kernel:
+//  1. powerd's rtcWakeup property (set then read back)
+//  2. /sys/class/rtc/rtc0/wakealarm (set then read back)
+//  3. rtcwake -m no -s <secs> (programs the alarm without suspending)
+func probeRTCWake() string {
+	var b strings.Builder
+
+	runProbeCmd("lipc-set-prop", "-i", "com.lab126.powerd", "rtcWakeup", "120")
+	got := runProbeCmd("lipc-get-prop", "com.lab126.powerd", "rtcWakeup")
+	fmt.Fprintf(&b, "powerd.rtcWakeup: set=120 read_back=%q\n", got)
+
+	sysfs := "/sys/class/rtc/rtc0/wakealarm"
+	clearOut := runProbeCmd("sh", "-c", "echo 0 > "+sysfs)
+	setOut := runProbeCmd("sh", "-c", "echo +120 > "+sysfs+"; echo rc=$?")
+	readBack := runProbeCmd("cat", sysfs)
+	fmt.Fprintf(&b, "sysfs %s: clear=%q write=%q read_back=%q\n", sysfs, clearOut, setOut, readBack)
+	runProbeCmd("sh", "-c", "echo 0 > "+sysfs) // clear
+
+	rcwake := runProbeCmd("rtcwake", "-d", "/dev/rtc0", "-m", "no", "-s", "120")
+	fmt.Fprintf(&b, "rtcwake -m no: %q\n", rcwake)
+
+	return strings.TrimSpace(b.String())
 }
 
 // gatherLauncherInfo lists candidate hook locations and scans the upstart dir
