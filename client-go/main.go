@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -304,54 +305,76 @@ func (tc *TrackerClient) releaseScreenSaver() {
 // screensaver, before attempting to suspend. Variable for tests.
 var suspendSettleDelay = 2 * time.Second
 
-// SysfsWakePath / PowerStatePath are the kernel interfaces for RTC wake and
-// suspend. On the PW5 the direct suspend path requires Wi-Fi to be disabled
-// first (an up interface holds a wake lock, yielding EBUSY).
-var (
-	SysfsWakePath  = "/sys/class/rtc/rtc0/wakealarm"
-	PowerStatePath = "/sys/power/state"
-)
+// suspendDeadlineMargin bounds how long past the poll interval we wait for a
+// powerd suspend/resume event before falling back to a wall-clock refresh.
+// Variable for tests.
+var suspendDeadlineMargin = 30 * time.Second
 
-// armRTCWake programs the sysfs wakealarm for `in` seconds from now. Returns the
-// mechanism used, or "" on failure.
-func (tc *TrackerClient) armRTCWake(in time.Duration) string {
+// powerdEvent is one line emitted by lipc-wait-event.
+type powerdEvent struct {
+	Raw string
+}
+
+// Has reports whether the event line names the given powerd event.
+func (e powerdEvent) Has(name string) bool {
+	return strings.Contains(e.Raw, name)
+}
+
+// startPowerdEventsFn is the injectable source of powerd events. Tests provide
+// a synthetic stream; production uses startPowerdEvents.
+var startPowerdEventsFn = func(ctx context.Context) <-chan powerdEvent {
+	return startPowerdEvents(ctx)
+}
+
+// startPowerdEvents launches a persistent lipc-wait-event reader that streams
+// powerd state transitions (readyToSuspend, wakeupFromSuspend, ...) onto a
+// channel for the lifetime of ctx.
+func startPowerdEvents(ctx context.Context) <-chan powerdEvent {
+	ch := make(chan powerdEvent, 16)
+	go func() {
+		defer close(ch)
+		cmd := execCommandContext(ctx, "lipc-wait-event", "-m",
+			"com.lab126.powerd", "readyToSuspend,wakeupFromSuspend,suspending")
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return
+		}
+		cmd.Stderr = io.Discard
+		if err := cmd.Start(); err != nil {
+			return
+		}
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			select {
+			case ch <- powerdEvent{Raw: strings.TrimSpace(scanner.Text())}:
+			case <-ctx.Done():
+				_ = cmd.Process.Kill()
+				return
+			}
+		}
+		_ = cmd.Wait()
+	}()
+	return ch
+}
+
+// armPowerdRTC asks powerd to wake the device after `in` seconds. This is only
+// honored while powerd is in the readyToSuspend window, so callers must set it
+// from the readyToSuspend handler. Returns true if the property was accepted.
+func (tc *TrackerClient) armPowerdRTC(in time.Duration) bool {
 	secs := int(in.Seconds())
-	if secs < 1 {
-		secs = 1
+	if secs < 60 {
+		secs = 60 // firmware pipeline needs a safe minimum
 	}
-	_ = osWriteFile(SysfsWakePath, []byte("0"), 0644)
-	if err := osWriteFile(SysfsWakePath, []byte("+"+strconv.Itoa(secs)), 0644); err != nil {
-		return ""
-	}
-	return "sysfs.wakealarm"
+	lipcSet("com.lab126.powerd", "rtcWakeup", strconv.Itoa(secs))
+	// powerd exposes no readable rtcWakeup outside the window; treat the set as
+	// best-effort and verify indirectly by observing wakeupFromSuspend later.
+	return true
 }
 
-// enterSuspend writes "mem" to /sys/power/state. Blocks until the device
-// resumes. On the Kindle an active Wi-Fi interface makes this return EBUSY.
-func (tc *TrackerClient) enterSuspend() (bool, error) {
-	if err := osWriteFile(PowerStatePath, []byte("mem"), 0644); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// suspendForRTC arms the RTC wakealarm and then lets the device suspend on its
-// own. We deliberately do NOT disable Wi-Fi or force /sys/power/state: doing so
-// either fails (EBUSY) or severs the control channel, stranding the device
-// offline. On the PW5, releasing preventScreenSaver is enough for powerd to
-// suspend naturally; the armed RTC alarm wakes it.
-//
-// Returns the mechanism used, or "" on failure (caller falls back to a wait).
-func (tc *TrackerClient) suspendForRTC(wait time.Duration) string {
-	arm := tc.armRTCWake(wait)
-	if arm == "" {
-		return ""
-	}
-	// Best-effort direct suspend. It usually returns EBUSY (powerd holds the
-	// wake lock) — that's fine: we've armed the alarm, and powerd will suspend
-	// naturally once idle. We do NOT touch the network.
-	_, _ = tc.enterSuspend()
-	return arm
+// triggerSuspend asks powerd to begin the screensaver -> suspend sequence now.
+// powerd rejects this while preventScreenSaver=1, so callers release that first.
+func (tc *TrackerClient) triggerSuspend() {
+	lipcSet("com.lab126.powerd", "powerButton", "1")
 }
 
 // cycleFrontlight advances brightness: Off (0) -> Cozy (8) -> Bright (18) -> Off (0)
@@ -833,12 +856,20 @@ func run(parent context.Context) {
 	tc.runPollLoop(ctx, cancel, tc.getNextPollInterval(initialPollSec))
 }
 
-// runSleepLoop is the low-power mode: render the dashboard, release the
-// screensaver, arm the RTC for the next interval, and explicitly enter
-// suspend-to-RAM. If arming or suspending fails it degrades to a wall-clock
-// wait so the loop always makes progress. `allowSuspend` gates the actual
-// suspend so it can be disabled for safe testing.
+// runSleepLoop is the low-power mode. The Kindle only suspends after a period
+// of true idle, and every poll resets that timer, so a naive timer loop never
+// sleeps. Instead we drive powerd explicitly, the way KOReader does:
+//
+//	render -> preventScreenSaver=0 -> powerButton=1 (screensaver)
+//	  -> wait readyToSuspend -> set rtcWakeup (<interval>) -> device suspends
+//	  -> wait wakeupFromSuspend -> render again
+//
+// `preventScreenSaver` is re-asserted while awake so the app isn't suspended
+// mid-render. `allowSuspend` gates the whole path for safe testing; without it
+// we simply wait out the interval on the wall clock.
 func (tc *TrackerClient) runSleepLoop(ctx context.Context, cancel context.CancelFunc, allowSuspend bool) {
+	events := startPowerdEventsFn(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -847,71 +878,74 @@ func (tc *TrackerClient) runSleepLoop(ctx context.Context, cancel context.Cancel
 		default:
 		}
 
+		// Stay awake to render.
+		lipcSet("com.lab126.powerd", "preventScreenSaver", "1")
 		serverPollSec := tc.fetchAndDrawDashboard(ctx, cancel)
-		wait := alignDelay(time.Now(), tc.getNextPollInterval(serverPollSec))
-
-		tc.releaseScreenSaver()
-		// Let powerd settle after releasing the screensaver. Variable for tests.
-		time.Sleep(suspendSettleDelay)
+		interval := tc.getNextPollInterval(serverPollSec)
 
 		if !allowSuspend {
-			// Safe mode: arm the sysfs alarm for reference but only wait on the
-			// wall clock (no actual suspend).
-			if mech := tc.armRTCWake(wait); mech != "" {
-				tc.logRemote(fmt.Sprintf("Sleep mode: armed wake in %s via %s", wait.Round(time.Second), mech))
-			}
 			tc.logRemote("Sleep mode: suspend disabled; waiting on wall clock.")
-			tc.holdForResume(ctx, wait)
-			if ctx.Err() != nil {
+			if !tc.sleepWallClock(ctx, interval) {
 				tc.cleanup()
 				return
 			}
 			continue
 		}
 
-		// Arm the RTC and let the device suspend naturally (no Wi-Fi toggle, no
-		// forced /sys/power/state). Then wait out the interval. This keeps the
-		// control channel intact while still allowing deep sleep.
-		tc.logRemote(fmt.Sprintf("Sleep mode: arming RTC for %s.", wait.Round(time.Second)))
-		if mech := tc.suspendForRTC(wait); mech != "" {
-			tc.logRemote(fmt.Sprintf("Sleep mode: RTC armed via %s; allowing suspend.", mech))
-		} else {
-			tc.logRemote("Sleep mode: could not arm RTC; wall-clock wait.")
+		// Ask powerd to suspend, then arm the wake inside the readyToSuspend
+		// window. If powerd never offers the window (e.g. something holds a wake
+		// lock), fall back to a wall-clock wait so we still refresh.
+		tc.releaseScreenSaver()
+		time.Sleep(suspendSettleDelay)
+		tc.logRemote(fmt.Sprintf("Sleep mode: requesting suspend for %s.", interval.Round(time.Second)))
+		tc.triggerSuspend()
+
+		armed := false
+		deadline := time.NewTimer(interval + suspendDeadlineMargin)
+		waiting := true
+		for waiting {
+			select {
+			case <-ctx.Done():
+				deadline.Stop()
+				tc.cleanup()
+				return
+			case ev, ok := <-events:
+				if !ok {
+					deadline.Stop()
+					events = startPowerdEventsFn(ctx)
+					waiting = false
+					tc.logRemote("Sleep mode: powerd event stream ended; reconnecting.")
+					continue
+				}
+				if ev.Has("readyToSuspend") && !armed {
+					tc.armPowerdRTC(interval)
+					armed = true
+					tc.logRemote(fmt.Sprintf("Sleep mode: armed rtcWakeup for %s during readyToSuspend.", interval.Round(time.Second)))
+				}
+				if ev.Has("wakeupFromSuspend") {
+					tc.logRemote("Sleep mode: woke up.")
+					deadline.Stop()
+					waiting = false
+				}
+			case <-deadline.C:
+				tc.logRemote("Sleep mode: no powerd suspend within the interval; wall-clock wait.")
+				waiting = false
+			}
 		}
-		tc.holdForResume(ctx, wait)
-		if ctx.Err() != nil {
-			tc.cleanup()
-			return
-		}
+
+		// Whether we suspended or timed out, we're awake now; loop to re-render.
 	}
 }
 
-// holdForResume blocks until the device resumes from suspend (detected via
-// lipc-wait-event) or `wait` elapses, whichever comes first. The timer fallback
-// guarantees we make progress even if the device never suspends or the RTC wake
-// is not delivered, so the loop cannot wedge.
-func (tc *TrackerClient) holdForResume(ctx context.Context, wait time.Duration) {
-	timer := time.NewTimer(wait)
+// sleepWallClock waits `d`, interruptible by ctx. Returns false if ctx ended.
+func (tc *TrackerClient) sleepWallClock(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
 	defer timer.Stop()
-
-	waitCtx, waitCancel := context.WithCancel(ctx)
-	defer waitCancel()
-
-	resumeCh := make(chan struct{})
-	go func() {
-		cmd := execCommandContext(waitCtx, "lipc-wait-event", "com.lab126.powerd", "resuming")
-		cmd.Stdout = io.Discard
-		cmd.Stderr = io.Discard
-		_ = cmd.Run()
-		close(resumeCh)
-	}()
-
 	select {
 	case <-ctx.Done():
-	case <-resumeCh:
-		tc.logRemote("Sleep mode: resumed from suspend.")
+		return false
 	case <-timer.C:
-		tc.logRemote("Sleep mode: interval elapsed without a suspend/resume event.")
+		return true
 	}
 }
 
