@@ -654,6 +654,57 @@ func TestReleaseScreenSaver(t *testing.T) {
 	}
 }
 
+func TestSleepModeDoesNotHoldScreensaver(t *testing.T) {
+	patchRuntime(t)
+	png := []byte{0x89, 0x50, 0x4E, 0x47}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/diag" || r.URL.Path == "/log" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("X-Kindle-Poll-Interval", "600")
+		w.WriteHeader(http.StatusOK)
+		w.Write(png)
+	}))
+	defer srv.Close()
+	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
+	osCreate = tempFileCreate(t)
+	osReadFile = func(string) ([]byte, error) { return nil, os.ErrNotExist }
+	globInputs = func(string) ([]string, error) { return nil, nil }
+	osOpen = func(string) (*os.File, error) { return nil, os.ErrNotExist }
+
+	var heldAwake bool
+	orig := execCommand
+	execCommand = func(name string, arg ...string) *exec.Cmd {
+		if name == "lipc-set-prop" && len(arg) >= 4 && arg[2] == "preventScreenSaver" && arg[3] == "1" {
+			heldAwake = true
+		}
+		return orig("true")
+	}
+	defer func() { execCommand = orig }()
+
+	origArgs := os.Args
+	os.Args = []string{"/tmp/tracker", "-sleep", "-server", srv.URL}
+	defer func() { os.Args = origArgs }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		run(ctx)
+		close(done)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("sleep run should exit on cancel")
+	}
+	if heldAwake {
+		t.Error("sleep mode must NOT set preventScreenSaver=1 (it must be allowed to suspend)")
+	}
+}
+
 func TestRunSleepLoop_RendersArmsAndResumes(t *testing.T) {
 	patchRuntime(t)
 	png := []byte{0x89, 0x50, 0x4E, 0x47}

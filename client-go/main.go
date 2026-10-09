@@ -770,10 +770,18 @@ func run(parent context.Context) {
 		return
 	}
 
-	// Ensure Kindle stays awake while the dashboard is running
+	if mode == ModeSleep {
+		// Low-power mode: do NOT hold the screensaver open (suspending is the
+		// point) and do NOT start the power listener -- it exits on
+		// goingToScreenSaver, which is exactly the suspend we want to allow.
+		tc.startInputListeners(ctx, cancel)
+		tc.runSleepLoop(ctx, cancel)
+		return
+	}
+
+	// Resident mode: hold the device awake, listen for sleep/power, and poll.
 	lipcSet("com.lab126.powerd", "preventScreenSaver", "1")
 
-	// Intercept OS termination signals
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
@@ -782,16 +790,9 @@ func run(parent context.Context) {
 		cancel()
 	}()
 
-	// Start background listeners
 	tc.startInputListeners(ctx, cancel)
 	go tc.startPowerListener(ctx, cancel)
 
-	if mode == ModeSleep {
-		tc.runSleepLoop(ctx, cancel)
-		return
-	}
-
-	// Resident mode: initial fetch, then the poll loop.
 	initialPollSec := tc.fetchAndDrawDashboard(ctx, cancel)
 	tc.runPollLoop(ctx, cancel, tc.getNextPollInterval(initialPollSec))
 }
@@ -820,30 +821,41 @@ func (tc *TrackerClient) runSleepLoop(ctx context.Context, cancel context.Cancel
 			tc.logRemote(fmt.Sprintf("Sleep mode: armed wake in %s via %s", wait.Round(time.Second), mech))
 		}
 
-		select {
-		case <-ctx.Done():
+		tc.holdForResume(ctx, wait)
+		if ctx.Err() != nil {
 			tc.cleanup()
 			return
-		case <-tc.waitForResume(ctx, wait):
 		}
 	}
 }
 
-// waitForResume blocks until the device resumes from suspend (via
-// lipc-wait-event) or `fallback` elapses, whichever is first. It ensures we
-// cannot wedge forever if the RTC wake is never delivered.
-func (tc *TrackerClient) waitForResume(ctx context.Context, fallback time.Duration) <-chan struct{} {
-	done := make(chan struct{})
+// holdForResume blocks until the device resumes from suspend (detected via
+// lipc-wait-event) or `wait` elapses, whichever comes first. The timer fallback
+// guarantees we make progress even if the device never suspends or the RTC wake
+// is not delivered, so the loop cannot wedge.
+func (tc *TrackerClient) holdForResume(ctx context.Context, wait time.Duration) {
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	waitCtx, waitCancel := context.WithCancel(ctx)
+	defer waitCancel()
+
+	resumeCh := make(chan struct{})
 	go func() {
-		defer close(done)
-		waitCtx, waitCancel := context.WithTimeout(ctx, fallback+30*time.Second)
-		defer waitCancel()
-		cmd := execCommandContext(waitCtx, "lipc-wait-event", "-m", "com.lab126.powerd", "resuming")
+		cmd := execCommandContext(waitCtx, "lipc-wait-event", "com.lab126.powerd", "resuming")
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard
 		_ = cmd.Run()
+		close(resumeCh)
 	}()
-	return done
+
+	select {
+	case <-ctx.Done():
+	case <-resumeCh:
+		tc.logRemote("Sleep mode: resumed from suspend.")
+	case <-timer.C:
+		tc.logRemote("Sleep mode: interval elapsed without a suspend/resume event.")
+	}
 }
 
 // runPollLoop drives the fetch/OTA cycle until ctx is cancelled. `interval` is
