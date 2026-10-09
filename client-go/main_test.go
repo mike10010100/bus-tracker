@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -300,6 +301,75 @@ func TestFetchAndDrawDashboard_StoresETag(t *testing.T) {
 	}
 }
 
+func TestFetchAndDrawDashboard_AppliesLightingHeaders(t *testing.T) {
+	patchRuntime(t)
+	png := []byte{0x89, 0x50, 0x4E, 0x47}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Kindle-Poll-Interval", "600")
+		w.Header().Set("X-Kindle-Brightness", "8")
+		w.Header().Set("X-Kindle-Warmth", "12")
+		w.WriteHeader(http.StatusOK)
+		w.Write(png)
+	}))
+	defer srv.Close()
+	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
+	osCreate = tempFileCreate(t)
+
+	var setProps []string
+	orig := execCommand
+	execCommand = func(name string, arg ...string) *exec.Cmd {
+		if name == "lipc-get-prop" {
+			// Report a different current value so the set branches run.
+			return orig("echo", "0")
+		}
+		if name == "lipc-set-prop" && len(arg) >= 4 {
+			setProps = append(setProps, arg[2])
+		}
+		return orig("true")
+	}
+	defer func() { execCommand = orig }()
+
+	tc := NewTrackerClient(srv.URL, "auto")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tc.fetchAndDrawDashboard(ctx, cancel)
+
+	joined := strings.Join(setProps, ",")
+	if !strings.Contains(joined, "flIntensity") || !strings.Contains(joined, "schedAmberLevel") {
+		t.Errorf("expected lighting props to be set, got %v", setProps)
+	}
+}
+
+func TestFetchAndDrawDashboard_RunsRequestedAction(t *testing.T) {
+	patchRuntime(t)
+	png := []byte{0x89, 0x50, 0x4E, 0x47}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Tracker-Action", "framework-state")
+		w.Header().Set("X-Kindle-Poll-Interval", "600")
+		w.WriteHeader(http.StatusOK)
+		w.Write(png)
+	}))
+	defer srv.Close()
+	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
+	osCreate = tempFileCreate(t)
+
+	var ranAction bool
+	origCtxCmd := execCommandContext
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+		ranAction = true
+		return origCtxCmd(ctx, "echo", "state")
+	}
+	defer func() { execCommandContext = origCtxCmd }()
+
+	tc := NewTrackerClient(srv.URL, "auto")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tc.fetchAndDrawDashboard(ctx, cancel)
+	if !ranAction {
+		t.Error("expected the requested device action to run")
+	}
+}
+
 func TestFetchAndDrawDashboard_Stop205Cancels(t *testing.T) {
 	patchRuntime(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -515,133 +585,64 @@ func TestLogRemoteQueueDoesNotBlockAndDropsWhenFull(t *testing.T) {
 	}
 }
 
-func TestArmPowerdRTC_SetsPropertyAndClampsMinimum(t *testing.T) {
+func TestArmSysfsWake_ClearThenSet(t *testing.T) {
 	patchRuntime(t)
-	var key, val string
+	var writes []string
+	osWriteFile = func(path string, data []byte, perm os.FileMode) error {
+		writes = append(writes, path+"="+string(data))
+		return nil
+	}
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	if !tc.armSysfsWake(600 * time.Second) {
+		t.Fatal("expected armSysfsWake to succeed")
+	}
+	if len(writes) < 2 || writes[0] != sysfsWakeAlarmPath+"=0" || writes[1] != sysfsWakeAlarmPath+"=+600" {
+		t.Errorf("unexpected writes: %v", writes)
+	}
+}
+
+func TestArmSysfsWake_WriteFailure(t *testing.T) {
+	patchRuntime(t)
+	osWriteFile = func(path string, data []byte, perm os.FileMode) error {
+		if string(data) == "0" {
+			return nil
+		}
+		return os.ErrPermission
+	}
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	if tc.armSysfsWake(600 * time.Second) {
+		t.Error("expected armSysfsWake to fail when the alarm write fails")
+	}
+}
+
+func TestSetWireless_TogglesValue(t *testing.T) {
+	patchRuntime(t)
+	var last string
 	orig := execCommand
 	execCommand = func(name string, arg ...string) *exec.Cmd {
-		if name == "lipc-set-prop" && len(arg) >= 4 {
-			key, val = arg[2], arg[3]
+		if name == "lipc-set-prop" && len(arg) >= 4 && arg[2] == "wirelessEnable" {
+			last = arg[3]
 		}
 		return orig("true")
 	}
 	defer func() { execCommand = orig }()
-
 	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-	if !tc.armPowerdRTC(600 * time.Second) {
-		t.Fatal("expected armPowerdRTC to report ok")
+	tc.setWireless(false)
+	if last != "0" {
+		t.Errorf("expected wirelessEnable=0, got %q", last)
 	}
-	if key != "rtcWakeup" || val != "600" {
-		t.Errorf("expected rtcWakeup=600, got %s=%s", key, val)
-	}
-	// Below the 60s pipeline minimum, clamp up.
-	tc.armPowerdRTC(5 * time.Second)
-	if val != "60" {
-		t.Errorf("expected clamped rtcWakeup=60, got %q", val)
+	tc.setWireless(true)
+	if last != "1" {
+		t.Errorf("expected wirelessEnable=1, got %q", last)
 	}
 }
 
-func TestTriggerSuspend_PressesPowerButton(t *testing.T) {
+func TestEnterSuspend_ReportsElapsed(t *testing.T) {
 	patchRuntime(t)
-	var key, val string
-	orig := execCommand
-	execCommand = func(name string, arg ...string) *exec.Cmd {
-		if name == "lipc-set-prop" && len(arg) >= 4 {
-			key, val = arg[2], arg[3]
-		}
-		return orig("true")
-	}
-	defer func() { execCommand = orig }()
+	osWriteFile = func(path string, data []byte, perm os.FileMode) error { return nil }
 	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-	tc.triggerSuspend()
-	if key != "powerButton" || val != "1" {
-		t.Errorf("expected powerButton=1, got %s=%s", key, val)
-	}
-}
-
-func TestStartPowerdEvents_StreamsLines(t *testing.T) {
-	patchRuntime(t)
-	origCtx := execCommandContext
-	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
-		// Emit one event then exit.
-		return exec.Command("sh", "-c", "echo 'readyToSuspend 3'")
-	}
-	defer func() { execCommandContext = origCtx }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ch := startPowerdEvents(ctx)
-	select {
-	case ev, ok := <-ch:
-		if !ok {
-			t.Fatal("channel closed before an event")
-		}
-		if !ev.Has("readyToSuspend") {
-			t.Errorf("unexpected event %q", ev.Raw)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("no event received")
-	}
-}
-
-func TestRunSleepLoop_DeadlineTimeoutFallsBack(t *testing.T) {
-	patchRuntime(t)
-	png := []byte{0x89, 0x50, 0x4E, 0x47}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/diag" || r.URL.Path == "/log" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		w.Header().Set("X-Kindle-Poll-Interval", "1") // tiny interval -> deadline fires fast
-		w.WriteHeader(http.StatusOK)
-		w.Write(png)
-	}))
-	defer srv.Close()
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
-	osCreate = tempFileCreate(t)
-	osReadFile = func(string) ([]byte, error) { return nil, os.ErrNotExist }
-
-	// Event stream that never emits -> the deadline path is taken.
-	origEvents := startPowerdEventsFn
-	startPowerdEventsFn = func(ctx context.Context) <-chan powerdEvent {
-		return make(chan powerdEvent) // no events
-	}
-	defer func() { startPowerdEventsFn = origEvents }()
-
-	orig := execCommand
-	execCommand = func(name string, arg ...string) *exec.Cmd { return orig("true") }
-	defer func() { execCommand = orig }()
-	origSettle := suspendSettleDelay
-	suspendSettleDelay = 0
-	origMargin := suspendDeadlineMargin
-	suspendDeadlineMargin = 50 * time.Millisecond // force the deadline path fast
-	defer func() {
-		suspendSettleDelay = origSettle
-		suspendDeadlineMargin = origMargin
-	}()
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		tc.runSleepLoop(ctx, cancel, true)
-		close(done)
-	}()
-	time.Sleep(300 * time.Millisecond)
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("runSleepLoop did not exit on cancel")
-	}
-}
-
-func TestPowerdEventHas(t *testing.T) {
-	if !(powerdEvent{Raw: "readyToSuspend 3"}).Has("readyToSuspend") {
-		t.Error("expected Has to match substring")
-	}
-	if (powerdEvent{Raw: "wakeupFromSuspend 0"}).Has("readyToSuspend") {
-		t.Error("expected no false match")
+	if _, err := tc.enterSuspend(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -742,9 +743,8 @@ func TestSleepModeHoldsScreensaverWhileRendering(t *testing.T) {
 	osReadFile = func(string) ([]byte, error) { return nil, os.ErrNotExist }
 	globInputs = func(string) ([]string, error) { return nil, nil }
 	osOpen = func(string) (*os.File, error) { return nil, os.ErrNotExist }
+	checkNetworkFn = func(context.Context) bool { return true }
 
-	// Sleep mode must hold preventScreenSaver=1 while actively rendering so it
-	// can't be suspended mid-draw.
 	var heldAwake bool
 	orig := execCommand
 	execCommand = func(name string, arg ...string) *exec.Cmd {
@@ -754,9 +754,6 @@ func TestSleepModeHoldsScreensaverWhileRendering(t *testing.T) {
 		return orig("true")
 	}
 	defer func() { execCommand = orig }()
-	origSettle := suspendSettleDelay
-	suspendSettleDelay = 0
-	defer func() { suspendSettleDelay = origSettle }()
 
 	origArgs := os.Args
 	os.Args = []string{"/tmp/tracker", "-sleep", "-server", srv.URL}
@@ -799,24 +796,19 @@ func TestRunSleepLoop_WallClockKeepsRefreshing(t *testing.T) {
 	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
 	osCreate = tempFileCreate(t)
 	osReadFile = func(string) ([]byte, error) { return nil, os.ErrNotExist }
+	checkNetworkFn = func(context.Context) bool { return true }
 
 	orig := execCommand
 	execCommand = func(name string, arg ...string) *exec.Cmd { return orig("true") }
 	defer func() { execCommand = orig }()
 
-	origSettle := suspendSettleDelay
-	suspendSettleDelay = 0
-	defer func() { suspendSettleDelay = origSettle }()
-
 	tc := NewTrackerClient(srv.URL, "auto")
 	ctx, cancel := context.WithCancel(context.Background())
-
 	done := make(chan struct{})
 	go func() {
 		tc.runSleepLoop(ctx, cancel, false) // safe mode: wall-clock only
 		close(done)
 	}()
-
 	deadline := time.Now().Add(3 * time.Second)
 	for atomic.LoadInt32(&fetches) < 2 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
@@ -832,7 +824,7 @@ func TestRunSleepLoop_WallClockKeepsRefreshing(t *testing.T) {
 	}
 }
 
-func TestRunSleepLoop_SuspendPathArmsAndWakes(t *testing.T) {
+func TestRunSleepLoop_SuspendArmsWifiAndSleeps(t *testing.T) {
 	patchRuntime(t)
 	png := []byte{0x89, 0x50, 0x4E, 0x47}
 	var fetches int32
@@ -842,7 +834,7 @@ func TestRunSleepLoop_SuspendPathArmsAndWakes(t *testing.T) {
 			return
 		}
 		atomic.AddInt32(&fetches, 1)
-		w.Header().Set("X-Kindle-Poll-Interval", "600")
+		w.Header().Set("X-Kindle-Poll-Interval", "600") // >= minSuspendInterval
 		w.WriteHeader(http.StatusOK)
 		w.Write(png)
 	}))
@@ -850,40 +842,28 @@ func TestRunSleepLoop_SuspendPathArmsAndWakes(t *testing.T) {
 	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
 	osCreate = tempFileCreate(t)
 	osReadFile = func(string) ([]byte, error) { return nil, os.ErrNotExist }
+	checkNetworkFn = func(context.Context) bool { return true }
 
-	// Synthetic powerd stream: on each cycle emit readyToSuspend then
-	// wakeupFromSuspend, so the suspend branch completes quickly.
-	origEvents := startPowerdEventsFn
-	startPowerdEventsFn = func(ctx context.Context) <-chan powerdEvent {
-		ch := make(chan powerdEvent, 4)
-		go func() {
-			defer close(ch)
-			for i := 0; i < 4; i++ {
-				select {
-				case ch <- powerdEvent{Raw: "readyToSuspend 3"}:
-				case <-ctx.Done():
-					return
-				}
-				select {
-				case ch <- powerdEvent{Raw: "wakeupFromSuspend 0"}:
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-		return ch
+	var wifi []string
+	var wifiMu sync.Mutex
+	var suspendWritten int32
+	osWriteFile = func(path string, data []byte, perm os.FileMode) error {
+		if path == powerStatePath && string(data) == "mem" {
+			atomic.StoreInt32(&suspendWritten, 1)
+		}
+		return nil
 	}
-	defer func() { startPowerdEventsFn = origEvents }()
-
-	var suspends []string
 	orig := execCommand
 	execCommand = func(name string, arg ...string) *exec.Cmd {
-		if name == "lipc-set-prop" && len(arg) >= 4 && arg[2] == "rtcWakeup" {
-			suspends = append(suspends, arg[3])
+		if name == "lipc-set-prop" && len(arg) >= 4 && arg[2] == "wirelessEnable" {
+			wifiMu.Lock()
+			wifi = append(wifi, arg[3])
+			wifiMu.Unlock()
 		}
 		return orig("true")
 	}
 	defer func() { execCommand = orig }()
+
 	origSettle := suspendSettleDelay
 	suspendSettleDelay = 0
 	defer func() { suspendSettleDelay = origSettle }()
@@ -892,12 +872,12 @@ func TestRunSleepLoop_SuspendPathArmsAndWakes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		tc.runSleepLoop(ctx, cancel, true) // suspend enabled
+		tc.runSleepLoop(ctx, cancel, true)
 		close(done)
 	}()
-
+	// Wait for the first suspend, then stop.
 	deadline := time.Now().Add(3 * time.Second)
-	for atomic.LoadInt32(&fetches) < 2 && time.Now().Before(deadline) {
+	for atomic.LoadInt32(&suspendWritten) == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
@@ -906,15 +886,50 @@ func TestRunSleepLoop_SuspendPathArmsAndWakes(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("runSleepLoop did not exit on cancel")
 	}
-	if atomic.LoadInt32(&fetches) < 2 {
-		t.Errorf("expected at least 2 fetch cycles, got %d", atomic.LoadInt32(&fetches))
+	if atomic.LoadInt32(&suspendWritten) == 0 {
+		t.Error("expected /sys/power/state to be written with 'mem'")
 	}
-	if len(suspends) == 0 {
-		t.Error("expected rtcWakeup to be armed during readyToSuspend")
+	// Wi-Fi should have been disabled for the suspend and re-enabled after.
+	wifiMu.Lock()
+	sawOff, sawOn := false, false
+	for _, v := range wifi {
+		if v == "0" {
+			sawOff = true
+		}
+		if v == "1" {
+			sawOn = true
+		}
+	}
+	wifiMu.Unlock()
+	if !sawOff || !sawOn {
+		t.Errorf("expected wifi off then on (off=%v on=%v) got %v", sawOff, sawOn, wifi)
 	}
 }
 
-func TestRunSleepLoop_EventStreamEndsReconnects(t *testing.T) {
+func TestWaitForNetwork_SucceedsImmediately(t *testing.T) {
+	patchRuntime(t)
+	checkNetworkFn = func(context.Context) bool { return true }
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	if !tc.waitForNetwork(context.Background()) {
+		t.Error("expected waitForNetwork to report true when the network is up")
+	}
+}
+
+func TestArmSysfsWake_ClampsMinimum(t *testing.T) {
+	patchRuntime(t)
+	var last string
+	osWriteFile = func(path string, data []byte, perm os.FileMode) error {
+		last = string(data)
+		return nil
+	}
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	tc.armSysfsWake(0)
+	if last != "+1" {
+		t.Errorf("expected clamped +1, got %q", last)
+	}
+}
+
+func TestRunSleepLoop_ArmFailureFallsBackToWallClock(t *testing.T) {
 	patchRuntime(t)
 	png := []byte{0x89, 0x50, 0x4E, 0x47}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -930,30 +945,13 @@ func TestRunSleepLoop_EventStreamEndsReconnects(t *testing.T) {
 	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
 	osCreate = tempFileCreate(t)
 	osReadFile = func(string) ([]byte, error) { return nil, os.ErrNotExist }
-
-	// First stream closes immediately (forcing a reconnect), then delivers a
-	// wake event.
-	var calls int32
-	origEvents := startPowerdEventsFn
-	startPowerdEventsFn = func(ctx context.Context) <-chan powerdEvent {
-		n := atomic.AddInt32(&calls, 1)
-		ch := make(chan powerdEvent, 2)
-		if n == 1 {
-			close(ch)
-			return ch
-		}
-		ch <- powerdEvent{Raw: "wakeupFromSuspend 0"}
-		close(ch)
-		return ch
-	}
-	defer func() { startPowerdEventsFn = origEvents }()
+	checkNetworkFn = func(context.Context) bool { return true }
+	// Make the RTC alarm write always fail.
+	osWriteFile = func(path string, data []byte, perm os.FileMode) error { return os.ErrPermission }
 
 	orig := execCommand
 	execCommand = func(name string, arg ...string) *exec.Cmd { return orig("true") }
 	defer func() { execCommand = orig }()
-	origSettle := suspendSettleDelay
-	suspendSettleDelay = 0
-	defer func() { suspendSettleDelay = origSettle }()
 
 	tc := NewTrackerClient(srv.URL, "auto")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -969,8 +967,21 @@ func TestRunSleepLoop_EventStreamEndsReconnects(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("runSleepLoop did not exit on cancel")
 	}
-	if atomic.LoadInt32(&calls) < 2 {
-		t.Errorf("expected event stream to be restarted after it ended, got %d starts", atomic.LoadInt32(&calls))
+}
+
+func TestWaitForNetwork_TimesOut(t *testing.T) {
+	patchRuntime(t)
+	checkNetworkFn = func(context.Context) bool { return false }
+	origSettle := suspendSettleDelay
+	suspendSettleDelay = 0
+	defer func() { suspendSettleDelay = origSettle }()
+	// Short-circuit: with checkNetworkFn always false and a canceled context, it
+	// returns promptly. Use a context that is already canceled.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	if tc.waitForNetwork(ctx) {
+		t.Error("expected waitForNetwork to report false on canceled context")
 	}
 }
 
