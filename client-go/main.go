@@ -304,55 +304,26 @@ func (tc *TrackerClient) releaseScreenSaver() {
 // screensaver, before attempting to suspend. Variable for tests.
 var suspendSettleDelay = 2 * time.Second
 
-// SysfsWakePath is the kernel RTC wakealarm node. On the PW5 this write
-// succeeds but powerd overrides it during its own suspend sequence, so it is
-// only a fallback for devices without powerd.
-var SysfsWakePath = "/sys/class/rtc/rtc0/wakealarm"
+// SysfsWakePath / PowerStatePath are the kernel interfaces for RTC wake and
+// suspend. On the PW5 the direct suspend path requires Wi-Fi to be disabled
+// first (an up interface holds a wake lock, yielding EBUSY).
+var (
+	SysfsWakePath  = "/sys/class/rtc/rtc0/wakealarm"
+	PowerStatePath = "/sys/power/state"
+)
 
-// suspendViaPowerd performs the Kindle-correct suspend sequence (as used by
-// KOReader): trigger the power button to start the screensaver, wait for
-// powerd's brief readyToSuspend window, set rtcWakeup (relative seconds), and
-// let powerd release wake locks and suspend the kernel. It blocks until the
-// device resumes. Returns the mechanism used, or "" if powerd did not cooperate.
-func (tc *TrackerClient) suspendViaPowerd(ctx context.Context, wait time.Duration) string {
-	secs := int(wait.Seconds())
-	if secs < 1 {
-		secs = 1
+// wirelessDisable/Enable toggle the Wi-Fi radio. Disabling it is required
+// before a direct suspend on the MT8113 (active net interfaces hold wake locks).
+func (tc *TrackerClient) wireless(on bool) {
+	val := "0"
+	if on {
+		val = "1"
 	}
-
-	// Start the event watcher before triggering the button so we don't miss the
-	// brief readyToSuspend window. We watch for readyToSuspend first.
-	readyCh := make(chan string, 1)
-	readyCtx, readyCancel := context.WithCancel(ctx)
-	defer readyCancel()
-	go func() {
-		cmd := execCommandContext(readyCtx, "lipc-wait-event", "-s", "20",
-			"com.lab126.powerd", "readyToSuspend,readyToSuspendFailed")
-		out, _ := cmd.Output()
-		readyCh <- strings.TrimSpace(string(out))
-	}()
-
-	// Trigger the screensaver / power transition.
-	lipcSet("com.lab126.powerd", "powerButton", "1")
-
-	select {
-	case <-ctx.Done():
-		return ""
-	case ev := <-readyCh:
-		if strings.Contains(ev, "readyToSuspendFailed") || !strings.Contains(ev, "readyToSuspend") {
-			return ""
-		}
-	}
-
-	// In this window rtcWakeup is valid; it takes relative seconds. powerd then
-	// releases wake locks and suspends; block until it resumes from suspend or
-	// the planned interval elapses (whichever the device reports first).
-	lipcSet("com.lab126.powerd", "rtcWakeup", strconv.Itoa(secs))
-	return "powerd.rtcWakeup"
+	lipcSet("com.lab126.cmd", "wirelessEnable", val)
 }
 
-// armRTCWake programs the sysfs wakealarm as a fallback for devices without a
-// cooperating powerd. Returns the mechanism used, or "" on failure.
+// armRTCWake programs the sysfs wakealarm for `in` seconds from now. Returns the
+// mechanism used, or "" on failure.
 func (tc *TrackerClient) armRTCWake(in time.Duration) string {
 	secs := int(in.Seconds())
 	if secs < 1 {
@@ -365,13 +336,34 @@ func (tc *TrackerClient) armRTCWake(in time.Duration) string {
 	return "sysfs.wakealarm"
 }
 
-// enterSuspend writes "mem" to /sys/power/state. On the Kindle this typically
-// fails with EBUSY because powerd holds wake locks; use suspendViaPowerd there.
+// enterSuspend writes "mem" to /sys/power/state. Blocks until the device
+// resumes. On the Kindle an active Wi-Fi interface makes this return EBUSY.
 func (tc *TrackerClient) enterSuspend() (bool, error) {
-	if err := osWriteFile("/sys/power/state", []byte("mem"), 0644); err != nil {
+	if err := osWriteFile(PowerStatePath, []byte("mem"), 0644); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// suspendForRTC performs the full low-power suspend cycle: disable Wi-Fi (to
+// release the interface wake lock), arm the RTC wakealarm, suspend to RAM, and
+// re-enable Wi-Fi on resume. Returns the mechanism used, or "" on failure (in
+// which case the caller should fall back to a wall-clock wait).
+func (tc *TrackerClient) suspendForRTC(wait time.Duration) string {
+	arm := tc.armRTCWake(wait)
+	if arm == "" {
+		return ""
+	}
+	tc.wireless(false)
+	// Give the wireless driver a moment to quiesce before suspending.
+	time.Sleep(2 * time.Second)
+	ok, err := tc.enterSuspend()
+	tc.wireless(true)
+	if !ok {
+		_ = err
+		return ""
+	}
+	return arm
 }
 
 // cycleFrontlight advances brightness: Off (0) -> Cozy (8) -> Bright (18) -> Off (0)
@@ -881,25 +873,15 @@ func (tc *TrackerClient) runSleepLoop(ctx context.Context, cancel context.Cancel
 			continue
 		}
 
-		// Preferred: the powerd sequence (trigger power, wait for readyToSuspend,
-		// set rtcWakeup, let powerd suspend). This is what actually works on the
-		// PW5; the sysfs path is a fallback for non-powerd devices.
-		tc.logRemote(fmt.Sprintf("Sleep mode: requesting powerd suspend for %s.", wait.Round(time.Second)))
-		if mech := tc.suspendViaPowerd(ctx, wait); mech != "" {
-			tc.logRemote(fmt.Sprintf("Sleep mode: suspended/resumed via %s.", mech))
-			continue
-		}
-
-		tc.logRemote("Sleep mode: powerd suspend unavailable; trying sysfs fallback.")
-		if arm := tc.armRTCWake(wait); arm != "" {
-			if ok, err := tc.enterSuspend(); ok {
-				tc.logRemote("Sleep mode: resumed from sysfs suspend.")
-			} else {
-				tc.logRemote(fmt.Sprintf("Sleep mode: sysfs suspend failed (%v); wall-clock wait.", err))
-				tc.holdForResume(ctx, wait)
-			}
+		// Direct sysfs suspend: disable Wi-Fi (releases the wake lock), arm the
+		// RTC, suspend, then re-enable Wi-Fi on resume. This is the low-latency
+		// path that works for frequent cycles (powerd's readyToSuspend, by
+		// contrast, waits on a ~60s timer).
+		tc.logRemote(fmt.Sprintf("Sleep mode: suspending for %s (sysfs+rtc).", wait.Round(time.Second)))
+		if mech := tc.suspendForRTC(wait); mech != "" {
+			tc.logRemote(fmt.Sprintf("Sleep mode: resumed via %s.", mech))
 		} else {
-			tc.logRemote("Sleep mode: could not arm RTC; wall-clock wait.")
+			tc.logRemote("Sleep mode: suspend unavailable; wall-clock wait.")
 			tc.holdForResume(ctx, wait)
 		}
 		if ctx.Err() != nil {
