@@ -287,6 +287,26 @@ func probeRTCWake() string {
 	writable := runProbeCmd("sh", "-c", "[ -w /sys/power/state ] && echo writable || echo not-writable")
 	fmt.Fprintf(&b, "/sys/power/state writable: %s\n", writable)
 
+	// What is holding the device awake? The active wakelocks are the usual
+	// reason a suspend attempt returns EBUSY.
+	activeLocks := runProbeCmd("sh", "-c", "cat /sys/power/wake_lock 2>/dev/null; cat /sys/power/active_wakeup_sources 2>/dev/null")
+	fmt.Fprintf(&b, "--- wake locks held ---\n%s\n", activeLocks)
+	lockStats := runProbeCmd("sh", "-c", "cat /sys/power/wakeup_count 2>/dev/null; ls -la /sys/power/ 2>/dev/null")
+	fmt.Fprintf(&b, "--- /sys/power ---\n%s\n", lockStats)
+
+	// Which framework daemons are running? Stopping lab126_gui is the standard
+	// dashboard approach (powerd still suspends; eips still draws).
+	procs := runProbeCmd("sh", "-c", "ps -eo pid,user,comm 2>/dev/null | grep -iE 'lab126|powerd|blanket|framework|appmgrd|cvm' ")
+	fmt.Fprintf(&b, "--- framework daemons ---\n%s\n", procs)
+
+	// Special Offers / ad config (ads draw the 'swipe to unlock' screensaver).
+	adState := runProbeCmd("sh", "-c", "grep -i 'adunit.viewable' /var/local/appreg.db 2>/dev/null | head -3; ls -la /var/local/adunits 2>/dev/null; ls -la /mnt/us/.assets 2>/dev/null")
+	fmt.Fprintf(&b, "--- special offers / ads ---\n%s\n", adState)
+
+	// Blanket renderers that draw the screensaver over our framebuffer.
+	blanket := runProbeCmd("sh", "-c", "ls /usr/share/blanket/screensaver 2>/dev/null; ls /usr/share/blanket/ad_screensaver 2>/dev/null")
+	fmt.Fprintf(&b, "--- blanket screensaver assets ---\n%s\n", blanket)
+
 	return strings.TrimSpace(b.String())
 }
 
