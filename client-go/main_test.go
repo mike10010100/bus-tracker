@@ -543,7 +543,7 @@ func TestConfigureGestureHandlers_WiresViewAndRefresh(t *testing.T) {
 
 	tc.configureGestureHandlers(gd, cancel)
 
-	if gd.OnBusesTap == nil || gd.OnBikesTap == nil || gd.OnExitTap == nil ||
+	if gd.OnBusesTap == nil || gd.OnBikesTap == nil ||
 		gd.OnLightTap == nil || gd.OnRefreshTap == nil || gd.OnSingleTap == nil ||
 		gd.OnDoubleTap == nil || gd.OnTopLeftTap == nil || gd.OnTopRightTap == nil ||
 		gd.OnBottomLeftTap == nil {
@@ -1196,20 +1196,6 @@ func buildEventBytes(evType, evCode uint16, evValue int32) []byte {
 	binary.LittleEndian.PutUint16(b[10:12], evCode)
 	binary.LittleEndian.PutUint32(b[12:16], uint32(evValue))
 	return b
-}
-
-func TestConfigureGestureHandlers_ExitCancels(t *testing.T) {
-	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-	gd := NewGestureDetector(DefaultGestureConfig())
-	ctx, cancel := context.WithCancel(context.Background())
-	tc.configureGestureHandlers(gd, cancel)
-
-	gd.OnExitTap(0, 0)
-	select {
-	case <-ctx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("EXIT tap should cancel the context")
-	}
 }
 
 func TestRunEventLoop_PowerKeyCancels(t *testing.T) {

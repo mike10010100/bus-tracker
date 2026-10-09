@@ -32,9 +32,10 @@ services:
       - OFFPEAK_INTERVAL=${OFFPEAK_INTERVAL:-600}
       # Testing aid: force the fast poll interval at all hours.
       - FORCE_FAST_POLL=${FORCE_FAST_POLL:-}
-      # Run mode the client should adopt and stick to (e.g. sleep-suspend for a
-      # dedicated dashboard). Empty = don't care.
-      - TRACKER_DEFAULT_MODE=${TRACKER_DEFAULT_MODE:-}
+      # Run mode the client should adopt and stick to. Defaults to sleep-suspend
+      # so a dedicated dashboard survives OTA restarts (the client comes back up
+      # as resident and the sticky desired-mode re-asserts sleep-suspend).
+      - TRACKER_DEFAULT_MODE=${TRACKER_DEFAULT_MODE:-sleep-suspend}
     env_file:
       - path: .env
         required: false

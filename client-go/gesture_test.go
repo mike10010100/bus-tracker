@@ -312,9 +312,9 @@ func TestGestureDetectorLightAndRefreshZones(t *testing.T) {
 	gd.OnLightTap = func(x, y int32) { light++ }
 	gd.OnRefreshTap = func(x, y int32) { refresh++ }
 
-	gd.curX, gd.curY = 400, 580 // light zone 318..472
+	gd.curX, gd.curY = 490, 580 // light zone 394..586
 	gd.TriggerTap(time.Now())
-	gd.curX, gd.curY = 550, 580 // refresh zone 472..626
+	gd.curX, gd.curY = 650, 580 // refresh zone (>= 586)
 	gd.TriggerTap(time.Now().Add(20 * time.Millisecond))
 
 	if light != 1 || refresh != 1 {
@@ -331,7 +331,7 @@ func TestGestureDetectorNoopZonesWithoutCallbacks(t *testing.T) {
 	// No callbacks registered: these paths must simply return without panic.
 	gd.curX, gd.curY = 400, 580 // light zone, nil OnLightTap
 	gd.TriggerTap(time.Now())
-	gd.curX, gd.curY = 700, 580 // exit zone, nil OnExitTap
+	gd.curX, gd.curY = 700, 580 // refresh zone, nil OnRefreshTap
 	gd.TriggerTap(time.Now().Add(20 * time.Millisecond))
 	gd.curX, gd.curY = 700, 50 // top-right, nil callback
 	gd.TriggerTap(time.Now().Add(40 * time.Millisecond))
@@ -353,7 +353,6 @@ func TestGestureDetectorButtonTaps(t *testing.T) {
 		bikesTaps   int
 		lightTaps   int
 		refreshTaps int
-		exitTaps    int
 		mu          sync.Mutex
 	)
 
@@ -377,11 +376,6 @@ func TestGestureDetectorButtonTaps(t *testing.T) {
 		refreshTaps++
 		mu.Unlock()
 	}
-	gd.OnExitTap = func(x, y int32) {
-		mu.Lock()
-		exitTaps++
-		mu.Unlock()
-	}
 
 	t0 := time.Now()
 
@@ -390,29 +384,23 @@ func TestGestureDetectorButtonTaps(t *testing.T) {
 	gd.curY = 580
 	gd.TriggerTap(t0)
 
-	// 2. Bikes button (164 <= x < 318, y >= 556)
-	gd.curX = 250
+	// 2. Bikes button (202 <= x < 394, y >= 556)
+	gd.curX = 300
 	gd.curY = 580
 	t1 := t0.Add(20 * time.Millisecond)
 	gd.TriggerTap(t1)
 
-	// 3. Light button (318 <= x < 472, y >= 556)
-	gd.curX = 400
+	// 3. Light button (394 <= x < 586, y >= 556)
+	gd.curX = 490
 	gd.curY = 580
 	t2 := t1.Add(20 * time.Millisecond)
 	gd.TriggerTap(t2)
 
-	// 4. Refresh button (472 <= x < 626, y >= 556)
-	gd.curX = 550
+	// 4. Refresh button (x >= 586, y >= 556)
+	gd.curX = 700
 	gd.curY = 580
 	t3 := t2.Add(20 * time.Millisecond)
 	gd.TriggerTap(t3)
-
-	// 5. Exit button (x >= 626, y >= 556)
-	gd.curX = 700
-	gd.curY = 580
-	t4 := t3.Add(20 * time.Millisecond)
-	gd.TriggerTap(t4)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -428,8 +416,5 @@ func TestGestureDetectorButtonTaps(t *testing.T) {
 	}
 	if refreshTaps != 1 {
 		t.Errorf("Expected 1 refresh button tap, got %d", refreshTaps)
-	}
-	if exitTaps != 1 {
-		t.Errorf("Expected 1 exit button tap, got %d", exitTaps)
 	}
 }

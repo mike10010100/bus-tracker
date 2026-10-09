@@ -17,18 +17,17 @@ type GestureDetectorConfig struct {
 	InactivityTimeout time.Duration
 	DebounceDuration  time.Duration
 	// Transform maps a raw touch coordinate to design space. Nil = identity.
-	Transform               func(x, y int32) (int32, int32)
-	TopRightThresholdX      int32
-	TopRightThresholdY      int32
-	TopLeftThresholdX       int32
-	TopLeftThresholdY       int32
-	BottomLeftThresholdX    int32
-	BottomLeftThresholdY    int32
-	BottomBarThresholdY     int32
-	ButtonBusesThresholdX   int32
-	ButtonBikesThresholdX   int32
-	ButtonLightThresholdX   int32
-	ButtonRefreshThresholdX int32
+	Transform             func(x, y int32) (int32, int32)
+	TopRightThresholdX    int32
+	TopRightThresholdY    int32
+	TopLeftThresholdX     int32
+	TopLeftThresholdY     int32
+	BottomLeftThresholdX  int32
+	BottomLeftThresholdY  int32
+	BottomBarThresholdY   int32
+	ButtonBusesThresholdX int32
+	ButtonBikesThresholdX int32
+	ButtonLightThresholdX int32
 }
 
 // DesignWidth/DesignHeightMirror the renderer's logical layout for the PW5
@@ -44,12 +43,13 @@ func DefaultGestureConfig() GestureDetectorConfig {
 		SingleTapDelay:    200 * time.Millisecond,
 		InactivityTimeout: 100 * time.Millisecond,
 		DebounceDuration:  80 * time.Millisecond,
-		// Bottom button bar (design y ~= 556..590 for a 600-tall layout).
-		BottomBarThresholdY:     556,
-		ButtonBusesThresholdX:   164,
-		ButtonBikesThresholdX:   318,
-		ButtonLightThresholdX:   472,
-		ButtonRefreshThresholdX: 626,
+		// Bottom button bar (design y ~= 556..590 for a 600-tall layout). Four
+		// buttons: BUSES | CITI BIKE | LIGHT | REFRESH. Column boundaries mirror
+		// draw_bottom_button_bar (start_x=20, gap=10, col_w=182).
+		BottomBarThresholdY:   556,
+		ButtonBusesThresholdX: 202,
+		ButtonBikesThresholdX: 394,
+		ButtonLightThresholdX: 586,
 		// Corner zones in design space.
 		TopRightThresholdX:   640,
 		TopRightThresholdY:   120,
@@ -81,7 +81,6 @@ type GestureDetector struct {
 	OnBikesTap      func(x, y int32)
 	OnLightTap      func(x, y int32)
 	OnRefreshTap    func(x, y int32)
-	OnExitTap       func(x, y int32)
 	OnLog           func(msg string)
 }
 
@@ -142,14 +141,9 @@ func (gd *GestureDetector) TriggerTap(now time.Time) {
 				gd.OnLightTap(x, y)
 				return
 			}
-		case x < gd.cfg.ButtonRefreshThresholdX:
+		default:
 			if gd.OnRefreshTap != nil {
 				gd.OnRefreshTap(x, y)
-				return
-			}
-		default:
-			if gd.OnExitTap != nil {
-				gd.OnExitTap(x, y)
 				return
 			}
 		}

@@ -593,10 +593,6 @@ func (tc *TrackerClient) configureGestureHandlers(gd *GestureDetector, cancel co
 		tc.logRemote(fmt.Sprintf("REFRESH button tapped at (%d, %d)! Refreshing...", x, y))
 		refresh()
 	}
-	gd.OnExitTap = func(x, y int32) {
-		tc.logRemote(fmt.Sprintf("EXIT button tapped at (%d, %d)! Exiting cleanly...", x, y))
-		cancel()
-	}
 }
 
 // runEventLoop dispatches multiplexed input events to the gesture detector

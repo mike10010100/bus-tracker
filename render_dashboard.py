@@ -377,7 +377,6 @@ def draw_bottom_button_bar(
     start_x = 20
     total_w = width - 40
     gap = 10
-    col_w = (total_w - 4 * gap) // 5
 
     if font is None:
         font = get_font(12, bold=True)
@@ -385,13 +384,16 @@ def draw_bottom_button_bar(
     is_bus = (active_view == "evening")
     is_bike = (active_view == "morning")
 
+    # No EXIT button: on a dedicated dashboard an accidental exit drops the
+    # device to the Kindle Home screen and the client doesn't come back until it
+    # is restarted. Stopping the client is the server's job.
     buttons = [
         ("● BUSES" if is_bus else "BUSES", is_bus),
         ("● CITI BIKE" if is_bike else "CITI BIKE", is_bike),
         ("☼ LIGHT", False),
         ("↻ REFRESH", False),
-        ("✕ EXIT", False),
     ]
+    col_w = (total_w - (len(buttons) - 1) * gap) // len(buttons)
 
     for i, (label, active) in enumerate(buttons):
         x0 = start_x + i * (col_w + gap)
