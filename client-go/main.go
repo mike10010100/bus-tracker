@@ -300,33 +300,44 @@ func (tc *TrackerClient) releaseScreenSaver() {
 	lipcSet("com.lab126.powerd", "preventScreenSaver", "0")
 }
 
-// armRTCWake programs the hardware RTC to wake the device after `in` seconds.
-// It prefers powerd's rtcWakeup property (which cooperates with Amazon's power
-// state machine) and falls back to rtcwake against /dev/rtc0. Returns the
+// suspendSettleDelay is how long to let powerd settle after releasing the
+// screensaver, before attempting to suspend. Variable for tests.
+var suspendSettleDelay = 2 * time.Second
+
+// RTCWakePath is the sysfs node that accepts a wakealarm. Verified working on
+// the PW5 (bd70528 RTC): powerd's rtcWakeup property does NOT exist outside the
+// brief readyToSuspend window, but this sysfs write works at any time.
+var RTCWakePath = "/sys/class/rtc/rtc0/wakealarm"
+var PowerStatePath = "/sys/power/state"
+
+// armRTCWake programs the hardware RTC to wake the device after `in` seconds by
+// writing the sysfs wakealarm (clearing any prior alarm first). Returns the
 // mechanism used, or "" on failure.
 func (tc *TrackerClient) armRTCWake(in time.Duration) string {
 	secs := int(in.Seconds())
 	if secs < 1 {
 		secs = 1
 	}
-	want := strconv.Itoa(secs)
-
-	// Preferred: powerd manages the RTC alarm and the suspend/resume cycle.
-	// Verify by reading the property back, since rtcWakeup is readable even
-	// when unset.
-	lipcSet("com.lab126.powerd", "rtcWakeup", want)
-	if got := lipcGet("com.lab126.powerd", "rtcWakeup"); got == want {
-		return "powerd.rtcWakeup"
+	// A wakealarm write must be "+N" (seconds from now) or an absolute epoch;
+	// clear with 0 first so a stale alarm can't fire early.
+	if err := osWriteFile(RTCWakePath, []byte("0"), 0644); err != nil {
+		// Some kernels reject the initial 0 write; continue and try +N anyway.
+		_ = err
 	}
-
-	// Fallback: program the RTC directly, then let powerd suspend.
-	cmd := execCommand("rtcwake", "-d", "/dev/rtc0", "-m", "no", "-s", want)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	if err := cmd.Run(); err == nil {
-		return "rtcwake"
+	if err := osWriteFile(RTCWakePath, []byte("+"+strconv.Itoa(secs)), 0644); err != nil {
+		return ""
 	}
-	return ""
+	return "sysfs.wakealarm"
+}
+
+// enterSuspend writes "mem" to /sys/power/state to suspend-to-RAM. The call
+// blocks until the device resumes (either via the RTC alarm or user input).
+// Returns true if the write succeeded (i.e. we actually suspended).
+func (tc *TrackerClient) enterSuspend() bool {
+	if err := osWriteFile(PowerStatePath, []byte("mem"), 0644); err != nil {
+		return false
+	}
+	return true
 }
 
 // cycleFrontlight advances brightness: Off (0) -> Cozy (8) -> Bright (18) -> Off (0)
@@ -775,7 +786,7 @@ func run(parent context.Context) {
 		// point) and do NOT start the power listener -- it exits on
 		// goingToScreenSaver, which is exactly the suspend we want to allow.
 		tc.startInputListeners(ctx, cancel)
-		tc.runSleepLoop(ctx, cancel)
+		tc.runSleepLoop(ctx, cancel, wantsSuspend(os.Args))
 		return
 	}
 
@@ -798,10 +809,11 @@ func run(parent context.Context) {
 }
 
 // runSleepLoop is the low-power mode: render the dashboard, release the
-// screensaver, arm the RTC to wake for the next interval, and block until the
-// device resumes (or the wait times out, in which case it simply re-renders).
-// This trades the adaptive per-poll cadence for real suspend between updates.
-func (tc *TrackerClient) runSleepLoop(ctx context.Context, cancel context.CancelFunc) {
+// screensaver, arm the RTC for the next interval, and explicitly enter
+// suspend-to-RAM. If arming or suspending fails it degrades to a wall-clock
+// wait so the loop always makes progress. `allowSuspend` gates the actual
+// suspend so it can be disabled for safe testing.
+func (tc *TrackerClient) runSleepLoop(ctx context.Context, cancel context.CancelFunc, allowSuspend bool) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -814,14 +826,39 @@ func (tc *TrackerClient) runSleepLoop(ctx context.Context, cancel context.Cancel
 		wait := alignDelay(time.Now(), tc.getNextPollInterval(serverPollSec))
 
 		tc.releaseScreenSaver()
+		// Let powerd settle before we try to suspend (it needs a moment to
+		// notice preventScreenSaver=0). Variable so tests can skip the wait.
+		time.Sleep(suspendSettleDelay)
+
 		mech := tc.armRTCWake(wait)
 		if mech == "" {
-			tc.logRemote("Sleep mode: could not arm RTC; relying on wall-clock wait.")
-		} else {
-			tc.logRemote(fmt.Sprintf("Sleep mode: armed wake in %s via %s", wait.Round(time.Second), mech))
+			tc.logRemote("Sleep mode: could not arm RTC; wall-clock wait only.")
+			tc.holdForResume(ctx, wait)
+			if ctx.Err() != nil {
+				tc.cleanup()
+				return
+			}
+			continue
+		}
+		tc.logRemote(fmt.Sprintf("Sleep mode: armed wake in %s via %s", wait.Round(time.Second), mech))
+
+		if !allowSuspend {
+			tc.logRemote("Sleep mode: suspend disabled (safe test); waiting on wall clock.")
+			tc.holdForResume(ctx, wait)
+			if ctx.Err() != nil {
+				tc.cleanup()
+				return
+			}
+			continue
 		}
 
-		tc.holdForResume(ctx, wait)
+		tc.logRemote("Sleep mode: entering suspend-to-RAM.")
+		if ok := tc.enterSuspend(); ok {
+			tc.logRemote("Sleep mode: resumed from suspend.")
+		} else {
+			tc.logRemote("Sleep mode: suspend write failed; falling back to wait.")
+			tc.holdForResume(ctx, wait)
+		}
 		if ctx.Err() != nil {
 			tc.cleanup()
 			return

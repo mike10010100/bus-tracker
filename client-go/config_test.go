@@ -141,6 +141,18 @@ func TestResolveRunMode(t *testing.T) {
 	}
 }
 
+func TestWantsSuspend(t *testing.T) {
+	if wantsSuspend([]string{"/tmp/tracker", "-sleep"}) {
+		t.Error("sleep without -suspend should not enable suspend")
+	}
+	if !wantsSuspend([]string{"/tmp/tracker", "-sleep", "-suspend"}) {
+		t.Error("-suspend should enable suspend")
+	}
+	if !wantsSuspend([]string{"/tmp/tracker", "--suspend"}) {
+		t.Error("--suspend should enable suspend")
+	}
+}
+
 func TestRunModeString(t *testing.T) {
 	if ModeResident.String() != "resident" || ModeOneshot.String() != "oneshot" || ModeSleep.String() != "sleep" {
 		t.Errorf("unexpected mode strings: %s %s %s", ModeResident, ModeOneshot, ModeSleep)

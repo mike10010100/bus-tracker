@@ -125,6 +125,19 @@ const (
 	ModeSleep
 )
 
+// wantsSuspend reports whether the `-suspend` flag was passed. Sleep mode only
+// actually suspends the device when this is set, so the risky suspend path is
+// strictly opt-in.
+func wantsSuspend(args []string) bool {
+	for _, arg := range args {
+		switch strings.ToLower(strings.TrimSpace(arg)) {
+		case "-suspend", "--suspend":
+			return true
+		}
+	}
+	return false
+}
+
 // currentRunMode holds the mode this process is running in, so the fetch path
 // can compare it against a server-requested mode and relaunch on change.
 var currentRunMode = ModeResident

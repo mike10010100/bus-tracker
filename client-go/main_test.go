@@ -515,63 +515,73 @@ func TestLogRemoteQueueDoesNotBlockAndDropsWhenFull(t *testing.T) {
 	}
 }
 
-func TestArmRTCWake_PrefersPowerdProp(t *testing.T) {
+func TestArmRTCWake_WritesSysfsAlarm(t *testing.T) {
 	patchRuntime(t)
-	var setVal string
-	execCommand = func(name string, arg ...string) *exec.Cmd {
-		// lipc-set-prop writes the value; lipc-get-prop reads it back.
-		if name == "lipc-set-prop" && len(arg) >= 4 && arg[2] == "rtcWakeup" {
-			setVal = arg[3]
-		}
-		if name == "lipc-get-prop" {
-			return exec.Command("echo", setVal)
-		}
-		return exec.Command("true")
+	var writes []string
+	osWriteFile = func(path string, data []byte, perm os.FileMode) error {
+		writes = append(writes, path+"="+string(data))
+		return nil
 	}
 	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-	if mech := tc.armRTCWake(90 * time.Second); mech != "powerd.rtcWakeup" {
-		t.Errorf("expected powerd.rtcWakeup, got %q", mech)
+	if mech := tc.armRTCWake(90 * time.Second); mech != "sysfs.wakealarm" {
+		t.Errorf("expected sysfs.wakealarm, got %q", mech)
 	}
-	if setVal != "90" {
-		t.Errorf("expected rtcWakeup=90, got %q", setVal)
+	// Should clear then set the alarm.
+	if len(writes) < 2 || writes[0] != RTCWakePath+"=0" || writes[1] != RTCWakePath+"=+90" {
+		t.Errorf("unexpected writes: %v", writes)
 	}
 }
 
-func TestArmRTCWake_FallsBackToRtcwake(t *testing.T) {
+func TestArmRTCWake_SysfsFailureReturnsEmpty(t *testing.T) {
 	patchRuntime(t)
-	var rtcwakeCalled bool
-	execCommand = func(name string, arg ...string) *exec.Cmd {
-		if name == "lipc-get-prop" {
-			return exec.Command("false") // property not readable -> fall back
+	osWriteFile = func(path string, data []byte, perm os.FileMode) error {
+		if string(data) == "0" {
+			return nil
 		}
-		if name == "rtcwake" {
-			rtcwakeCalled = true
-			return exec.Command("true")
-		}
-		return exec.Command("true")
+		return os.ErrPermission
 	}
 	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-	if mech := tc.armRTCWake(90 * time.Second); mech != "rtcwake" {
-		t.Errorf("expected rtcwake, got %q", mech)
-	}
-	if !rtcwakeCalled {
-		t.Error("expected rtcwake to be invoked")
+	if mech := tc.armRTCWake(90 * time.Second); mech != "" {
+		t.Errorf("expected failure, got %q", mech)
 	}
 }
 
 func TestArmRTCWake_ClampsMinimum(t *testing.T) {
 	patchRuntime(t)
-	var setVal string
-	execCommand = func(name string, arg ...string) *exec.Cmd {
-		if name == "lipc-set-prop" && len(arg) >= 4 && arg[2] == "rtcWakeup" {
-			setVal = arg[3]
-		}
-		return exec.Command("echo", setVal)
+	var last string
+	osWriteFile = func(path string, data []byte, perm os.FileMode) error {
+		last = string(data)
+		return nil
 	}
 	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
 	tc.armRTCWake(-5 * time.Second)
-	if setVal != "1" {
-		t.Errorf("expected clamped value 1, got %q", setVal)
+	if last != "+1" {
+		t.Errorf("expected clamped +1, got %q", last)
+	}
+}
+
+func TestEnterSuspend_WritesMem(t *testing.T) {
+	patchRuntime(t)
+	var path, val string
+	osWriteFile = func(p string, data []byte, perm os.FileMode) error {
+		path, val = p, string(data)
+		return nil
+	}
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	if !tc.enterSuspend() {
+		t.Fatal("expected enterSuspend to report success")
+	}
+	if path != PowerStatePath || val != "mem" {
+		t.Errorf("expected %s=mem, got %s=%s", PowerStatePath, path, val)
+	}
+}
+
+func TestEnterSuspend_FailureReturnsFalse(t *testing.T) {
+	patchRuntime(t)
+	osWriteFile = func(string, []byte, os.FileMode) error { return os.ErrPermission }
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	if tc.enterSuspend() {
+		t.Error("expected enterSuspend to report failure")
 	}
 }
 
@@ -732,12 +742,16 @@ func TestRunSleepLoop_RendersArmsAndResumes(t *testing.T) {
 	}
 	defer func() { execCommand = orig }()
 
+	origSettle := suspendSettleDelay
+	suspendSettleDelay = 0
+	defer func() { suspendSettleDelay = origSettle }()
+
 	tc := NewTrackerClient(srv.URL, "auto")
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan struct{})
 	go func() {
-		tc.runSleepLoop(ctx, cancel)
+		tc.runSleepLoop(ctx, cancel, false)
 		close(done)
 	}()
 
