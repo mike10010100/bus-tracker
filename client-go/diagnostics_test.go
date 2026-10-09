@@ -384,8 +384,30 @@ func TestRunAction_Allowlist(t *testing.T) {
 	}
 }
 
+func TestActionRTCSuspend_RunsSequence(t *testing.T) {
+	patchRuntime(t)
+	var scripts []string
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+		if name == "sh" && len(arg) >= 2 {
+			scripts = append(scripts, arg[1])
+		}
+		return exec.Command("echo", "ok")
+	}
+	out := actionRTCSuspend(context.Background())
+	// The sequence must arm the RTC, disable wifi, suspend, then re-enable wifi.
+	joined := strings.Join(scripts, "\n")
+	for _, want := range []string{"stop lab126_gui", "wakealarm", "wirelessEnable 0", "/sys/power/state", "wirelessEnable 1"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("rtc-suspend sequence missing %q\nran:\n%s", want, joined)
+		}
+	}
+	if !strings.Contains(out, "RESULT:") {
+		t.Errorf("expected a RESULT line, got:\n%s", out)
+	}
+}
+
 func TestDeviceActions_AreAllRegistered(t *testing.T) {
-	for _, name := range []string{"disable-ads", "stop-framework", "start-framework", "framework-state", "sleep-test"} {
+	for _, name := range []string{"disable-ads", "stop-framework", "start-framework", "framework-state", "sleep-test", "rtc-suspend"} {
 		if _, ok := deviceActions[name]; !ok {
 			t.Errorf("action %q not registered", name)
 		}

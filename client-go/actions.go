@@ -10,29 +10,39 @@ import (
 // DeviceAction is a named, allowlisted maintenance action the server can ask a
 // client to run. Actions are fixed in code (never arbitrary shell from the
 // network), so a compromised/misconfigured server can only trigger these.
-type DeviceAction func(ctx context.Context) string
+type DeviceAction struct {
+	Fn func(ctx context.Context) string
+	// Timeout bounds the action. A suspend test blocks for its whole duration,
+	// so it needs a larger budget than a quick probe.
+	Timeout time.Duration
+}
+
+// defaultActionTimeout bounds actions that don't specify their own.
+var defaultActionTimeout = 60 * time.Second
 
 // deviceActions maps action names to their implementations.
 var deviceActions = map[string]DeviceAction{
-	"disable-ads":     actionDisableAds,
-	"stop-framework":  actionStopFramework,
-	"start-framework": actionStartFramework,
-	"framework-state": actionFrameworkState,
-	"sleep-test":      actionSleepTest,
+	"disable-ads":     {Fn: actionDisableAds},
+	"stop-framework":  {Fn: actionStopFramework},
+	"start-framework": {Fn: actionStartFramework},
+	"framework-state": {Fn: actionFrameworkState},
+	"sleep-test":      {Fn: actionSleepTest},
+	"rtc-suspend":     {Fn: actionRTCSuspend, Timeout: 5 * time.Minute},
 }
-
-// actionTimeout bounds a whole action.
-var actionTimeout = 60 * time.Second
 
 // runAction executes a named action and returns a human-readable result.
 func runAction(ctx context.Context, name string) (string, bool) {
-	fn, ok := deviceActions[name]
+	act, ok := deviceActions[name]
 	if !ok {
 		return fmt.Sprintf("unknown action %q", name), false
 	}
-	actx, cancel := context.WithTimeout(ctx, actionTimeout)
+	timeout := act.Timeout
+	if timeout == 0 {
+		timeout = defaultActionTimeout
+	}
+	actx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return fn(actx), true
+	return act.Fn(actx), true
 }
 
 func shell(ctx context.Context, script string) string {
@@ -98,4 +108,37 @@ func actionSleepTest(ctx context.Context) string {
 	b.WriteString("rtc: " + shell(ctx, "cat /sys/class/rtc/rtc0/wakealarm 2>/dev/null; echo") + "\n")
 	b.WriteString("ads: " + shell(ctx, "ls /var/local/adunits 2>/dev/null && echo present || echo absent") + "\n")
 	return strings.TrimSpace(b.String())
+}
+
+// actionRTCSuspend performs ONE proven suspend/wake cycle to validate the
+// mechanism end to end:
+//
+//	stop lab126_gui, unload screensavers, disable wi-fi (releases "WLAN timeout"),
+//	arm /sys/class/rtc/rtc0/wakealarm +90, echo mem > /sys/power/state,
+//	(wake) re-enable wi-fi (the client's next poll proves the control channel).
+//
+// It reports what happened at each step. This is the decisive experiment.
+func actionRTCSuspend(ctx context.Context) string {
+	var b strings.Builder
+
+	b.WriteString("stop framework: " + shell(ctx, "stop lab126_gui 2>&1; echo done") + "\n")
+	b.WriteString("unload screensaver: " + shell(ctx, "lipc-set-prop com.lab126.blanket unload screensaver 2>&1; lipc-set-prop com.lab126.blanket unload splash 2>&1; echo done") + "\n")
+	b.WriteString("frontlight off: " + shell(ctx, "lipc-set-prop -i com.lab126.powerd flIntensity 0 2>&1; echo done") + "\n")
+
+	// Arm the RTC BEFORE suspending: clear then +90s.
+	b.WriteString("arm rtc: " + shell(ctx, "echo 0 > /sys/class/rtc/rtc0/wakealarm; echo +90 > /sys/class/rtc/rtc0/wakealarm; echo rc=$?; cat /sys/class/rtc/rtc0/wakealarm") + "\n")
+
+	// Free the Wi-Fi wakeup source, then suspend. The go binary is a separate
+	// process; this whole cycle runs inside it, so it survives the freeze.
+	b.WriteString("wifi off: " + shell(ctx, "lipc-set-prop com.lab126.cmd wirelessEnable 0 2>&1; echo done") + "\n")
+	time.Sleep(1 * time.Second)
+
+	before := time.Now()
+	// This write blocks until the RTC wakes the device (or fails).
+	b.WriteString("suspend: " + shell(ctx, "echo mem > /sys/power/state 2>&1; echo rc=$?") + "\n")
+	elapsed := time.Since(before)
+
+	b.WriteString("wifi on: " + shell(ctx, "lipc-set-prop com.lab126.cmd wirelessEnable 1 2>&1; echo done") + "\n")
+	b.WriteString(fmt.Sprintf("RESULT: suspended+resumed in %s (if ~90s, the RTC wake worked)", elapsed.Round(time.Second)))
+	return b.String()
 }
