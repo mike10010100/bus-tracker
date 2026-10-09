@@ -106,6 +106,11 @@ _diag_requested = ""
 VALID_RUN_MODES = ("resident", "oneshot", "sleep", "sleep-suspend")
 _mode_requested = ""
 
+# A named device action to forward to the next polling client (one-shot).
+# The set of valid actions is enforced on the client (allowlist in actions.go);
+# the server only forwards the string.
+_device_action = ""
+
 
 def parse_diag_battery(text):
     """
@@ -410,7 +415,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._send_empty(404)
 
     def do_GET(self):
-        global tracker_stopped, _diag_requested, _mode_requested
+        global tracker_stopped, _diag_requested, _mode_requested, _device_action
         parsed = urllib.parse.urlparse(self.path)
         params = urllib.parse.parse_qs(parsed.query)
 
@@ -470,6 +475,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
             with _diag_lock:
                 pending = _mode_requested
             payload = json.dumps({"pending": pending, "valid": list(VALID_RUN_MODES)}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self._write_body(payload)
+            return
+
+        if parsed.path == "/action":
+            # Queue a named, allowlisted device action for the next Kindle poll.
+            # GET with no ?do= reports the pending action. The action name is
+            # validated on the client against its allowlist.
+            global _device_action
+            do = params.get("do", [""])[0].strip().lower()
+            if do:
+                with _diag_lock:
+                    _device_action = do
+                print(f"[Action] queued device action '{do}' for the next poll")
+            with _diag_lock:
+                pending = _device_action
+            payload = json.dumps({"pending": pending}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -627,10 +652,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             # keep requesting (self-healing retry). A client that reports nothing
             # (older build) is treated as one-shot to avoid a relaunch loop.
             client_mode = self.headers.get("X-Tracker-Mode", "")
+            action_header = ""
             if is_kindle:
                 with _diag_lock:
                     diag_header = _diag_requested
                     _diag_requested = ""
+                    action_header = _device_action
+                    _device_action = ""
                     if _mode_requested:
                         if client_mode == _mode_requested:
                             print(f"[Mode] client confirmed mode '{client_mode}'")
@@ -638,7 +666,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         else:
                             mode_header = _mode_requested
                             if client_mode == "":
-                                # Legacy client (doesn't report its mode): send once.
+                                # Legacy client: send once.
                                 _mode_requested = ""
 
             if self.headers.get("If-None-Match") == etag:
@@ -653,6 +681,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self.send_header("X-Tracker-Diag", diag_header)
                 if mode_header:
                     self.send_header("X-Tracker-Mode", mode_header)
+                if action_header:
+                    self.send_header("X-Tracker-Action", action_header)
                 self.end_headers()
                 return
 
@@ -672,6 +702,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_header("X-Tracker-Diag", diag_header)
             if mode_header:
                 self.send_header("X-Tracker-Mode", mode_header)
+            if action_header:
+                self.send_header("X-Tracker-Action", action_header)
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.end_headers()
             self._write_body(img_bytes)

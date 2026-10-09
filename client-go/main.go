@@ -683,6 +683,15 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 		tc.postDiagnostics(diag == "full")
 	}
 
+	// The server can request a named, allowlisted device action (maintenance).
+	if action := resp.Header.Get("X-Tracker-Action"); action != "" {
+		result, known := runAction(ctx, action)
+		tc.logRemote(fmt.Sprintf("Device action %q ->\n%s", action, result))
+		if !known {
+			tc.logRemote(fmt.Sprintf("Unknown device action %q ignored.", action))
+		}
+	}
+
 	// The server can ask the client to relaunch in a different run mode via a
 	// header (resident/oneshot/sleep/sleep-suspend). We only re-exec when the
 	// requested mode differs from the one we're running. sysExec only returns on

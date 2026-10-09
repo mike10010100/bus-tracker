@@ -239,6 +239,21 @@ class TestRunModeEndpoint(ServerHTTPTestBase):
         _http_get(self.port, "/mode?set=sleep-suspend")
         self.assertEqual(server._mode_requested, "sleep-suspend")
 
+    def test_action_queued_and_forwarded_to_kindle(self):
+        with server._diag_lock:
+            server._device_action = ""
+        status, _headers, body = _http_get(self.port, "/action?do=disable-ads")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["pending"], "disable-ads")
+        self.assertEqual(server._device_action, "disable-ads")
+
+        # Web request must not consume it; Kindle poll forwards and clears.
+        _status, wheaders, _body = _http_get(self.port, "/dashboard.png?mock=1")
+        self.assertIsNone(wheaders.get("X-Tracker-Action"))
+        status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
+        self.assertEqual(headers.get("X-Tracker-Action"), "disable-ads")
+        self.assertEqual(server._device_action, "")
+
     def test_mode_forwarded_on_304(self):
         _status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
         etag = headers.get("ETag")

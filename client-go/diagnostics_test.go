@@ -365,6 +365,33 @@ func TestProbeRTCWake_FormatsResults(t *testing.T) {
 	}
 }
 
+func TestRunAction_Allowlist(t *testing.T) {
+	patchRuntime(t)
+	// Unknown action is rejected.
+	if _, ok := runAction(context.Background(), "rm-rf-everything"); ok {
+		t.Error("expected unknown action to be rejected")
+	}
+	// Known action runs and returns output.
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+		return exec.Command("echo", "did-the-thing")
+	}
+	out, ok := runAction(context.Background(), "framework-state")
+	if !ok {
+		t.Fatal("expected framework-state to be a known action")
+	}
+	if !strings.Contains(out, "did-the-thing") {
+		t.Errorf("unexpected action output: %q", out)
+	}
+}
+
+func TestDeviceActions_AreAllRegistered(t *testing.T) {
+	for _, name := range []string{"disable-ads", "stop-framework", "start-framework", "framework-state", "sleep-test"} {
+		if _, ok := deviceActions[name]; !ok {
+			t.Errorf("action %q not registered", name)
+		}
+	}
+}
+
 func TestIndent(t *testing.T) {
 	if got := indent(""); got != "  <empty>" {
 		t.Errorf("indent empty = %q", got)
