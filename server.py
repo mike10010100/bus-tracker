@@ -185,10 +185,10 @@ def get_fresh_data(use_mock=False):
     return stops_data, stop_status, cb_data
 
 
-def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False, view="auto", width=800, height=480, scale=1.0):
+def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False, view="auto", width=800, height=480, scale=1.0, presentation="live", dormant_note=""):
     stops_data, stop_status, cb_data = get_fresh_data(use_mock=use_mock)
 
-    cache_key = (use_mock, view, width, height, scale, batt_level, is_charging, _data_cache["time"])
+    cache_key = (use_mock, view, width, height, scale, batt_level, is_charging, presentation, dormant_note, _data_cache["time"])
     with _render_lock:
         cached = _render_cache.get(cache_key)
         if cached is not None:
@@ -208,6 +208,8 @@ def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False
         width=width,
         height=height,
         scale=scale,
+        presentation=presentation,
+        dormant_note=dormant_note,
     )
 
     with open(img_path, "rb") as f:
@@ -357,6 +359,35 @@ def is_overnight_hours(dt=None):
     if OVERNIGHT_START <= OVERNIGHT_END:
         return OVERNIGHT_START <= hour < OVERNIGHT_END
     return hour >= OVERNIGHT_START or hour < OVERNIGHT_END
+
+
+def get_presentation(dt=None):
+    """
+    Returns the client-facing presentation state:
+    - "dormant" overnight (22:00-06:00): an inert "asleep" face with no button
+      affordances, and the client disarms touch-wake, so the device is honestly
+      not tappable.
+    - "live" otherwise: the tappable dashboard; touch can wake the device.
+
+    FORCE_FAST_POLL=1 (testing) forces "live" so experiments are unaffected.
+    """
+    if FORCE_FAST_POLL:
+        return "live"
+    if is_overnight_hours(dt=dt):
+        return "dormant"
+    return "live"
+
+
+def get_dormant_note():
+    """
+    Human-readable label for the dormant overnight strip, announcing when the
+    dashboard wakes (the overnight window end).
+    """
+    hour = int(OVERNIGHT_END) % 24
+    minute = int(round((OVERNIGHT_END - int(OVERNIGHT_END)) * 60)) % 60
+    suffix = "AM" if hour < 12 else "PM"
+    hour12 = hour % 12 or 12
+    return f"SLEEPING — back at {hour12}:{minute:02d} {suffix} · not tappable"
 
 
 def get_target_poll_interval(dt=None):
@@ -619,6 +650,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             is_charging = str(charging_param).lower() in ["1", "true", "yes"]
 
             is_kindle = kindle_mode == "pw5" or "kindle" in params
+            # The presentation tells the client whether the panel is a live,
+            # tappable dashboard or an inert overnight "asleep" face.
+            presentation = get_presentation()
+            dormant_note = get_dormant_note() if presentation == "dormant" else ""
             render_w = 800
             render_h = 480
 
@@ -645,6 +680,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     width=render_w,
                     height=render_h,
                     scale=scale,
+                    presentation=presentation,
+                    dormant_note=dormant_note,
                 )
                 img = format_for_kindle(img, orientation="landscape", rotation=rot_val,
                                         target=(land_w, land_h))
@@ -656,6 +693,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     view=view_param,
                     width=render_w,
                     height=render_h,
+                    presentation=presentation,
+                    dormant_note=dormant_note,
                 )
 
             buf = io.BytesIO()
@@ -702,6 +741,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_header("X-Tracker-Version", SERVER_VERSION)
                 self.send_header("X-Tracker-SHA256", bin_sha)
                 self.send_header("X-Kindle-Poll-Interval", str(poll_interval))
+                self.send_header("X-Tracker-Presentation", presentation)
                 self.send_header("X-Tracker-Server", f"http://{get_local_ip()}:{PORT}")
                 self.send_header("X-Resolved-View", resolve_view(view_param))
                 if diag_header:
@@ -720,6 +760,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("X-Kindle-Brightness", str(brightness))
             self.send_header("X-Kindle-Warmth", str(warmth))
             self.send_header("X-Kindle-Poll-Interval", str(poll_interval))
+            self.send_header("X-Tracker-Presentation", presentation)
             self.send_header("X-Tracker-Server", f"http://{get_local_ip()}:{PORT}")
             self.send_header("X-Tracker-Version", SERVER_VERSION)
             self.send_header("X-Tracker-SHA256", bin_sha)

@@ -405,6 +405,43 @@ def draw_bottom_button_bar(
         draw.text((x0 + (col_w - tw) // 2, btn_y0 + (btn_h - th) // 2 - 1), label, fill=fg, font=font)
 
 
+def draw_dormant_strip(
+    draw: ImageDraw.ImageDraw,
+    width: int,
+    height: int,
+    note: str = "",
+):
+    """
+    Overpaints the bottom button bar with an inert "asleep" strip.
+
+    In dormant (overnight) presentation the device is intentionally not
+    tappable, so rendering buttons there would be deceptive. This erases the
+    button row and draws a clear, non-interactive status strip instead.
+    """
+    is_tall = height >= 580
+    btn_y0 = height - (44 if is_tall else 38)
+    btn_y1 = height - (10 if is_tall else 8)
+
+    # Erase the separator line and the entire button row.
+    draw.rectangle([0, btn_y0 - 9, width, height], fill="white")
+    draw.line([(20, btn_y0 - 8), (width - 20, btn_y0 - 8)], fill="#dddddd", width=1)
+
+    label = note or "SLEEPING — updates hourly · not tappable"
+    font = get_font(12, bold=True)
+    draw.rounded_rectangle(
+        [20, btn_y0, width - 20, btn_y1], radius=6, fill="#f2f2f2", outline="#999999", width=2
+    )
+    bbox = draw.textbbox((0, 0), label, font=font)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    draw.text(
+        (20 + (width - 40 - tw) // 2, btn_y0 + (btn_y1 - btn_y0 - th) // 2 - 1),
+        label,
+        fill="#666666",
+        font=font,
+    )
+
+
 def render_morning_view(
     draw: ImageDraw.ImageDraw,
     stops_data: Dict[str, List[Dict[str, Any]]],
@@ -924,11 +961,16 @@ def render_dashboard(
     width: int = WIDTH,
     height: int = HEIGHT,
     scale: float = 1.0,
+    presentation: str = "live",
+    dormant_note: str = "",
 ) -> str:
     """
     Renders a high-contrast black-and-white image optimized for e-ink
     or low-power dashboard screens (default 800x480, or 800x600 for 4:3 displays).
     Supports 'morning' (Citi Bike Hero) and 'evening' (Bus Hero) view modes.
+
+    presentation="dormant" replaces the button bar with an inert "asleep" strip
+    (overnight), so the panel never shows buttons that aren't tappable.
 
     stop_status maps stop id -> fetch status ('ok'/'empty'/'error') so that an
     upstream outage can be distinguished from a genuine absence of buses.
@@ -980,6 +1022,11 @@ def render_dashboard(
             width=width,
             height=height,
         )
+
+    # Overnight/dormant: erase the button bar and mark the panel as asleep so it
+    # does not masquerade as tappable.
+    if presentation == "dormant":
+        draw_dormant_strip(draw, width, height, note=dormant_note)
 
     # Save output
     img.save(output_path, "PNG")

@@ -532,12 +532,19 @@ func TestConfigureGestureHandlers_AllButtonsAndCorners(t *testing.T) {
 	}
 	// Single tap should not panic.
 	gd.OnSingleTap(0, 0)
-	// Top-right exits.
+	// Top-right and double-tap must NOT exit (that caused blank, unresponsive
+	// screens); they enqueue a refresh instead.
 	gd.OnTopRightTap(0, 0)
+	gd.OnDoubleTap(0, 0)
 	select {
 	case <-ctx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("top-right tap should cancel")
+		t.Fatal("top-right/double-tap must not cancel in dashboard mode")
+	case <-time.After(200 * time.Millisecond):
+	}
+	select {
+	case <-tc.refreshCh:
+	default:
+		t.Fatal("double-tap/top-right should enqueue a refresh")
 	}
 }
 
@@ -1174,11 +1181,14 @@ func TestRunPollLoop_CleansUpOnCancel(t *testing.T) {
 	patchRuntime(t)
 	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: -1} }
 	osCreate = tempFileCreate(t)
-	var cleaned bool
+	var restartedFramework, blanked bool
 	orig := execCommand
 	execCommand = func(name string, arg ...string) *exec.Cmd {
+		if name == "start" && len(arg) > 0 && arg[0] == "lab126_gui" {
+			restartedFramework = true
+		}
 		if name == "eips" && len(arg) > 0 && arg[0] == "-c" {
-			cleaned = true
+			blanked = true
 		}
 		return orig("true")
 	}
@@ -1203,8 +1213,11 @@ func TestRunPollLoop_CleansUpOnCancel(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("runPollLoop should exit on cancel")
 	}
-	if !cleaned {
-		t.Error("expected cleanup to clear the screen on loop exit")
+	if !restartedFramework {
+		t.Error("expected cleanup to restart lab126_gui on loop exit")
+	}
+	if blanked {
+		t.Error("cleanup must not blank the panel (breaks framework-stopped devices)")
 	}
 }
 
@@ -1359,5 +1372,107 @@ func TestRun_StartsAndStops(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("run should return after context cancellation")
+	}
+}
+
+func TestRTCAlarmStillArmed(t *testing.T) {
+	patchRuntime(t)
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+
+	cases := []struct {
+		val  string
+		want bool
+	}{
+		{"", false}, {"0", false}, {"1791565000", true}, {" 0\n", false}, {"12345\n", true},
+	}
+	for _, c := range cases {
+		osReadFile = func(string) ([]byte, error) { return []byte(c.val), nil }
+		if got := tc.rtcAlarmStillArmed(); got != c.want {
+			t.Errorf("rtcAlarmStillArmed(%q) = %v, want %v", c.val, got, c.want)
+		}
+	}
+
+	// Read error => not armed.
+	osReadFile = func(string) ([]byte, error) { return nil, os.ErrNotExist }
+	if tc.rtcAlarmStillArmed() {
+		t.Error("read error should report not-armed")
+	}
+}
+
+func TestArmTouchWake_TogglesAndSkipsPowerKey(t *testing.T) {
+	patchRuntime(t)
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+
+	var scripts []string
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+		if name == "sh" && len(arg) >= 2 {
+			scripts = append(scripts, arg[1])
+		}
+		return exec.Command("echo", "/sys/x/power/wakeup=enabled")
+	}
+
+	out := tc.armTouchWake(context.Background(), true)
+	joined := strings.Join(scripts, "\n")
+	for _, want := range []string{"power/wakeup", "*pwrkey*", "continue", "enabled"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("armTouchWake(true) missing %q in:\n%s", want, joined)
+		}
+	}
+	if !strings.Contains(out, "power/wakeup") {
+		t.Errorf("expected node state reported, got %q", out)
+	}
+
+	scripts = nil
+	tc.armTouchWake(context.Background(), false)
+	if !strings.Contains(strings.Join(scripts, "\n"), "disabled") {
+		t.Error("armTouchWake(false) should write 'disabled'")
+	}
+}
+
+func TestPresentationRoundTrip(t *testing.T) {
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	if tc.getPresentation() != "live" {
+		t.Errorf("default presentation = %q, want live", tc.getPresentation())
+	}
+	tc.setPresentation("dormant")
+	if tc.getPresentation() != "dormant" {
+		t.Errorf("presentation = %q, want dormant", tc.getPresentation())
+	}
+	// Empty is ignored.
+	tc.setPresentation("")
+	if tc.getPresentation() != "dormant" {
+		t.Errorf("empty presentation should be ignored, got %q", tc.getPresentation())
+	}
+}
+
+func TestInteractionAwake_TimesOutAndResets(t *testing.T) {
+	patchRuntime(t)
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	execCommand = func(name string, arg ...string) *exec.Cmd { return exec.Command("true") }
+
+	// A short hold returns true after it elapses.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	start := time.Now()
+	if !tc.interactionAwake(ctx, cancel, 60*time.Millisecond) {
+		t.Fatal("interactionAwake should return true on timeout")
+	}
+	if time.Since(start) < 50*time.Millisecond {
+		t.Error("interactionAwake returned too early")
+	}
+
+	// Cancelling the context returns false.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done := make(chan bool, 1)
+	go func() { done <- tc.interactionAwake(ctx2, cancel2, 5*time.Second) }()
+	time.Sleep(20 * time.Millisecond)
+	cancel2()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Error("interactionAwake should return false on ctx cancel")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("interactionAwake did not return on cancel")
 	}
 }

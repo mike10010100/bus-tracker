@@ -556,6 +556,46 @@ class TestDiscoveryAndLighting(unittest.TestCase):
         self.assertEqual(server.get_commute_lighting(off), (0, 0))
         self.assertEqual(server.get_target_poll_interval(off), 600)
 
+    def test_presentation_live_by_day_dormant_overnight(self):
+        from datetime import datetime
+        saved = server.FORCE_FAST_POLL
+        server.FORCE_FAST_POLL = False
+        try:
+            self.assertEqual(server.get_presentation(datetime(2026, 1, 1, 8, 0)), "live")
+            self.assertEqual(server.get_presentation(datetime(2026, 1, 1, 13, 0)), "live")
+            self.assertEqual(server.get_presentation(datetime(2026, 1, 1, 23, 0)), "dormant")
+            self.assertEqual(server.get_presentation(datetime(2026, 1, 1, 2, 0)), "dormant")
+        finally:
+            server.FORCE_FAST_POLL = saved
+
+    def test_dormant_note_announces_wake_time(self):
+        note = server.get_dormant_note()
+        self.assertIn("SLEEPING", note)
+        self.assertIn("not tappable", note)
+
+
+class TestPresentationOverHTTP(ServerHTTPTestBase):
+    def test_dashboard_advertises_live_presentation(self):
+        saved = server.FORCE_FAST_POLL
+        server.FORCE_FAST_POLL = False
+        try:
+            status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
+            self.assertEqual(status, 200)
+            self.assertEqual(headers.get("X-Tracker-Presentation"), "live")
+        finally:
+            server.FORCE_FAST_POLL = saved
+
+    def test_dashboard_renders_dormant_when_overnight(self):
+        saved = server.get_presentation
+        server.get_presentation = lambda dt=None: "dormant"
+        try:
+            status, headers, body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
+            self.assertEqual(status, 200)
+            self.assertEqual(headers.get("X-Tracker-Presentation"), "dormant")
+            self.assertEqual(Image.open(io.BytesIO(body)).mode, "L")
+        finally:
+            server.get_presentation = saved
+
 
 class TestMdnsAdvertiser(unittest.TestCase):
     def test_returns_none_when_zeroconf_unavailable(self):
