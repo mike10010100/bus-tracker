@@ -52,13 +52,23 @@ func shell(ctx context.Context, script string) string {
 // covers the dashboard. Idempotent; reversible via the Amazon account.
 func actionDisableAds(ctx context.Context) string {
 	var b strings.Builder
-	// Flip the ad visibility flag in appreg.db. Prefer sqlite3; fall back to a
-	// byte-level replace if sqlite3 is absent.
-	sql := `sqlite3 /var/local/appreg.db "UPDATE properties SET value='false' WHERE name='adunit.viewable';" 2>&1`
-	b.WriteString("sqlite3: " + shell(ctx, sql) + "\n")
-	// Also blank the ad unit dir and the .assets store marker.
+
+	// Which sqlite tool exists? The Kindle image usually ships none of these.
+	b.WriteString("sqlite tools: " + shell(ctx, "command -v sqlite3; command -v sqlite; command -v dbclient") + "\n")
+
+	// Flip adunit.viewable=false via sqlite3 if present.
+	db := "/var/local/appreg.db"
+	if shell(ctx, "command -v sqlite3") != "" {
+		sql := `sqlite3 ` + db + ` "UPDATE properties SET value='false' WHERE name='adunit.viewable';" 2>&1`
+		b.WriteString("sqlite3 update: " + shell(ctx, sql) + "\n")
+	}
+
+	// Always remove the ad unit assets and the store marker.
 	b.WriteString("rm adunits: " + shell(ctx, "rm -rf /var/local/adunits /mnt/us/.assets 2>&1; echo done") + "\n")
-	b.WriteString("verify: " + shell(ctx, "ls -la /var/local/adunits 2>&1; ls -la /mnt/us/.assets 2>&1") + "\n")
+
+	// Verify the flag's raw bytes and the asset dirs.
+	b.WriteString("flag: " + shell(ctx, "grep -a -o 'adunit.viewable[^ ]*' "+db+" 2>/dev/null | head -3; echo") + "\n")
+	b.WriteString("assets: " + shell(ctx, "ls -la /var/local/adunits 2>&1 | head -2; ls -la /mnt/us/.assets 2>&1 | head -2") + "\n")
 	return strings.TrimSpace(b.String())
 }
 
