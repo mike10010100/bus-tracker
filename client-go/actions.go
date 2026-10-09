@@ -302,26 +302,33 @@ func actionTouchWakeTest(ctx context.Context) string {
 
 	touchMoved := wakeupCountersChanged(wakeupBefore, wakeupAfter, "2-0024")
 	rtcMoved := wakeupCountersChanged(wakeupBefore, wakeupAfter, "bd70528-rtc")
+	powerMoved := wakeupCountersChanged(wakeupBefore, wakeupAfter, "gpio-keys.7.auto") ||
+		wakeupCountersChanged(wakeupBefore, wakeupAfter, "bd71827-power.4.auto")
 
 	verdict := "INCONCLUSIVE"
 	switch {
+	case powerMoved:
+		verdict = "POWER BUTTON WOKE IT (power-key wake counter moved) -- deep-suspend + press-to-interact POSSIBLE"
+	case touchMoved:
+		verdict = "TOUCH WOKE IT (touch wake counter moved) -- tap-to-wake POSSIBLE"
 	case alarmAfter != "" && alarmAfter != "0":
-		verdict = "NON-RTC WAKE (RTC alarm still armed) -- touch/power woke the SoC; tap-to-wake POSSIBLE"
+		verdict = "NON-RTC WAKE (RTC alarm still armed; source unclear) -- something woke the SoC"
 	case elapsed < 280*time.Second:
-		verdict = "TOUCH WOKE IT (resumed well before the 300s RTC safety) -- tap-to-wake POSSIBLE"
+		verdict = "EARLY WAKE (resumed well before the 300s RTC safety)"
 	default:
-		verdict = "RTC WOKE IT (alarm cleared at ~300s) -- touch did NOT wake the SoC"
+		verdict = "RTC WOKE IT (alarm cleared at ~300s) -- neither touch nor power woke the SoC"
 	}
 	b.WriteString(fmt.Sprintf(
-		"RESULT: resumed after %s; rtc alarm now %q; touch counters moved=%v, rtc counters moved=%v. %s",
-		elapsed.Round(time.Second), alarmAfter, touchMoved, rtcMoved, verdict))
+		"RESULT: resumed after %s; rtc alarm now %q; touch moved=%v, rtc moved=%v, power moved=%v. %s",
+		elapsed.Round(time.Second), alarmAfter, touchMoved, rtcMoved, powerMoved, verdict))
 	return b.String()
 }
 
-// wakeupSourceSnapshot returns the debugfs wakeup_sources lines for the touch
-// panel (2-0024) and RTC (bd70528-rtc), the two sources that matter here.
+// wakeupSourceSnapshot returns the debugfs wakeup_sources lines for the sources
+// that matter to us: the touch panel (2-0024), the RTC (bd70528-rtc), and the
+// power button (gpio-keys / bd71827-power).
 func wakeupSourceSnapshot(ctx context.Context) string {
-	out := strings.TrimSpace(shell(ctx, "grep -E '^(2-0024|bd70528-rtc)' /sys/kernel/debug/wakeup_sources 2>/dev/null"))
+	out := strings.TrimSpace(shell(ctx, "grep -E '^(2-0024|bd70528-rtc|gpio-keys|bd71827-power)' /sys/kernel/debug/wakeup_sources 2>/dev/null"))
 	if out == "" {
 		return "<unavailable>"
 	}
