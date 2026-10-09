@@ -294,6 +294,41 @@ func (tc *TrackerClient) cleanup() {
 	lipcSet("com.lab126.appmgrd", "start", "app://com.lab126.booklet.home")
 }
 
+// releaseScreenSaver lets the device sleep again (used by oneshot/sleep modes
+// so we don't hold the SoC awake between renders).
+func (tc *TrackerClient) releaseScreenSaver() {
+	lipcSet("com.lab126.powerd", "preventScreenSaver", "0")
+}
+
+// armRTCWake programs the hardware RTC to wake the device after `in` seconds.
+// It prefers powerd's rtcWakeup property (which cooperates with Amazon's power
+// state machine) and falls back to rtcwake against /dev/rtc0. Returns the
+// mechanism used, or "" on failure.
+func (tc *TrackerClient) armRTCWake(in time.Duration) string {
+	secs := int(in.Seconds())
+	if secs < 1 {
+		secs = 1
+	}
+	want := strconv.Itoa(secs)
+
+	// Preferred: powerd manages the RTC alarm and the suspend/resume cycle.
+	// Verify by reading the property back, since rtcWakeup is readable even
+	// when unset.
+	lipcSet("com.lab126.powerd", "rtcWakeup", want)
+	if got := lipcGet("com.lab126.powerd", "rtcWakeup"); got == want {
+		return "powerd.rtcWakeup"
+	}
+
+	// Fallback: program the RTC directly, then let powerd suspend.
+	cmd := execCommand("rtcwake", "-d", "/dev/rtc0", "-m", "no", "-s", want)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err == nil {
+		return "rtcwake"
+	}
+	return ""
+}
+
 // cycleFrontlight advances brightness: Off (0) -> Cozy (8) -> Bright (18) -> Off (0)
 func (tc *TrackerClient) cycleFrontlight() {
 	tc.mu.Lock()
@@ -689,9 +724,12 @@ func main() {
 	run(context.Background())
 }
 
-// run performs the full startup sequence and blocks in the poll loop until ctx
-// is cancelled. Kept separate from main so it can be exercised in tests.
+// run dispatches on the requested run mode. The default (resident) mode blocks
+// in the poll loop; oneshot renders once and exits; sleep renders, arms an RTC
+// wake, and cycles through device suspend.
 func run(parent context.Context) {
+	mode := ResolveRunMode(os.Args)
+
 	serverURL := GetServerURL()
 	initialView := ResolveViewMode(os.Args)
 	ctx, cancel := context.WithCancel(parent)
@@ -703,7 +741,7 @@ func run(parent context.Context) {
 	_ = osWriteFile("/mnt/us/documents/tracker_server.txt", []byte(serverURL), 0644)
 
 	// Send initial startup diagnostic
-	tc.logRemote(fmt.Sprintf("Transit Tracker v%s starting up (server: %s, view: %s)...", Version, serverURL, initialView))
+	tc.logRemote(fmt.Sprintf("Transit Tracker v%s starting up (mode: %s, server: %s, view: %s)...", Version, mode, serverURL, initialView))
 	if devData, err := osReadFile("/proc/bus/input/devices"); err == nil {
 		tc.logRemote(fmt.Sprintf("Input devices:\n%s", string(devData)))
 	}
@@ -712,7 +750,15 @@ func run(parent context.Context) {
 	// only; the active probe runs on request) so the server can track the fleet.
 	tc.postDiagnostics(false)
 
-	// Ensure Kindle stays awake while dashboard is running
+	if mode == ModeOneshot {
+		// Render exactly once and exit, leaving the image on screen. Deliberately
+		// do NOT set preventScreenSaver or run cleanup (which clears the screen).
+		tc.logRemote("Oneshot mode: rendering once and exiting.")
+		tc.fetchAndDrawDashboard(ctx, cancel)
+		return
+	}
+
+	// Ensure Kindle stays awake while the dashboard is running
 	lipcSet("com.lab126.powerd", "preventScreenSaver", "1")
 
 	// Intercept OS termination signals
@@ -728,9 +774,64 @@ func run(parent context.Context) {
 	tc.startInputListeners(ctx, cancel)
 	go tc.startPowerListener(ctx, cancel)
 
-	// Initial fetch
+	if mode == ModeSleep {
+		tc.runSleepLoop(ctx, cancel)
+		return
+	}
+
+	// Resident mode: initial fetch, then the poll loop.
 	initialPollSec := tc.fetchAndDrawDashboard(ctx, cancel)
 	tc.runPollLoop(ctx, cancel, tc.getNextPollInterval(initialPollSec))
+}
+
+// runSleepLoop is the low-power mode: render the dashboard, release the
+// screensaver, arm the RTC to wake for the next interval, and block until the
+// device resumes (or the wait times out, in which case it simply re-renders).
+// This trades the adaptive per-poll cadence for real suspend between updates.
+func (tc *TrackerClient) runSleepLoop(ctx context.Context, cancel context.CancelFunc) {
+	for {
+		select {
+		case <-ctx.Done():
+			tc.cleanup()
+			return
+		default:
+		}
+
+		serverPollSec := tc.fetchAndDrawDashboard(ctx, cancel)
+		wait := alignDelay(time.Now(), tc.getNextPollInterval(serverPollSec))
+
+		tc.releaseScreenSaver()
+		mech := tc.armRTCWake(wait)
+		if mech == "" {
+			tc.logRemote("Sleep mode: could not arm RTC; relying on wall-clock wait.")
+		} else {
+			tc.logRemote(fmt.Sprintf("Sleep mode: armed wake in %s via %s", wait.Round(time.Second), mech))
+		}
+
+		select {
+		case <-ctx.Done():
+			tc.cleanup()
+			return
+		case <-tc.waitForResume(ctx, wait):
+		}
+	}
+}
+
+// waitForResume blocks until the device resumes from suspend (via
+// lipc-wait-event) or `fallback` elapses, whichever is first. It ensures we
+// cannot wedge forever if the RTC wake is never delivered.
+func (tc *TrackerClient) waitForResume(ctx context.Context, fallback time.Duration) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		waitCtx, waitCancel := context.WithTimeout(ctx, fallback+30*time.Second)
+		defer waitCancel()
+		cmd := execCommandContext(waitCtx, "lipc-wait-event", "-m", "com.lab126.powerd", "resuming")
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+		_ = cmd.Run()
+	}()
+	return done
 }
 
 // runPollLoop drives the fetch/OTA cycle until ctx is cancelled. `interval` is

@@ -116,6 +116,37 @@ func TestGetServerURL_DefaultFallback(t *testing.T) {
 	GetServerURL() // must not panic; returns some default
 }
 
+func TestResolveRunMode(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want RunMode
+	}{
+		{"default resident", []string{"/tmp/tracker"}, ModeResident},
+		{"explicit resident", []string{"/tmp/tracker", "-resident"}, ModeResident},
+		{"oneshot", []string{"/tmp/tracker", "-oneshot"}, ModeOneshot},
+		{"oneshot double dash", []string{"/tmp/tracker", "--oneshot"}, ModeOneshot},
+		{"sleep", []string{"/tmp/tracker", "-sleep"}, ModeSleep},
+		{"sleep double dash", []string{"/tmp/tracker", "--sleep"}, ModeSleep},
+		{"oneshot wins over sleep", []string{"/tmp/tracker", "-sleep", "-oneshot"}, ModeOneshot},
+		{"oneshot wins regardless of order", []string{"/tmp/tracker", "-oneshot", "-sleep"}, ModeOneshot},
+		{"resident after sleep", []string{"/tmp/tracker", "-sleep", "-resident"}, ModeResident},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ResolveRunMode(tt.args); got != tt.want {
+				t.Errorf("ResolveRunMode(%v) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunModeString(t *testing.T) {
+	if ModeResident.String() != "resident" || ModeOneshot.String() != "oneshot" || ModeSleep.String() != "sleep" {
+		t.Errorf("unexpected mode strings: %s %s %s", ModeResident, ModeOneshot, ModeSleep)
+	}
+}
+
 func TestResolveViewMode(t *testing.T) {
 	tests := []struct {
 		name string

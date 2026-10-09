@@ -515,6 +515,197 @@ func TestLogRemoteQueueDoesNotBlockAndDropsWhenFull(t *testing.T) {
 	}
 }
 
+func TestArmRTCWake_PrefersPowerdProp(t *testing.T) {
+	patchRuntime(t)
+	var setVal string
+	execCommand = func(name string, arg ...string) *exec.Cmd {
+		// lipc-set-prop writes the value; lipc-get-prop reads it back.
+		if name == "lipc-set-prop" && len(arg) >= 4 && arg[2] == "rtcWakeup" {
+			setVal = arg[3]
+		}
+		if name == "lipc-get-prop" {
+			return exec.Command("echo", setVal)
+		}
+		return exec.Command("true")
+	}
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	if mech := tc.armRTCWake(90 * time.Second); mech != "powerd.rtcWakeup" {
+		t.Errorf("expected powerd.rtcWakeup, got %q", mech)
+	}
+	if setVal != "90" {
+		t.Errorf("expected rtcWakeup=90, got %q", setVal)
+	}
+}
+
+func TestArmRTCWake_FallsBackToRtcwake(t *testing.T) {
+	patchRuntime(t)
+	var rtcwakeCalled bool
+	execCommand = func(name string, arg ...string) *exec.Cmd {
+		if name == "lipc-get-prop" {
+			return exec.Command("false") // property not readable -> fall back
+		}
+		if name == "rtcwake" {
+			rtcwakeCalled = true
+			return exec.Command("true")
+		}
+		return exec.Command("true")
+	}
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	if mech := tc.armRTCWake(90 * time.Second); mech != "rtcwake" {
+		t.Errorf("expected rtcwake, got %q", mech)
+	}
+	if !rtcwakeCalled {
+		t.Error("expected rtcwake to be invoked")
+	}
+}
+
+func TestArmRTCWake_ClampsMinimum(t *testing.T) {
+	patchRuntime(t)
+	var setVal string
+	execCommand = func(name string, arg ...string) *exec.Cmd {
+		if name == "lipc-set-prop" && len(arg) >= 4 && arg[2] == "rtcWakeup" {
+			setVal = arg[3]
+		}
+		return exec.Command("echo", setVal)
+	}
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	tc.armRTCWake(-5 * time.Second)
+	if setVal != "1" {
+		t.Errorf("expected clamped value 1, got %q", setVal)
+	}
+}
+
+func TestRunOneshotRendersAndExitsWithoutCleanup(t *testing.T) {
+	patchRuntime(t)
+	png := []byte{0x89, 0x50, 0x4E, 0x47}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/diag" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("X-Kindle-Poll-Interval", "60")
+		w.WriteHeader(http.StatusOK)
+		w.Write(png)
+	}))
+	defer srv.Close()
+
+	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
+	osCreate = tempFileCreate(t)
+	globInputs = func(string) ([]string, error) { return nil, nil }
+	osOpen = func(string) (*os.File, error) { return nil, os.ErrNotExist }
+	origDiscover := autoDiscover
+	autoDiscover = func(context.Context) (string, error) { return srv.URL, nil }
+	defer func() { autoDiscover = origDiscover }()
+
+	// Capture commands to ensure oneshot does NOT clear the screen via 'eips -c'
+	// and does NOT set preventScreenSaver=1.
+	var cleanedScreen, heldAwake bool
+	orig := execCommand
+	execCommand = func(name string, arg ...string) *exec.Cmd {
+		if name == "eips" && len(arg) > 0 && arg[0] == "-c" {
+			cleanedScreen = true
+		}
+		if name == "lipc-set-prop" && len(arg) >= 4 && arg[2] == "preventScreenSaver" && arg[3] == "1" {
+			heldAwake = true
+		}
+		return orig("true")
+	}
+	defer func() { execCommand = orig }()
+
+	origArgs := os.Args
+	// Pass an explicit -server so GetServerURL doesn't consult a stale
+	// /tmp/tracker_server.txt left by another test.
+	os.Args = []string{"/tmp/tracker", "-oneshot", "-server", srv.URL}
+	defer func() { os.Args = origArgs }()
+
+	done := make(chan struct{})
+	go func() {
+		run(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("oneshot run should return promptly")
+	}
+	if cleanedScreen {
+		t.Error("oneshot must not clear the screen")
+	}
+	if heldAwake {
+		t.Error("oneshot must not set preventScreenSaver=1")
+	}
+}
+
+func TestReleaseScreenSaver(t *testing.T) {
+	patchRuntime(t)
+	var setKey, setVal string
+	orig := execCommand
+	execCommand = func(name string, arg ...string) *exec.Cmd {
+		if name == "lipc-set-prop" && len(arg) >= 4 {
+			setKey, setVal = arg[2], arg[3]
+		}
+		return orig("true")
+	}
+	defer func() { execCommand = orig }()
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	tc.releaseScreenSaver()
+	if setKey != "preventScreenSaver" || setVal != "0" {
+		t.Errorf("expected preventScreenSaver=0, got %s=%s", setKey, setVal)
+	}
+}
+
+func TestRunSleepLoop_RendersArmsAndResumes(t *testing.T) {
+	patchRuntime(t)
+	png := []byte{0x89, 0x50, 0x4E, 0x47}
+	var fetches int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/diag" || r.URL.Path == "/log" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		atomic.AddInt32(&fetches, 1)
+		w.Header().Set("X-Kindle-Poll-Interval", "60")
+		w.Header().Set("ETag", `"x"`)
+		w.WriteHeader(http.StatusOK)
+		w.Write(png)
+	}))
+	defer srv.Close()
+	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
+	osCreate = tempFileCreate(t)
+	osReadFile = func(string) ([]byte, error) { return nil, os.ErrNotExist }
+
+	orig := execCommand
+	execCommand = func(name string, arg ...string) *exec.Cmd {
+		// Make lipc-wait-event return immediately so the loop iterates fast.
+		return orig("true")
+	}
+	defer func() { execCommand = orig }()
+
+	tc := NewTrackerClient(srv.URL, "auto")
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		tc.runSleepLoop(ctx, cancel)
+		close(done)
+	}()
+
+	// Let it complete a couple of render->arm->resume cycles, then stop.
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&fetches) < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runSleepLoop did not exit on cancel")
+	}
+	if atomic.LoadInt32(&fetches) < 2 {
+		t.Errorf("expected at least 2 fetch cycles, got %d", atomic.LoadInt32(&fetches))
+	}
+}
+
 func TestPostDiagnosticsUploadsReport(t *testing.T) {
 	patchRuntime(t)
 	got := make(chan [2]string, 1)

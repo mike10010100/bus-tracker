@@ -110,6 +110,55 @@ func GetServerURL() string {
 	)
 }
 
+// RunMode selects how long the client runs.
+type RunMode int
+
+const (
+	// ModeResident is the default: stay alive and poll on a timer.
+	ModeResident RunMode = iota
+	// ModeOneshot fetches and draws exactly once, then exits, leaving the
+	// rendered image on screen (it does NOT clear the display).
+	ModeOneshot
+	// ModeSleep renders once, programs an RTC wake for the next interval, and
+	// lets the device suspend, looping on each resume. This is the low-power
+	// mode for RTC-capable devices (Kindle + rtcwake/powerd).
+	ModeSleep
+)
+
+// String renders the mode for logging.
+func (m RunMode) String() string {
+	switch m {
+	case ModeOneshot:
+		return "oneshot"
+	case ModeSleep:
+		return "sleep"
+	default:
+		return "resident"
+	}
+}
+
+// ResolveRunMode parses the run mode from arguments. Flags:
+//
+//	-oneshot            -> ModeOneshot
+//	-sleep              -> ModeSleep
+//	-resident (default) -> ModeResident
+//
+// -oneshot wins if both appear (it is the more conservative, single-shot mode).
+func ResolveRunMode(args []string) RunMode {
+	mode := ModeResident
+	for _, arg := range args {
+		switch strings.ToLower(strings.TrimSpace(arg)) {
+		case "-oneshot", "--oneshot":
+			return ModeOneshot
+		case "-sleep", "--sleep":
+			mode = ModeSleep
+		case "-resident", "--resident":
+			mode = ModeResident
+		}
+	}
+	return mode
+}
+
 // ResolveViewMode parses the initial view mode from command-line arguments ('morning', 'evening', 'auto').
 // Defaults to 'auto'.
 func ResolveViewMode(args []string) string {
