@@ -438,9 +438,9 @@ func TestActionTouchWakeTest_ArmsSafetyAndTogglesWakeup(t *testing.T) {
 	}
 	out := actionTouchWakeTest(context.Background())
 	joined := strings.Join(scripts, "\n")
-	// Must arm the RTC before suspending (safety net), toggle touch wakeup,
-	// suspend, and restore the wakeup toggle afterward.
-	for _, want := range []string{"wakealarm", "power/wakeup", "wirelessEnable 0", "/sys/power/state", "wirelessEnable 1"} {
+	// Must arm the RTC before suspending (safety net), snapshot + toggle touch
+	// wakeup, suspend, and restore the exact prior wakeup state afterward.
+	for _, want := range []string{"wakealarm", "power/wakeup", "/tmp/wakeup_before", "wirelessEnable 0", "/sys/power/state", "wirelessEnable 1"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("touch-wake-test missing %q\nran:\n%s", want, joined)
 		}

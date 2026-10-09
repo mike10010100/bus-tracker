@@ -163,12 +163,24 @@ func actionInputWakeProbe(ctx context.Context) string {
 		"c=$(cat $d/device/power/control 2>/dev/null || echo '<none>'); "+
 		"echo \"  $(basename $d) [$name] wakeup=$w control=$c\"; done") + "\n")
 
-	b.WriteString("armed wakeup sources (from /sys/power/wakeup_count + wake_lock):\n")
+	// The input node often isn't the wakeup-capable device; walk up its parents
+	// looking for a power/wakeup attribute.
+	b.WriteString("parent wakeup nodes (walking up from each event device):\n")
+	b.WriteString(shell(ctx, "for d in /sys/class/input/event*; do "+
+		"p=$(readlink -f $d/device 2>/dev/null); "+
+		"echo \"  $(basename $d) -> $p\"; "+
+		"while [ -n \"$p\" ] && [ \"$p\" != \"/\" ]; do "+
+		"if [ -e \"$p/power/wakeup\" ]; then "+
+		"echo \"      wakeup-capable: $p/power/wakeup = $(cat $p/power/wakeup 2>/dev/null)\"; fi; "+
+		"p=$(dirname $p); done; done") + "\n")
+
+	b.WriteString("all wakeup-capable devices in the tree:\n")
+	b.WriteString(shell(ctx, "find /sys/devices -name wakeup -path '*/power/*' 2>/dev/null | while read w; do "+
+		"v=$(cat $w 2>/dev/null); case \"$v\" in enabled|disabled) echo \"  $v  $w\";; esac; done") + "\n")
+
+	b.WriteString("armed/locked wakeup sources:\n")
 	b.WriteString(shell(ctx, "echo '  wake_lock:'; sed 's/^/    /' /sys/power/wake_lock 2>/dev/null; "+
-		"echo '  touch-like devices:'; "+
-		"for d in /sys/class/input/event*; do "+
-		"n=$(cat $d/device/name 2>/dev/null); "+
-		"case \"$n\" in *ouch*|*yttsp*|*orce*|*lan*|*ynaptics*) echo \"    $d: $n\";; esac; done") + "\n")
+		"echo '  wakeup_count: '$(cat /sys/power/wakeup_count 2>/dev/null)") + "\n")
 	return strings.TrimSpace(b.String())
 }
 
@@ -185,13 +197,28 @@ func actionTouchWakeTest(ctx context.Context) string {
 	// Safety net: arm the RTC first so we always wake even if nothing else does.
 	b.WriteString("arm rtc safety: " + shell(ctx, "echo 0 > /sys/class/rtc/rtc0/wakealarm; echo +120 > /sys/class/rtc/rtc0/wakealarm; echo rc=$?; cat /sys/class/rtc/rtc0/wakealarm") + "\n")
 
-	// Find touch input device(s) and enable wakeup on them. Names vary by panel.
+	// Snapshot every wakeup-capable ancestor of an input device, then enable
+	// wakeup on all of them. Snapshotting lets us restore the exact prior state
+	// (notably, we must not leave the power key unable to wake the device).
+	b.WriteString("snapshot wakeup: " + shell(ctx,
+		": > /tmp/wakeup_before; "+
+			"for d in /sys/class/input/event*; do "+
+			"p=$(readlink -f $d/device 2>/dev/null); "+
+			"while [ -n \"$p\" ] && [ \"$p\" != \"/\" ]; do "+
+			"if [ -e \"$p/power/wakeup\" ]; then "+
+			"echo \"$p $(cat $p/power/wakeup 2>/dev/null)\" >> /tmp/wakeup_before; fi; "+
+			"p=$(dirname $p); done; done; "+
+			"sort -u /tmp/wakeup_before") + "\n")
+
 	b.WriteString("enable touch wakeup: " + shell(ctx,
 		"for d in /sys/class/input/event*; do "+
 			"n=$(cat $d/device/name 2>/dev/null); "+
-			"case \"$n\" in *ouch*|*yttsp*|*orce*|*lan*|*ynaptics*) "+
-			"echo enabled > $d/device/power/wakeup 2>/dev/null; "+
-			"echo \"  $d [$n] -> wakeup=$(cat $d/device/power/wakeup 2>/dev/null)\";; esac; done; echo done") + "\n")
+			"p=$(readlink -f $d/device 2>/dev/null); "+
+			"while [ -n \"$p\" ] && [ \"$p\" != \"/\" ]; do "+
+			"if [ -e \"$p/power/wakeup\" ]; then "+
+			"echo enabled > $p/power/wakeup 2>/dev/null; "+
+			"echo \"  $(basename $d) [$n] $p -> wakeup=$(cat $p/power/wakeup 2>/dev/null)\"; fi; "+
+			"p=$(dirname $p); done; done; echo done") + "\n")
 
 	b.WriteString("stop framework: " + shell(ctx, "stop lab126_gui 2>&1; echo done") + "\n")
 	b.WriteString("unload screensaver: " + shell(ctx, "lipc-set-prop com.lab126.blanket unload screensaver 2>&1; echo done") + "\n")
@@ -210,12 +237,12 @@ func actionTouchWakeTest(ctx context.Context) string {
 
 	b.WriteString("wifi on: " + shell(ctx, "lipc-set-prop com.lab126.cmd wirelessEnable 1 2>&1; echo done") + "\n")
 
-	// Restore the wakeup source we toggled.
+	// Restore the exact prior state from the snapshot.
 	b.WriteString("restore wakeup: " + shell(ctx,
-		"for d in /sys/class/input/event*; do "+
-			"n=$(cat $d/device/name 2>/dev/null); "+
-			"case \"$n\" in *ouch*|*yttsp*|*orce*|*lan*|*ynaptics*) "+
-			"echo disabled > $d/device/power/wakeup 2>/dev/null;; esac; done; echo done") + "\n")
+		"while read -r path val; do "+
+			"[ -e \"$path\" ] && echo \"$val\" > \"$path\" 2>/dev/null; "+
+			"echo \"  $path restored to $(cat $path 2>/dev/null)\"; "+
+			"done < /tmp/wakeup_before; rm -f /tmp/wakeup_before; echo done") + "\n")
 
 	verdict := "INCONCLUSIVE"
 	switch {
