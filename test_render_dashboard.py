@@ -100,33 +100,40 @@ class TestDrawHelpers(unittest.TestCase):
         self.assertGreater(rd.draw_battery_indicator(d, 0, 0, 55, is_charging=True, font=rd.get_font(12)), 0)
 
 
-class TestDormantPresentation(unittest.TestCase):
-    def test_draw_dormant_strip_paints_bottom(self):
+class TestStatusPresentation(unittest.TestCase):
+    def test_draw_status_strip_paints_bottom(self):
         img = Image.new("RGB", (800, 480), "white")
         draw = ImageDraw.Draw(img)
-        rd.draw_dormant_strip(draw, 800, 480, note="SLEEPING — back at 6:00 AM")
+        rd.draw_status_strip(draw, 800, 480, note="PRESS POWER BUTTON TO INTERACT")
         # The bottom strip must have been painted (no longer pure white).
         self.assertNotEqual(img.getpixel((400, 460)), (255, 255, 255))
 
-    def test_dormant_render_differs_from_live(self):
-        live_out = "/tmp/test_live_pres.png"
+    def test_non_interactive_render_differs_from_interactive(self):
+        live_out = "/tmp/test_interactive_pres.png"
+        idle_out = "/tmp/test_idle_pres.png"
         dormant_out = "/tmp/test_dormant_pres.png"
         try:
             rd.render_dashboard(
                 _stops(), citibike_data=_cb(), output_path=live_out,
                 view="evening", is_mock=True, width=800, height=480,
-                presentation="live",
+                presentation="interactive",
+            )
+            rd.render_dashboard(
+                _stops(), citibike_data=_cb(), output_path=idle_out,
+                view="evening", is_mock=True, width=800, height=480,
+                presentation="idle", status_note="PRESS POWER BUTTON TO INTERACT",
             )
             rd.render_dashboard(
                 _stops(), citibike_data=_cb(), output_path=dormant_out,
                 view="evening", is_mock=True, width=800, height=480,
-                presentation="dormant", dormant_note="SLEEPING — back at 6:00 AM",
+                presentation="dormant", status_note="SLEEPING — back at 6:00 AM",
             )
-            with Image.open(live_out) as live, Image.open(dormant_out) as dormant:
-                self.assertEqual(live.size, dormant.size)
-                self.assertNotEqual(live.tobytes(), dormant.tobytes())
+            with Image.open(live_out) as live, Image.open(idle_out) as idle, Image.open(dormant_out) as dormant:
+                self.assertEqual(live.size, idle.size)
+                self.assertNotEqual(live.tobytes(), idle.tobytes())
+                self.assertNotEqual(idle.tobytes(), dormant.tobytes())
         finally:
-            for p in (live_out, dormant_out):
+            for p in (live_out, idle_out, dormant_out):
                 if os.path.exists(p):
                     os.remove(p)
 

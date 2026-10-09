@@ -59,10 +59,13 @@ type TrackerClient struct {
 	// press as a request to exit. In low-power dashboard mode it is false: the
 	// power key is a wake source, not an exit, so a press must not kill us.
 	exitOnPowerKey bool
-	// presentation is the server-advised visual/interaction state: "live" (a
-	// tappable dashboard during the day) or "dormant" (an inert "asleep" face
-	// overnight). It gates whether touch is armed as a wake source.
+	// presentation is the server-advised visual/interaction state: "interactive"
+	// (tappable dashboard, awake), "idle" (suspended; press power to interact)
+	// or "dormant" (overnight). Logged for observability.
 	presentation string
+	// interacting is true while the client is in an awake power-button session,
+	// during which it requests the full tappable dashboard from the server.
+	interacting bool
 }
 
 func NewTrackerClient(server string, initialView string) *TrackerClient {
@@ -78,7 +81,7 @@ func NewTrackerClient(server string, initialView string) *TrackerClient {
 		refreshCh:      make(chan struct{}, 1),
 		logCh:          make(chan string, 64),
 		exitOnPowerKey: true,
-		presentation:   "live",
+		presentation:   "interactive",
 	}
 }
 
@@ -384,33 +387,6 @@ func (tc *TrackerClient) disarmRTC() {
 	_ = osWriteFile(sysfsWakeAlarmPath, []byte("0"), 0644)
 }
 
-// armTouchWake enables or disables the touch panel as a system wakeup source.
-// Enabled, a screen tap resumes the SoC from suspend -- the mechanism that makes
-// the daytime dashboard tappable without staying awake. Disabled (overnight /
-// dormant), a tap cannot wake the device. The power key's wakeup capability is
-// never touched (its device name contains "pwrkey"). Returns the resulting
-// per-node state for logging.
-func (tc *TrackerClient) armTouchWake(ctx context.Context, enabled bool) string {
-	val := "disabled"
-	if enabled {
-		val = "enabled"
-	}
-	script := `for d in /sys/class/input/event*; do ` +
-		`n=$(cat $d/device/name 2>/dev/null); ` +
-		`case "$n" in *pwrkey*|*Power*|*power*) continue;; esac; ` +
-		`p=$(readlink -f $d/device 2>/dev/null); ` +
-		`while [ -n "$p" ] && [ "$p" != "/" ]; do ` +
-		`if [ -e "$p/power/wakeup" ]; then ` +
-		`echo ` + val + ` > "$p/power/wakeup" 2>/dev/null; ` +
-		`echo "$p/power/wakeup=$(cat $p/power/wakeup 2>/dev/null)"; fi; ` +
-		`p=$(dirname "$p"); done; done`
-	res := strings.TrimSpace(shell(ctx, script))
-	if res == "" {
-		return "<no touch wakeup node found>"
-	}
-	return strings.ReplaceAll(res, "\n", "; ")
-}
-
 // setPresentation records the server-advised visual/interaction state.
 func (tc *TrackerClient) setPresentation(p string) {
 	if p == "" {
@@ -421,14 +397,28 @@ func (tc *TrackerClient) setPresentation(p string) {
 	tc.mu.Unlock()
 }
 
-// getPresentation returns the current presentation ("live" by default).
+// getPresentation returns the current presentation ("interactive" by default).
 func (tc *TrackerClient) getPresentation() string {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	if tc.presentation == "" {
-		return "live"
+		return "interactive"
 	}
 	return tc.presentation
+}
+
+// setInteracting marks whether we are in an awake power-button session, during
+// which the dashboard is requested in its full tappable form.
+func (tc *TrackerClient) setInteracting(v bool) {
+	tc.mu.Lock()
+	tc.interacting = v
+	tc.mu.Unlock()
+}
+
+func (tc *TrackerClient) isInteracting() bool {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	return tc.interacting
 }
 
 // interactionHoldDuration is how long a touch wake keeps the device awake with
@@ -442,6 +432,9 @@ var interactionHoldDuration = 90 * time.Second
 func (tc *TrackerClient) interactionAwake(ctx context.Context, cancel context.CancelFunc, d time.Duration) bool {
 	// Hold the screensaver open so powerd doesn't auto-sleep mid-browse.
 	lipcSet("com.lab126.powerd", "preventScreenSaver", "1")
+	// Render the full tappable dashboard immediately: the user just pressed
+	// power to engage, and the suspended face was the inert strip.
+	tc.fetchAndDrawDashboard(ctx, cancel)
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	for {
@@ -747,6 +740,11 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	panel := tc.getPanelSize()
 	url := fmt.Sprintf("%s/dashboard.png?kindle=pw5&w=%d&h=%d&batt=%d&charging=%d&view=%s&t=%d",
 		server, panel.LandscapeW, panel.LandscapeH, batt.Level, chargeVal, viewMode, time.Now().Unix())
+	// While in an awake interaction session, ask for the full tappable dashboard
+	// regardless of the time-based presentation.
+	if tc.isInteracting() {
+		url += "&present=interactive"
+	}
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		tc.handleNetworkError(ctx)
@@ -1041,16 +1039,10 @@ func (tc *TrackerClient) runSleepLoop(ctx context.Context, cancel context.Cancel
 			tc.logRemote("Sleep mode: framework stopped, screensaver unloaded.")
 		}
 
-		// Arm the touch panel as a wake source only while "live" (daytime), so a
-		// tap resumes us for interaction. Overnight ("dormant") we leave it inert
-		// so the device truly isn't tappable.
-		live := tc.getPresentation() == "live"
-		wakeState := "disarmed"
-		if live {
-			wakeState = "armed"
-		}
-		tc.logRemote(fmt.Sprintf("Sleep mode: touch wake %s (%s).", wakeState, tc.armTouchWake(ctx, live)))
-
+		// Touch cannot wake this SoC (the Parade driver never arms its IRQ for
+		// wake, and the touch rails are cut in suspend), so we do not arm it.
+		// The power button is the wake source; pressing it starts an interaction
+		// session (detected below via a still-armed RTC alarm).
 		tc.releaseScreenSaver()
 		if !tc.armSysfsWake(interval) {
 			tc.logRemote("Sleep mode: could not arm RTC; wall-clock wait.")
@@ -1062,7 +1054,7 @@ func (tc *TrackerClient) runSleepLoop(ctx context.Context, cancel context.Cancel
 			continue
 		}
 
-		tc.logRemote(fmt.Sprintf("Sleep mode: suspending for %s (rtc armed).", interval.Round(time.Second)))
+		tc.logRemote(fmt.Sprintf("Sleep mode: suspending for %s (rtc armed, face=%s).", interval.Round(time.Second), tc.getPresentation()))
 		tc.setWireless(false)
 		time.Sleep(suspendSettleDelay)
 		elapsed, err := tc.enterSuspend()
@@ -1077,18 +1069,16 @@ func (tc *TrackerClient) runSleepLoop(ctx context.Context, cancel context.Cancel
 		}
 
 		// Wake reason: a fired RTC alarm clears itself, so a still-armed alarm
-		// means a person woke us (touch/power), not the schedule.
+		// means a person woke us by pressing the power button, not the schedule.
 		if tc.rtcAlarmStillArmed() {
 			tc.disarmRTC()
-			if live {
-				tc.logRemote(fmt.Sprintf("Touch wake after %s: staying awake for interaction.", elapsed.Round(time.Second)))
-				if !tc.interactionAwake(ctx, cancel, interactionHoldDuration) {
-					tc.cleanup()
-					return
-				}
-				continue
+			tc.logRemote(fmt.Sprintf("Power-button wake after %s: starting interactive session.", elapsed.Round(time.Second)))
+			tc.setInteracting(true)
+			if !tc.interactionAwake(ctx, cancel, interactionHoldDuration) {
+				tc.cleanup()
+				return
 			}
-			tc.logRemote(fmt.Sprintf("Non-RTC wake after %s while dormant; re-suspending.", elapsed.Round(time.Second)))
+			tc.setInteracting(false)
 			continue
 		}
 		tc.logRemote(fmt.Sprintf("Sleep mode: woke after %s.", elapsed.Round(time.Second)))

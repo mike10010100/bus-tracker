@@ -556,34 +556,42 @@ class TestDiscoveryAndLighting(unittest.TestCase):
         self.assertEqual(server.get_commute_lighting(off), (0, 0))
         self.assertEqual(server.get_target_poll_interval(off), 600)
 
-    def test_presentation_live_by_day_dormant_overnight(self):
+    def test_presentation_by_schedule(self):
         from datetime import datetime
         saved = server.FORCE_FAST_POLL
         server.FORCE_FAST_POLL = False
         try:
-            self.assertEqual(server.get_presentation(datetime(2026, 1, 1, 8, 0)), "live")
-            self.assertEqual(server.get_presentation(datetime(2026, 1, 1, 13, 0)), "live")
+            self.assertEqual(server.get_presentation(datetime(2026, 1, 1, 8, 0)), "interactive")  # peak
+            self.assertEqual(server.get_presentation(datetime(2026, 1, 1, 13, 0)), "idle")  # off-peak day
             self.assertEqual(server.get_presentation(datetime(2026, 1, 1, 23, 0)), "dormant")
             self.assertEqual(server.get_presentation(datetime(2026, 1, 1, 2, 0)), "dormant")
         finally:
             server.FORCE_FAST_POLL = saved
 
-    def test_dormant_note_announces_wake_time(self):
-        note = server.get_dormant_note()
-        self.assertIn("SLEEPING", note)
-        self.assertIn("not tappable", note)
+    def test_status_notes(self):
+        self.assertIn("SLEEPING", server.get_status_note("dormant"))
+        self.assertIn("press power", server.get_status_note("dormant").lower())
+        self.assertEqual(server.get_status_note("idle"), "PRESS POWER BUTTON TO INTERACT")
+        self.assertEqual(server.get_status_note("interactive"), "")
 
 
 class TestPresentationOverHTTP(ServerHTTPTestBase):
-    def test_dashboard_advertises_live_presentation(self):
+    def test_dashboard_advertises_presentation_header(self):
         saved = server.FORCE_FAST_POLL
         server.FORCE_FAST_POLL = False
         try:
             status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
             self.assertEqual(status, 200)
-            self.assertEqual(headers.get("X-Tracker-Presentation"), "live")
+            self.assertIn(headers.get("X-Tracker-Presentation"), ("interactive", "idle", "dormant"))
         finally:
             server.FORCE_FAST_POLL = saved
+
+    def test_dashboard_present_override_is_interactive(self):
+        status, headers, _body = _http_get(
+            self.port, "/dashboard.png?mock=1&kindle=pw5&present=interactive"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("X-Tracker-Presentation"), "interactive")
 
     def test_dashboard_renders_dormant_when_overnight(self):
         saved = server.get_presentation

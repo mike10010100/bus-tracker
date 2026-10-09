@@ -185,10 +185,10 @@ def get_fresh_data(use_mock=False):
     return stops_data, stop_status, cb_data
 
 
-def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False, view="auto", width=800, height=480, scale=1.0, presentation="live", dormant_note=""):
+def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False, view="auto", width=800, height=480, scale=1.0, presentation="interactive", status_note=""):
     stops_data, stop_status, cb_data = get_fresh_data(use_mock=use_mock)
 
-    cache_key = (use_mock, view, width, height, scale, batt_level, is_charging, presentation, dormant_note, _data_cache["time"])
+    cache_key = (use_mock, view, width, height, scale, batt_level, is_charging, presentation, status_note, _data_cache["time"])
     with _render_lock:
         cached = _render_cache.get(cache_key)
         if cached is not None:
@@ -209,7 +209,7 @@ def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False
         height=height,
         scale=scale,
         presentation=presentation,
-        dormant_note=dormant_note,
+        status_note=status_note,
     )
 
     with open(img_path, "rb") as f:
@@ -364,18 +364,36 @@ def is_overnight_hours(dt=None):
 def get_presentation(dt=None):
     """
     Returns the client-facing presentation state:
-    - "dormant" overnight (22:00-06:00): an inert "asleep" face with no button
-      affordances, and the client disarms touch-wake, so the device is honestly
-      not tappable.
-    - "live" otherwise: the tappable dashboard; touch can wake the device.
+    - "interactive" during peak commute: the client stays awake, so the panel is
+      a live, tappable dashboard with buttons.
+    - "idle" off-peak daytime: the client deep-suspends between polls and a tap
+      cannot wake the SoC, so the panel shows an inert "press power" strip.
+    - "dormant" overnight (22:00-06:00): deep-suspend with an inert "sleeping"
+      face; a power press still starts an interaction session.
 
-    FORCE_FAST_POLL=1 (testing) forces "live" so experiments are unaffected.
+    A client may override to "interactive" while it is awake in a power-button
+    interaction session (see the ?present= param).
+
+    FORCE_FAST_POLL=1 (testing) forces "interactive" so experiments are unaffected.
     """
     if FORCE_FAST_POLL:
-        return "live"
+        return "interactive"
+    if is_peak_commute_hours(dt=dt):
+        return "interactive"
     if is_overnight_hours(dt=dt):
         return "dormant"
-    return "live"
+    return "idle"
+
+
+def get_status_note(presentation):
+    """
+    Bottom-strip label for a non-interactive presentation (idle/dormant).
+    """
+    if presentation == "dormant":
+        return get_dormant_note()
+    if presentation == "idle":
+        return "PRESS POWER BUTTON TO INTERACT"
+    return ""
 
 
 def get_dormant_note():
@@ -387,7 +405,7 @@ def get_dormant_note():
     minute = int(round((OVERNIGHT_END - int(OVERNIGHT_END)) * 60)) % 60
     suffix = "AM" if hour < 12 else "PM"
     hour12 = hour % 12 or 12
-    return f"SLEEPING — back at {hour12}:{minute:02d} {suffix} · not tappable"
+    return f"SLEEPING — back at {hour12}:{minute:02d} {suffix} · press power to interact"
 
 
 def get_target_poll_interval(dt=None):
@@ -650,10 +668,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             is_charging = str(charging_param).lower() in ["1", "true", "yes"]
 
             is_kindle = kindle_mode == "pw5" or "kindle" in params
-            # The presentation tells the client whether the panel is a live,
-            # tappable dashboard or an inert overnight "asleep" face.
-            presentation = get_presentation()
-            dormant_note = get_dormant_note() if presentation == "dormant" else ""
+            # Presentation: "interactive" (live, tappable), "idle" (suspended;
+            # press power to interact) or "dormant" (overnight). A client in an
+            # awake power-button interaction session overrides to interactive.
+            # Desktop/web previews always render the full interactive dashboard.
+            interactive_override = params.get("present", [""])[0] == "interactive"
+            presentation = "interactive" if (interactive_override or not is_kindle) else get_presentation()
+            status_note = get_status_note(presentation)
             render_w = 800
             render_h = 480
 
@@ -681,7 +702,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     height=render_h,
                     scale=scale,
                     presentation=presentation,
-                    dormant_note=dormant_note,
+                    status_note=status_note,
                 )
                 img = format_for_kindle(img, orientation="landscape", rotation=rot_val,
                                         target=(land_w, land_h))
@@ -694,7 +715,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     width=render_w,
                     height=render_h,
                     presentation=presentation,
-                    dormant_note=dormant_note,
+                    status_note=status_note,
                 )
 
             buf = io.BytesIO()

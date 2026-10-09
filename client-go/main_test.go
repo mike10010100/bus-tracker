@@ -223,6 +223,44 @@ func TestFetchAndDrawDashboard_ReportsPanelDimensions(t *testing.T) {
 	}
 }
 
+func TestFetchAndDrawDashboard_InteractiveOverride(t *testing.T) {
+	patchRuntime(t)
+	png := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("X-Kindle-Poll-Interval", "600")
+		w.WriteHeader(http.StatusOK)
+		w.Write(png)
+	}))
+	defer srv.Close()
+
+	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
+	osCreate = tempFileCreate(t)
+
+	tc := NewTrackerClient(srv.URL, "auto")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Default (not interacting): no override, server decides the face.
+	tc.fetchAndDrawDashboard(ctx, cancel)
+	if strings.Contains(gotQuery, "present=interactive") {
+		t.Errorf("non-interacting fetch must not force interactive, got %q", gotQuery)
+	}
+
+	// In a session: request the full tappable dashboard.
+	tc.setInteracting(true)
+	if !tc.isInteracting() {
+		t.Fatal("setInteracting(true) should stick")
+	}
+	tc.fetchAndDrawDashboard(ctx, cancel)
+	if !strings.Contains(gotQuery, "present=interactive") {
+		t.Errorf("interacting fetch must request present=interactive, got %q", gotQuery)
+	}
+	tc.setInteracting(false)
+}
+
 func TestGetPanelSize_CachesDetection(t *testing.T) {
 	patchRuntime(t)
 	calls := 0
@@ -1399,40 +1437,10 @@ func TestRTCAlarmStillArmed(t *testing.T) {
 	}
 }
 
-func TestArmTouchWake_TogglesAndSkipsPowerKey(t *testing.T) {
-	patchRuntime(t)
-	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-
-	var scripts []string
-	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
-		if name == "sh" && len(arg) >= 2 {
-			scripts = append(scripts, arg[1])
-		}
-		return exec.Command("echo", "/sys/x/power/wakeup=enabled")
-	}
-
-	out := tc.armTouchWake(context.Background(), true)
-	joined := strings.Join(scripts, "\n")
-	for _, want := range []string{"power/wakeup", "*pwrkey*", "continue", "enabled"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("armTouchWake(true) missing %q in:\n%s", want, joined)
-		}
-	}
-	if !strings.Contains(out, "power/wakeup") {
-		t.Errorf("expected node state reported, got %q", out)
-	}
-
-	scripts = nil
-	tc.armTouchWake(context.Background(), false)
-	if !strings.Contains(strings.Join(scripts, "\n"), "disabled") {
-		t.Error("armTouchWake(false) should write 'disabled'")
-	}
-}
-
 func TestPresentationRoundTrip(t *testing.T) {
 	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-	if tc.getPresentation() != "live" {
-		t.Errorf("default presentation = %q, want live", tc.getPresentation())
+	if tc.getPresentation() != "interactive" {
+		t.Errorf("default presentation = %q, want interactive", tc.getPresentation())
 	}
 	tc.setPresentation("dormant")
 	if tc.getPresentation() != "dormant" {

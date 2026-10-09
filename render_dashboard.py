@@ -405,18 +405,19 @@ def draw_bottom_button_bar(
         draw.text((x0 + (col_w - tw) // 2, btn_y0 + (btn_h - th) // 2 - 1), label, fill=fg, font=font)
 
 
-def draw_dormant_strip(
+def draw_status_strip(
     draw: ImageDraw.ImageDraw,
     width: int,
     height: int,
     note: str = "",
 ):
     """
-    Overpaints the bottom button bar with an inert "asleep" strip.
+    Overpaints the bottom button bar with an inert status strip.
 
-    In dormant (overnight) presentation the device is intentionally not
-    tappable, so rendering buttons there would be deceptive. This erases the
-    button row and draws a clear, non-interactive status strip instead.
+    Used whenever the panel is NOT currently interactive (idle-while-suspended
+    or overnight dormant): drawing live buttons there would be deceptive,
+    because a tap cannot wake the suspended SoC on this hardware. The strip
+    states how to bring the dashboard to life (press the power button).
     """
     is_tall = height >= 580
     btn_y0 = height - (44 if is_tall else 38)
@@ -426,7 +427,7 @@ def draw_dormant_strip(
     draw.rectangle([0, btn_y0 - 9, width, height], fill="white")
     draw.line([(20, btn_y0 - 8), (width - 20, btn_y0 - 8)], fill="#dddddd", width=1)
 
-    label = note or "SLEEPING — updates hourly · not tappable"
+    label = note or "PRESS POWER BUTTON TO INTERACT"
     font = get_font(12, bold=True)
     draw.rounded_rectangle(
         [20, btn_y0, width - 20, btn_y1], radius=6, fill="#f2f2f2", outline="#999999", width=2
@@ -961,16 +962,18 @@ def render_dashboard(
     width: int = WIDTH,
     height: int = HEIGHT,
     scale: float = 1.0,
-    presentation: str = "live",
-    dormant_note: str = "",
+    presentation: str = "interactive",
+    status_note: str = "",
 ) -> str:
     """
     Renders a high-contrast black-and-white image optimized for e-ink
     or low-power dashboard screens (default 800x480, or 800x600 for 4:3 displays).
     Supports 'morning' (Citi Bike Hero) and 'evening' (Bus Hero) view modes.
 
-    presentation="dormant" replaces the button bar with an inert "asleep" strip
-    (overnight), so the panel never shows buttons that aren't tappable.
+    presentation:
+      - "interactive": a live, tappable dashboard (buttons drawn).
+      - anything else ("idle"/"dormant"): replaces the button bar with an inert
+        status strip, so the panel never shows buttons that aren't tappable.
 
     stop_status maps stop id -> fetch status ('ok'/'empty'/'error') so that an
     upstream outage can be distinguished from a genuine absence of buses.
@@ -1023,10 +1026,10 @@ def render_dashboard(
             height=height,
         )
 
-    # Overnight/dormant: erase the button bar and mark the panel as asleep so it
-    # does not masquerade as tappable.
-    if presentation == "dormant":
-        draw_dormant_strip(draw, width, height, note=dormant_note)
+    # Not interactive (idle-while-suspended or overnight): erase the button bar
+    # and show a status strip so the panel does not masquerade as tappable.
+    if presentation != "interactive":
+        draw_status_strip(draw, width, height, note=status_note)
 
     # Save output
     img.save(output_path, "PNG")
