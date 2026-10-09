@@ -6,7 +6,7 @@ import unittest
 import zipfile
 from unittest.mock import MagicMock, patch
 
-from gtfs_bus import GTFSBusTracker, hms_to_secs, format_eta, format_clock
+from gtfs_bus import GTFSBusTracker, hms_to_secs, format_eta, format_clock, LIVE_MARK, SCHED_MARK
 
 
 def make_zip():
@@ -60,11 +60,14 @@ class TestParsingHelpers(unittest.TestCase):
         self.assertEqual(hms_to_secs("25:30:00"), 25 * 3600 + 30 * 60)
         self.assertEqual(hms_to_secs("bad"), -1)
 
-    def test_format_eta_rounds(self):
+    def test_format_eta_rounds_and_marks(self):
         now = 1_000_000.0
-        s = format_eta(now + 7 * 60 + 20, now)
-        self.assertTrue(s.startswith("in 7 mins ("))
-        self.assertEqual(eta_minutes(s), 7)
+        live = format_eta(now + 7 * 60 + 20, now, live=True)
+        self.assertTrue(live.startswith(LIVE_MARK))
+        self.assertEqual(eta_minutes(live), 7)
+        sched = format_eta(now + 7 * 60 + 20, now, live=False)
+        self.assertTrue(sched.startswith(SCHED_MARK))
+        self.assertEqual(eta_minutes(sched), 7)
 
     def test_format_clock_not_empty(self):
         self.assertIn(":", format_clock(1_000_000.0))
@@ -119,20 +122,28 @@ class TestGetUpcoming(unittest.TestCase):
         t.fetch_realtime = MagicMock(return_value={
             "A": {"20512": {"time": base + 600, "delay": 600, "vehicle_id": "v9"}},
         })
+        t.fetch_occupancy = MagicMock(return_value={
+            "A": {"occupancy": "FEW_SEATS_AVAILABLE", "vehicle_id": "v9"},
+        })
         out = t.get_upcoming("20512", limit=5, allow_realtime=True, now=now)
         self.assertEqual(len(out), 1)
         self.assertTrue(out[0]["live"])
         self.assertEqual(out[0]["vehicle_id"], "v9")
+        self.assertEqual(out[0]["occupancy"], "FEW_SEATS_AVAILABLE")
+        self.assertTrue(out[0]["eta"].startswith(LIVE_MARK))
         # 08:10 vs now 07:30 -> ~40 mins
         self.assertIn(eta_minutes(out[0]["eta"]), (39, 40, 41))
 
     def test_realtime_unavailable_falls_back_to_schedule(self):
         t = build_tracker()
         t.fetch_realtime = MagicMock(return_value={})
+        t.fetch_occupancy = MagicMock(return_value={})
         now = datetime.datetime(2026, 10, 12, 7, 30)
         out = t.get_upcoming("20512", limit=5, now=now)
         self.assertEqual(len(out), 1)
         self.assertFalse(out[0]["live"])
+        self.assertIsNone(out[0]["occupancy"])
+        self.assertTrue(out[0]["eta"].startswith(SCHED_MARK))
 
     def test_limit_respected(self):
         t = build_tracker()
@@ -144,6 +155,53 @@ class TestGetUpcoming(unittest.TestCase):
         t = GTFSBusTracker(route="126", stops=["20512"], cache_dir="/tmp/nonexistent")
         t.ensure_index = MagicMock(return_value=None)
         self.assertEqual(t.get_upcoming("20512"), [])
+
+
+class TestFetchOccupancy(unittest.TestCase):
+    def test_maps_vehicle_occupancy_and_filters_to_known_trips(self):
+        from google.transit import gtfs_realtime_pb2
+
+        t = build_tracker()  # knows trips A, B, C
+        fm = gtfs_realtime_pb2.FeedMessage()
+        fm.header.gtfs_realtime_version = "2.0"
+        e1 = fm.entity.add()
+        e1.id = "0"
+        e1.vehicle.trip.trip_id = "A"
+        e1.vehicle.vehicle.id = "v1"
+        e1.vehicle.occupancy_status = 2  # FEW_SEATS_AVAILABLE
+        e2 = fm.entity.add()
+        e2.id = "1"
+        e2.vehicle.trip.trip_id = "ZZZ"  # not our route -> filtered out
+        e2.vehicle.vehicle.id = "v2"
+        e2.vehicle.occupancy_status = 1
+        t.get_token = MagicMock(return_value="tok")
+        t.session.get = MagicMock(return_value=MagicMock(
+            raise_for_status=MagicMock(), content=fm.SerializeToString()))
+
+        out = t.fetch_occupancy()
+        self.assertEqual(out["A"]["occupancy"], "FEW_SEATS_AVAILABLE")
+        self.assertEqual(out["A"]["vehicle_id"], "v1")
+        self.assertNotIn("ZZZ", out)
+
+    def test_fetch_errors_return_empty(self):
+        t = build_tracker()
+        t.get_token = MagicMock(side_effect=Exception("auth down"))
+        self.assertEqual(t.fetch_occupancy(), {})
+
+    def test_no_data_occupancy_is_none(self):
+        from google.transit import gtfs_realtime_pb2
+
+        t = build_tracker()
+        fm = gtfs_realtime_pb2.FeedMessage()
+        fm.header.gtfs_realtime_version = "2.0"
+        e = fm.entity.add()
+        e.id = "0"
+        e.vehicle.trip.trip_id = "A"
+        e.vehicle.occupancy_status = 7  # NO_DATA_AVAILABLE
+        t.get_token = MagicMock(return_value="tok")
+        t.session.get = MagicMock(return_value=MagicMock(
+            raise_for_status=MagicMock(), content=fm.SerializeToString()))
+        self.assertIsNone(t.fetch_occupancy()["A"]["occupancy"])
 
 
 class TestAuth(unittest.TestCase):

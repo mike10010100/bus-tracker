@@ -849,8 +849,18 @@ def render_evening_view(
 
             bus_num = first_bus.get("vehicle_id")
             load = first_bus.get("occupancy")
-            load_clean = load.replace("_", " ").title() if load and load != "EMPTY" else "Seats Available"
-            bus_meta = f"Bus #{bus_num}  •  {load_clean}" if bus_num else f"Status: {load_clean}"
+            if load == "EMPTY":
+                load_clean = "Seats Available"
+            elif load:
+                load_clean = load.replace("_", " ").title()
+            else:
+                load_clean = None  # no live vehicle data (schedule-only)
+            if bus_num and load_clean:
+                bus_meta = f"Bus #{bus_num}  •  {load_clean}"
+            elif bus_num:
+                bus_meta = f"Bus #{bus_num}"
+            else:
+                bus_meta = "Scheduled — no live vehicle"
             bus_meta = ellipsize_to_width(draw, bus_meta, font_detail, card_text_max_w)
             draw.text((x0 + 16, cy + (102 if is_tall else (94 if has_citibike else 104))), bus_meta, fill="#444444", font=font_detail)
 

@@ -36,6 +36,24 @@ except Exception:  # pragma: no cover - exercised only when the dep is missing
 
 _DAY_KEYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
+# GTFS-Realtime OccupancyStatus enum -> the string the renderer understands
+# (it title-cases "FEW_SEATS_AVAILABLE" -> "Few Seats Available"). NO_DATA -> None.
+_OCCUPANCY = {
+    0: "EMPTY",
+    1: "MANY_SEATS_AVAILABLE",
+    2: "FEW_SEATS_AVAILABLE",
+    3: "STANDING_ROOM_ONLY",
+    4: "CRUSHED_STANDING_ROOM_ONLY",
+    5: "FULL",
+    6: "NOT_ACCEPTING_PASSENGERS",
+    7: None,
+}
+
+# Live/scheduled eta markers (DejaVu Sans has both glyphs; the renderer already
+# uses ● separators and → arrows).
+LIVE_MARK = "\u25cf "   # filled circle
+SCHED_MARK = "\u25cb "  # hollow circle
+
 # How often the static schedule is re-downloaded. The upstream window is only a
 # few days, so refresh daily.
 STATIC_TTL = 20 * 3600
@@ -60,12 +78,16 @@ def format_clock(epoch: float) -> str:
     return dt.strftime("%I:%M %p").lstrip("0")
 
 
-def format_eta(epoch: float, now: float) -> str:
-    """Human ETA like 'in 5 mins (5:35 PM)' matching the renderer's parser."""
+def format_eta(epoch: float, now: float, live: bool = False) -> str:
+    """
+    Human ETA like '● in 5 mins (5:35 PM)' (live, real-time) or
+    '○ in 9 mins (5:39 PM)' (scheduled). The leading glyph is the live/scheduled
+    marker; the renderer's parse_minutes regex still finds the minute count.
+    """
     mins = int(round((epoch - now) / 60.0))
     if mins < 0:
         mins = 0
-    return f"in {mins} mins ({format_clock(epoch)})"
+    return f"{LIVE_MARK if live else SCHED_MARK}in {mins} mins ({format_clock(epoch)})"
 
 
 class GTFSBusTracker:
@@ -75,6 +97,7 @@ class GTFSBusTracker:
     AUTH_PATH = "/api/GTFSG2/authenticateUser"
     STATIC_PATH = "/api/GTFSG2/getGTFS"
     TRIPS_PATH = "/api/GTFSG2/getTripUpdates"
+    VEHICLES_PATH = "/api/GTFSG2/getVehiclePositions"
 
     def __init__(
         self,
@@ -100,6 +123,8 @@ class GTFSBusTracker:
         self._index: Optional[Dict[str, Any]] = None
         self._realtime: Optional[Dict[str, Dict[str, Any]]] = None
         self._realtime_at: float = 0
+        self._occupancy: Optional[Dict[str, Dict[str, Any]]] = None
+        self._occupancy_at: float = 0
 
     # -- URLs --------------------------------------------------------------
     @property
@@ -113,6 +138,10 @@ class GTFSBusTracker:
     @property
     def trips_url(self) -> str:
         return self.base_url + self.TRIPS_PATH
+
+    @property
+    def vehicles_url(self) -> str:
+        return self.base_url + self.VEHICLES_PATH
 
     @property
     def _index_path(self) -> str:
@@ -303,6 +332,38 @@ class GTFSBusTracker:
                 out.setdefault(tid, {})[sid] = {"time": when, "delay": delay, "vehicle_id": vid}
         return out
 
+    def fetch_occupancy(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Fetches GTFS-RT vehicle positions (small, ~86 KB) and returns
+        trip_id -> {occupancy, vehicle_id}. The trip-update feed carries no
+        occupancy, but the vehicle feed does.
+        """
+        out: Dict[str, Dict[str, Any]] = {}
+        if not _REALTIME_AVAILABLE:
+            return out
+        known = (self._index or {}).get("trips", {})
+        try:
+            self.get_token()
+            resp = self.session.get(self.vehicles_url, params={"token": self.token}, timeout=30)
+            resp.raise_for_status()
+            feed = gtfs_realtime_pb2.FeedMessage()
+            feed.ParseFromString(resp.content)
+        except Exception as e:
+            print(f"[GTFS] vehicle positions unavailable ({e})")
+            return out
+        for entity in feed.entity:
+            if not entity.HasField("vehicle"):
+                continue
+            v = entity.vehicle
+            tid = v.trip.trip_id
+            if not tid or (known and tid not in known):
+                continue
+            out[tid] = {
+                "occupancy": _OCCUPANCY.get(v.occupancy_status),
+                "vehicle_id": v.vehicle.id or None,
+            }
+        return out
+
     # -- Query -------------------------------------------------------------
     def get_upcoming(self, stop_id: str, limit: int = 3, allow_realtime: bool = True,
                      now: Optional[datetime.datetime] = None) -> List[Dict[str, Any]]:
@@ -321,13 +382,18 @@ class GTFSBusTracker:
         active = self.active_services(index, now.date())
 
         realtime: Dict[str, Dict[str, Any]] = {}
+        occupancy: Dict[str, Dict[str, Any]] = {}
         if allow_realtime:
             if self._realtime is not None and time.time() - self._realtime_at < 15:
                 realtime = self._realtime
+                occupancy = self._occupancy or {}
             else:
                 realtime = self.fetch_realtime()
+                occupancy = self.fetch_occupancy()
                 self._realtime = realtime
                 self._realtime_at = time.time()
+                self._occupancy = occupancy
+                self._occupancy_at = time.time()
 
         # Dedup by the *scheduled* (minute, headsign, direction): the static feed
         # lists the same physical departure under multiple trip_ids (service-day
@@ -343,6 +409,7 @@ class GTFSBusTracker:
                 continue
             sched_epoch = (midnight + datetime.timedelta(seconds=secs)).timestamp()
             pred = (realtime.get(d["trip_id"]) or {}).get(stop_id) if realtime else None
+            veh = occupancy.get(d["trip_id"]) or {}
             if pred and pred.get("time"):
                 epoch, live = float(pred["time"]), True
             else:
@@ -354,7 +421,8 @@ class GTFSBusTracker:
                 "live": live,
                 "direction": trip["direction"],
                 "headsign": trip["headsign"],
-                "vehicle_id": (pred or {}).get("vehicle_id"),
+                "vehicle_id": (pred or {}).get("vehicle_id") or veh.get("vehicle_id"),
+                "occupancy": veh.get("occupancy"),
             }
             if key not in by_key or (live and not by_key[key]["live"]):
                 by_key[key] = row
@@ -365,8 +433,8 @@ class GTFSBusTracker:
             result.append({
                 "route": self.route,
                 "destination": r["headsign"] or f"{self.route} bus",
-                "eta": format_eta(r["epoch"], now_epoch),
-                "occupancy": None,
+                "eta": format_eta(r["epoch"], now_epoch, live=r["live"]),
+                "occupancy": r.get("occupancy"),
                 "vehicle_id": r["vehicle_id"],
                 "live": r["live"],
             })
