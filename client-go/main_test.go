@@ -560,53 +560,38 @@ func TestArmRTCWake_ClampsMinimum(t *testing.T) {
 	}
 }
 
-func TestSuspendForRTC_DisablesWifiArmsSuspends(t *testing.T) {
+func TestSuspendForRTC_ArmsAlarmAndNeverTouchesWifi(t *testing.T) {
 	patchRuntime(t)
 	var writes []string
 	osWriteFile = func(path string, data []byte, perm os.FileMode) error {
 		writes = append(writes, path+"="+string(data))
 		return nil
 	}
-	var wifiOff, wifiOn bool
+	var touchedWifi bool
 	orig := execCommand
 	execCommand = func(name string, arg ...string) *exec.Cmd {
-		if name == "lipc-set-prop" && len(arg) >= 4 && arg[2] == "wirelessEnable" {
-			if arg[3] == "0" {
-				wifiOff = true
-			}
-			if arg[3] == "1" {
-				wifiOn = true
-			}
+		if name == "lipc-set-prop" && len(arg) >= 3 && arg[2] == "wirelessEnable" {
+			touchedWifi = true
 		}
 		return orig("true")
 	}
 	defer func() { execCommand = orig }()
-	origSettle := suspendSettleDelay
-	suspendSettleDelay = 0
-	defer func() { suspendSettleDelay = origSettle }()
 
 	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
 	if mech := tc.suspendForRTC(600 * time.Second); mech != "sysfs.wakealarm" {
 		t.Fatalf("expected sysfs.wakealarm, got %q", mech)
 	}
-	// Alarm armed, then suspend written.
-	sawAlarm, sawSuspend := false, false
+	sawAlarm := false
 	for _, w := range writes {
 		if w == SysfsWakePath+"=+600" {
 			sawAlarm = true
-		}
-		if w == PowerStatePath+"=mem" {
-			sawSuspend = true
 		}
 	}
 	if !sawAlarm {
 		t.Error("expected RTC alarm armed")
 	}
-	if !sawSuspend {
-		t.Error("expected suspend written")
-	}
-	if !wifiOff || !wifiOn {
-		t.Errorf("expected wifi disabled then re-enabled (off=%v on=%v)", wifiOff, wifiOn)
+	if touchedWifi {
+		t.Error("suspendForRTC must NOT disable Wi-Fi (it strands the control channel)")
 	}
 }
 

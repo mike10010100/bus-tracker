@@ -312,16 +312,6 @@ var (
 	PowerStatePath = "/sys/power/state"
 )
 
-// wirelessDisable/Enable toggle the Wi-Fi radio. Disabling it is required
-// before a direct suspend on the MT8113 (active net interfaces hold wake locks).
-func (tc *TrackerClient) wireless(on bool) {
-	val := "0"
-	if on {
-		val = "1"
-	}
-	lipcSet("com.lab126.cmd", "wirelessEnable", val)
-}
-
 // armRTCWake programs the sysfs wakealarm for `in` seconds from now. Returns the
 // mechanism used, or "" on failure.
 func (tc *TrackerClient) armRTCWake(in time.Duration) string {
@@ -345,24 +335,22 @@ func (tc *TrackerClient) enterSuspend() (bool, error) {
 	return true, nil
 }
 
-// suspendForRTC performs the full low-power suspend cycle: disable Wi-Fi (to
-// release the interface wake lock), arm the RTC wakealarm, suspend to RAM, and
-// re-enable Wi-Fi on resume. Returns the mechanism used, or "" on failure (in
-// which case the caller should fall back to a wall-clock wait).
+// suspendForRTC arms the RTC wakealarm and then lets the device suspend on its
+// own. We deliberately do NOT disable Wi-Fi or force /sys/power/state: doing so
+// either fails (EBUSY) or severs the control channel, stranding the device
+// offline. On the PW5, releasing preventScreenSaver is enough for powerd to
+// suspend naturally; the armed RTC alarm wakes it.
+//
+// Returns the mechanism used, or "" on failure (caller falls back to a wait).
 func (tc *TrackerClient) suspendForRTC(wait time.Duration) string {
 	arm := tc.armRTCWake(wait)
 	if arm == "" {
 		return ""
 	}
-	tc.wireless(false)
-	// Give the wireless driver a moment to quiesce before suspending.
-	time.Sleep(2 * time.Second)
-	ok, err := tc.enterSuspend()
-	tc.wireless(true)
-	if !ok {
-		_ = err
-		return ""
-	}
+	// Best-effort direct suspend. It usually returns EBUSY (powerd holds the
+	// wake lock) — that's fine: we've armed the alarm, and powerd will suspend
+	// naturally once idle. We do NOT touch the network.
+	_, _ = tc.enterSuspend()
 	return arm
 }
 
@@ -881,17 +869,16 @@ func (tc *TrackerClient) runSleepLoop(ctx context.Context, cancel context.Cancel
 			continue
 		}
 
-		// Direct sysfs suspend: disable Wi-Fi (releases the wake lock), arm the
-		// RTC, suspend, then re-enable Wi-Fi on resume. This is the low-latency
-		// path that works for frequent cycles (powerd's readyToSuspend, by
-		// contrast, waits on a ~60s timer).
-		tc.logRemote(fmt.Sprintf("Sleep mode: suspending for %s (sysfs+rtc).", wait.Round(time.Second)))
+		// Arm the RTC and let the device suspend naturally (no Wi-Fi toggle, no
+		// forced /sys/power/state). Then wait out the interval. This keeps the
+		// control channel intact while still allowing deep sleep.
+		tc.logRemote(fmt.Sprintf("Sleep mode: arming RTC for %s.", wait.Round(time.Second)))
 		if mech := tc.suspendForRTC(wait); mech != "" {
-			tc.logRemote(fmt.Sprintf("Sleep mode: resumed via %s.", mech))
+			tc.logRemote(fmt.Sprintf("Sleep mode: RTC armed via %s; allowing suspend.", mech))
 		} else {
-			tc.logRemote("Sleep mode: suspend unavailable; wall-clock wait.")
-			tc.holdForResume(ctx, wait)
+			tc.logRemote("Sleep mode: could not arm RTC; wall-clock wait.")
 		}
+		tc.holdForResume(ctx, wait)
 		if ctx.Err() != nil {
 			tc.cleanup()
 			return
