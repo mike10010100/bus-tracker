@@ -432,9 +432,24 @@ var interactionHoldDuration = 90 * time.Second
 func (tc *TrackerClient) interactionAwake(ctx context.Context, cancel context.CancelFunc, d time.Duration) bool {
 	// Hold the screensaver open so powerd doesn't auto-sleep mid-browse.
 	lipcSet("com.lab126.powerd", "preventScreenSaver", "1")
-	// Render the full tappable dashboard immediately: the user just pressed
-	// power to engage, and the suspended face was the inert strip.
-	tc.fetchAndDrawDashboard(ctx, cancel)
+
+	// Render the full tappable dashboard: the user just pressed power to engage
+	// and the suspended face was the inert strip. Wi-Fi is still re-associating
+	// right after the wake, so wait for the link and retry a few times, or the
+	// interactive render would silently fail and the panel would stay idle.
+	rendered := false
+	for i := 0; i < 5 && !rendered; i++ {
+		tc.waitForNetwork(ctx)
+		if tc.fetchAndDrawDashboard(ctx, cancel) > 0 {
+			rendered = true
+			break
+		}
+		if !tc.sleepWallClock(ctx, 2*time.Second) {
+			return false
+		}
+	}
+	tc.logRemote(fmt.Sprintf("Interactive session: dashboard rendered=%v.", rendered))
+
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	for {

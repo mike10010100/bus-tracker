@@ -1455,8 +1455,21 @@ func TestPresentationRoundTrip(t *testing.T) {
 
 func TestInteractionAwake_TimesOutAndResets(t *testing.T) {
 	patchRuntime(t)
-	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	png := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Kindle-Poll-Interval", "600")
+		w.WriteHeader(http.StatusOK)
+		w.Write(png)
+	}))
+	defer srv.Close()
+	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
+	osCreate = tempFileCreate(t)
+	origCheck := checkNetworkFn
+	checkNetworkFn = func(context.Context) bool { return true }
+	defer func() { checkNetworkFn = origCheck }()
 	execCommand = func(name string, arg ...string) *exec.Cmd { return exec.Command("true") }
+
+	tc := NewTrackerClient(srv.URL, "auto")
 
 	// A short hold returns true after it elapses.
 	ctx, cancel := context.WithCancel(context.Background())
