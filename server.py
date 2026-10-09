@@ -20,12 +20,15 @@ except ImportError:
 
 from bus_tracker import NJTransitBusTracker, normalize_arrival
 from citibike import CitiBikeTracker
+from gtfs_bus import GTFSBusTracker
 from render_dashboard import render_dashboard, STOPS, get_mock_data, resolve_view, WIDTH
 from version import VERSION
 
 PORT = int(os.environ.get("PORT", 8000))
 DISCOVERY_PORT = 8001
-CACHE_TTL = 30  # Re-fetch upstream data at most once every 30 seconds
+# Interactive sessions (a power-button wake) refresh upstream at this cadence so
+# the user sees current data while they're at the device.
+INTERACTIVE_TTL = 30
 # Optional shared secret protecting the /stop and /resume control endpoints.
 # When unset (default), control endpoints are only reachable from private
 # (RFC1918 / loopback / link-local) addresses.
@@ -33,6 +36,7 @@ CONTROL_TOKEN = os.environ.get("TRACKER_CONTROL_TOKEN", "")
 SERVER_VERSION = VERSION
 
 tracker = None
+gtfs_tracker = None
 cb_tracker = CitiBikeTracker(cache_ttl=30)
 
 
@@ -141,14 +145,26 @@ _render_cache = {}
 _render_lock = threading.Lock()
 
 
-def get_fresh_data(use_mock=False):
+def data_cache_ttl(interactive=False):
+    """
+    How long upstream data may be reused. Tied to the schedule so the fetch
+    cadence follows the dashboard's refresh cadence (60s peak / 600s daytime /
+    3600s overnight) no matter how often clients poll. An interactive session
+    (power-button wake) uses a short TTL for a temporary high-refresh cycle.
+    """
+    if interactive:
+        return INTERACTIVE_TTL
+    return get_target_poll_interval()
+
+
+def get_fresh_data(use_mock=False, interactive=False):
     """
     Returns (stops_data, stop_status, cb_data), refreshing upstream sources at
-    most once per CACHE_TTL. Shared by all render requests.
+    most once per data_cache_ttl(). Shared by all render requests.
     """
     now = time.time()
     with _data_lock:
-        fresh = _data_cache["stops"] is not None and (now - _data_cache["time"] < CACHE_TTL)
+        fresh = _data_cache["stops"] is not None and (now - _data_cache["time"] < data_cache_ttl(interactive))
         if fresh and not use_mock:
             return _data_cache["stops"], _data_cache["status"], _data_cache["cb"]
 
@@ -158,14 +174,29 @@ def get_fresh_data(use_mock=False):
         stops_data = get_mock_data()
         stop_status = {stop["id"]: NJTransitBusTracker.STATUS_OK for stop in STOPS}
     else:
-        global tracker
+        global tracker, gtfs_tracker
         if tracker is None:
             tracker = NJTransitBusTracker()
+        if gtfs_tracker is None:
+            gtfs_tracker = GTFSBusTracker(route="126", stops=[stop["id"] for stop in STOPS])
+        # Overnight there is nothing to watch, so skip the (4 MB) realtime feed
+        # entirely and serve the static schedule only.
+        allow_realtime = not is_overnight_hours()
         for stop in STOPS:
             sid = stop["id"]
-            status, trips = tracker.get_arrivals_with_status(stop_id=sid, route="126")
-            stops_data[sid] = [normalize_arrival(t) for t in trips]
-            stop_status[sid] = status
+            arrivals = None
+            try:
+                arrivals = gtfs_tracker.get_upcoming(sid, limit=3, allow_realtime=allow_realtime)
+            except Exception as e:
+                print(f"[Server] GTFS-BUS fetch error ({e}); falling back to public API.")
+            if arrivals:
+                stops_data[sid] = arrivals
+                stop_status[sid] = NJTransitBusTracker.STATUS_OK
+            else:
+                # Fallback: the public website API (next departure per route).
+                status, trips = tracker.get_arrivals_with_status(stop_id=sid, route="126")
+                stops_data[sid] = [normalize_arrival(t) for t in trips]
+                stop_status[sid] = status
 
     if use_mock:
         cb_data = cb_tracker.get_mock_data()
@@ -185,8 +216,19 @@ def get_fresh_data(use_mock=False):
     return stops_data, stop_status, cb_data
 
 
-def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False, view="auto", width=800, height=480, scale=1.0, presentation="interactive", status_note=""):
-    stops_data, stop_status, cb_data = get_fresh_data(use_mock=use_mock)
+def warm_up_gtfs():
+    """Builds the GTFS static index ahead of the first client render."""
+    global gtfs_tracker
+    try:
+        if gtfs_tracker is None:
+            gtfs_tracker = GTFSBusTracker(route="126", stops=[stop["id"] for stop in STOPS])
+        gtfs_tracker.ensure_index()
+    except Exception as e:
+        print(f"[GTFS] warm-up failed ({e})")
+
+
+def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False, view="auto", width=800, height=480, scale=1.0, presentation="interactive", status_note="", interactive=False):
+    stops_data, stop_status, cb_data = get_fresh_data(use_mock=use_mock, interactive=interactive)
 
     cache_key = (use_mock, view, width, height, scale, batt_level, is_charging, presentation, status_note, _data_cache["time"])
     with _render_lock:
@@ -703,6 +745,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     scale=scale,
                     presentation=presentation,
                     status_note=status_note,
+                    interactive=interactive_override,
                 )
                 img = format_for_kindle(img, orientation="landscape", rotation=rot_val,
                                         target=(land_w, land_h))
@@ -975,6 +1018,10 @@ if __name__ == "__main__":
 
     start_discovery_responder(http_port=PORT, version=SERVER_VERSION)
     zc, mdns_info = start_mdns_advertiser(http_port=PORT, version=SERVER_VERSION)
+
+    # Warm the GTFS static index in the background so the first client render is
+    # not blocked by the ~55 MB download + parse (the client has a 15s timeout).
+    threading.Thread(target=warm_up_gtfs, daemon=True).start()
 
     try:
         httpd.serve_forever()

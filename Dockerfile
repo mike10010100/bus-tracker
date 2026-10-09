@@ -32,7 +32,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy server and dashboard rendering application files.
 # VERSION must be present at runtime: server.py reports it to clients and the
 # Kindle compares it against its embedded version to decide whether to OTA.
-COPY VERSION version.py bus_tracker.py citibike.py render_dashboard.py server.py ./
+COPY VERSION version.py bus_tracker.py gtfs_bus.py citibike.py render_dashboard.py server.py ./
 
 # Copy compiled static Kindle ARM client from builder stage
 COPY --from=builder /tracker-arm ./tracker-arm
