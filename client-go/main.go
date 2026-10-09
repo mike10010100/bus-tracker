@@ -804,6 +804,10 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	// The server can request a named, allowlisted device action (maintenance).
 	if action := resp.Header.Get("X-Tracker-Action"); action != "" {
 		result, known := runAction(ctx, action)
+		// Some actions suspend the SoC and toggle Wi-Fi, so the link may still
+		// be re-associating when we try to report the result. Wait for the
+		// network first, or the (async) result POST races and is dropped.
+		tc.waitForNetwork(ctx)
 		tc.logRemote(fmt.Sprintf("Device action %q ->\n%s", action, result))
 		if !known {
 			tc.logRemote(fmt.Sprintf("Unknown device action %q ignored.", action))
