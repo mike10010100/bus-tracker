@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"sync"
 	"time"
 )
@@ -66,8 +65,6 @@ type GestureDetector struct {
 	cfg             GestureDetectorConfig
 	curX            int32
 	curY            int32
-	rawX            int32
-	rawY            int32
 	touchActive     bool
 	inactivityTimer *time.Timer
 	singleTapTimer  *time.Timer
@@ -113,7 +110,6 @@ func (gd *GestureDetector) TriggerTap(now time.Time) {
 	gd.lastTriggerTime = now
 
 	x, y := gd.curX, gd.curY
-	gd.log(fmt.Sprintf("tap: raw(%d,%d) -> design(%d,%d)", gd.rawX, gd.rawY, x, y))
 
 	// 1. Bottom Button Bar (Interactive Tactile Buttons)
 	if gd.cfg.BottomBarThresholdY > 0 && y >= gd.cfg.BottomBarThresholdY {
@@ -228,16 +224,13 @@ func (gd *GestureDetector) TriggerTap(now time.Time) {
 func (gd *GestureDetector) ProcessEvent(ev RawEventMsg) {
 	// Coordinate extraction, mapped into design space so the zone thresholds
 	// match the rendered layout.
-	if rawX, rawY, updated := ExtractCoordinates(ev, gd.rawX, gd.rawY); updated {
-		dx, dy := rawX, rawY
+	if newX, newY, updated := ExtractCoordinates(ev, gd.curX, gd.curY); updated {
 		if gd.cfg.Transform != nil {
-			dx, dy = gd.cfg.Transform(rawX, rawY)
+			newX, newY = gd.cfg.Transform(newX, newY)
 		}
 		gd.mu.Lock()
-		gd.rawX = rawX
-		gd.rawY = rawY
-		gd.curX = dx
-		gd.curY = dy
+		gd.curX = newX
+		gd.curY = newY
 		gd.mu.Unlock()
 	}
 
