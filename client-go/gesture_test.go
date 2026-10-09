@@ -149,12 +149,6 @@ func TestGestureDetectorSlowTapsDoNotDoubleTap(t *testing.T) {
 
 func TestGestureDetectorCornerTaps(t *testing.T) {
 	cfg := DefaultGestureConfig()
-	cfg.TopRightThresholdX = 1000
-	cfg.TopRightThresholdY = 300
-	cfg.TopLeftThresholdX = 300
-	cfg.TopLeftThresholdY = 300
-	cfg.BottomLeftThresholdX = 350
-	cfg.BottomLeftThresholdY = 1300
 	cfg.DebounceDuration = 10 * time.Millisecond
 
 	gd := NewGestureDetector(cfg)
@@ -182,21 +176,21 @@ func TestGestureDetectorCornerTaps(t *testing.T) {
 		mu.Unlock()
 	}
 
-	// 1. Top-Right corner tap
-	gd.curX = 1100
-	gd.curY = 150
+	// 1. Top-Right corner tap (design space)
+	gd.curX = 700
+	gd.curY = 50
 	t0 := time.Now()
 	gd.TriggerTap(t0)
 
 	// 2. Top-Left corner tap
-	gd.curX = 150
-	gd.curY = 150
+	gd.curX = 50
+	gd.curY = 50
 	t1 := t0.Add(50 * time.Millisecond)
 	gd.TriggerTap(t1)
 
-	// 3. Bottom-Left corner tap
-	gd.curX = 150
-	gd.curY = 1450
+	// 3. Bottom-Left corner tap (above the button bar)
+	gd.curX = 50
+	gd.curY = 550
 	t2 := t1.Add(50 * time.Millisecond)
 	gd.TriggerTap(t2)
 
@@ -236,9 +230,10 @@ func TestGestureDetectorInactivityFallback(t *testing.T) {
 		mu.Unlock()
 	}
 
-	// Send EV_ABS position with NO explicit release event (pt_mt driver behavior)
-	gd.ProcessEvent(RawEventMsg{EvType: EV_ABS, EvCode: ABS_MT_POSITION_X, EvValue: 600})
-	gd.ProcessEvent(RawEventMsg{EvType: EV_ABS, EvCode: ABS_MT_POSITION_Y, EvValue: 600})
+	// Send EV_ABS position with NO explicit release event (pt_mt driver behavior).
+	// Use a main-area point (design space) so it lands on a single tap.
+	gd.ProcessEvent(RawEventMsg{EvType: EV_ABS, EvCode: ABS_MT_POSITION_X, EvValue: 400})
+	gd.ProcessEvent(RawEventMsg{EvType: EV_ABS, EvCode: ABS_MT_POSITION_Y, EvValue: 300})
 
 	// Wait for inactivity timer (20ms) + single tap delay (20ms)
 	time.Sleep(60 * time.Millisecond)
@@ -296,10 +291,10 @@ func TestGestureDetectorButtonFallbacks(t *testing.T) {
 	gd.OnBottomLeftTap = func(x, y int32) { bottomLeft++ }
 
 	// Buses zone with no OnBusesTap falls back to OnBottomLeftTap.
-	gd.curX, gd.curY = 100, 1400
+	gd.curX, gd.curY = 50, 580
 	gd.TriggerTap(time.Now())
 	// Bikes zone with no OnBikesTap also falls back.
-	gd.curX, gd.curY = 350, 1400
+	gd.curX, gd.curY = 250, 580
 	gd.TriggerTap(time.Now().Add(20 * time.Millisecond))
 
 	if bottomLeft != 2 {
@@ -317,9 +312,9 @@ func TestGestureDetectorLightAndRefreshZones(t *testing.T) {
 	gd.OnLightTap = func(x, y int32) { light++ }
 	gd.OnRefreshTap = func(x, y int32) { refresh++ }
 
-	gd.curX, gd.curY = 600, 1400 // light zone 490..740
+	gd.curX, gd.curY = 400, 580 // light zone 318..472
 	gd.TriggerTap(time.Now())
-	gd.curX, gd.curY = 850, 1400 // refresh zone 740..990
+	gd.curX, gd.curY = 550, 580 // refresh zone 472..626
 	gd.TriggerTap(time.Now().Add(20 * time.Millisecond))
 
 	if light != 1 || refresh != 1 {
@@ -334,15 +329,15 @@ func TestGestureDetectorNoopZonesWithoutCallbacks(t *testing.T) {
 	defer gd.Stop()
 
 	// No callbacks registered: these paths must simply return without panic.
-	gd.curX, gd.curY = 600, 1400 // light zone, nil OnLightTap
+	gd.curX, gd.curY = 400, 580 // light zone, nil OnLightTap
 	gd.TriggerTap(time.Now())
-	gd.curX, gd.curY = 1100, 1400 // exit zone, nil OnExitTap
+	gd.curX, gd.curY = 700, 580 // exit zone, nil OnExitTap
 	gd.TriggerTap(time.Now().Add(20 * time.Millisecond))
-	gd.curX, gd.curY = 1100, 150 // top-right, nil callback
+	gd.curX, gd.curY = 700, 50 // top-right, nil callback
 	gd.TriggerTap(time.Now().Add(40 * time.Millisecond))
-	gd.curX, gd.curY = 150, 150 // top-left, nil callback
+	gd.curX, gd.curY = 50, 50 // top-left, nil callback
 	gd.TriggerTap(time.Now().Add(60 * time.Millisecond))
-	gd.curX, gd.curY = 150, 1450 // bottom-left, nil callback
+	gd.curX, gd.curY = 50, 550 // bottom-left, nil callback
 	gd.TriggerTap(time.Now().Add(80 * time.Millisecond))
 }
 
@@ -390,32 +385,32 @@ func TestGestureDetectorButtonTaps(t *testing.T) {
 
 	t0 := time.Now()
 
-	// 1. Buses button (x < 250, y >= 1200)
-	gd.curX = 100
-	gd.curY = 1400
+	// 1. Buses button (x < 164, y >= 556)
+	gd.curX = 50
+	gd.curY = 580
 	gd.TriggerTap(t0)
 
-	// 2. Bikes button (250 <= x < 490, y >= 1200)
-	gd.curX = 350
-	gd.curY = 1400
+	// 2. Bikes button (164 <= x < 318, y >= 556)
+	gd.curX = 250
+	gd.curY = 580
 	t1 := t0.Add(20 * time.Millisecond)
 	gd.TriggerTap(t1)
 
-	// 3. Light button (490 <= x < 740, y >= 1200)
-	gd.curX = 600
-	gd.curY = 1400
+	// 3. Light button (318 <= x < 472, y >= 556)
+	gd.curX = 400
+	gd.curY = 580
 	t2 := t1.Add(20 * time.Millisecond)
 	gd.TriggerTap(t2)
 
-	// 4. Refresh button (740 <= x < 990, y >= 1200)
-	gd.curX = 850
-	gd.curY = 1400
+	// 4. Refresh button (472 <= x < 626, y >= 556)
+	gd.curX = 550
+	gd.curY = 580
 	t3 := t2.Add(20 * time.Millisecond)
 	gd.TriggerTap(t3)
 
-	// 5. Exit button (x >= 990, y >= 1200)
-	gd.curX = 1100
-	gd.curY = 1400
+	// 5. Exit button (x >= 626, y >= 556)
+	gd.curX = 700
+	gd.curY = 580
 	t4 := t3.Add(20 * time.Millisecond)
 	gd.TriggerTap(t4)
 

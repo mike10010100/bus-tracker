@@ -261,6 +261,29 @@ func TestFetchAndDrawDashboard_InteractiveOverride(t *testing.T) {
 	tc.setInteracting(false)
 }
 
+func TestRawTouchToDesign(t *testing.T) {
+	patchRuntime(t)
+	osReadFile = func(string) ([]byte, error) { return []byte("1236,1648\n"), nil }
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+
+	// Portrait panel center (618,824) maps to design center (~400,~300).
+	dx, dy := tc.rawTouchToDesign(618, 824)
+	if dx < 390 || dx > 410 || dy < 290 || dy > 310 {
+		t.Errorf("center map = (%d,%d), want ~(400,300)", dx, dy)
+	}
+	// The rendered button bar sits at portrait x 1145..1215 -> design y 556..590
+	// (see the render rotation). Raw px drives design dy.
+	_, by := tc.rawTouchToDesign(1180, 800)
+	if by < 556 || by > 590 {
+		t.Errorf("button bar design y = %d, want 556..590", by)
+	}
+	// Raw py drives design dx: portrait py=41 -> design x ~780 (right edge).
+	bx, _ := tc.rawTouchToDesign(600, 41)
+	if bx < 770 || bx > 790 {
+		t.Errorf("right-edge design x = %d, want ~780", bx)
+	}
+}
+
 func TestGetPanelSize_CachesDetection(t *testing.T) {
 	patchRuntime(t)
 	calls := 0

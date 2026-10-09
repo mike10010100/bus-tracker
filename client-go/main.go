@@ -182,6 +182,30 @@ func (tc *TrackerClient) getPanelSize() PanelSize {
 	return tc.panelSize
 }
 
+// rawTouchToDesign maps a raw touch coordinate (in the panel's portrait
+// framebuffer space) into the renderer's design space (800px wide). The server
+// draws the landscape design at the panel's native landscape resolution and
+// then rotates it 90 degrees counter-clockwise into the portrait framebuffer,
+// so we undo that rotation here:
+//
+//	dx = (Wl - 1 - py) * DesignWidth / Wl
+//	dy = px * DesignWidth / Wl
+//
+// where (px,py) is the raw portrait coordinate and Wl is the landscape width
+// (equal to the portrait height). Verified against the rendered button bar,
+// which lands at portrait x ~= 1145..1215 (design y 556..590).
+func (tc *TrackerClient) rawTouchToDesign(px, py int32) (int32, int32) {
+	p := tc.getPanelSize()
+	wl := float64(p.LandscapeW)
+	if wl <= 0 {
+		return px, py
+	}
+	scale := wl / float64(DesignWidth)
+	dx := (wl - 1 - float64(py)) / scale
+	dy := float64(px) / scale
+	return int32(dx + 0.5), int32(dy + 0.5)
+}
+
 func (tc *TrackerClient) getServerURL() string {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
@@ -578,7 +602,9 @@ func (tc *TrackerClient) configureGestureHandlers(gd *GestureDetector, cancel co
 // runEventLoop dispatches multiplexed input events to the gesture detector
 // until the context is cancelled.
 func (tc *TrackerClient) runEventLoop(ctx context.Context, cancel context.CancelFunc, eventCh <-chan RawEventMsg) {
-	gd := NewGestureDetector(DefaultGestureConfig())
+	cfg := DefaultGestureConfig()
+	cfg.Transform = tc.rawTouchToDesign
+	gd := NewGestureDetector(cfg)
 	defer gd.Stop()
 	tc.configureGestureHandlers(gd, cancel)
 
@@ -607,6 +633,11 @@ func (tc *TrackerClient) runEventLoop(ctx context.Context, cancel context.Cancel
 
 // startInputListeners opens ALL /dev/input/event* devices and multiplexes events into eventCh
 func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context.CancelFunc) {
+	// Prime the panel size once here, on the caller's goroutine, so the event
+	// goroutine's coordinate transform reads a cached value and never touches
+	// the filesystem (also avoids a data race with test seam restoration).
+	_ = tc.getPanelSize()
+
 	matches, err := globInputs("/dev/input/event*")
 	if err != nil || len(matches) == 0 {
 		matches = []string{"/dev/input/event0", "/dev/input/event1", "/dev/input/event2"}

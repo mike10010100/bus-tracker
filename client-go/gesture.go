@@ -5,12 +5,19 @@ import (
 	"time"
 )
 
-// GestureDetectorConfig holds timing and threshold settings for touch recognition
+// GestureDetectorConfig holds timing and threshold settings for touch recognition.
+//
+// All thresholds are expressed in the renderer's *design* coordinate space: an
+// 800px-wide landscape layout (see render_dashboard.py). Raw touch events arrive
+// in the panel's portrait framebuffer space and are mapped into this space by
+// Transform before hit-testing, so the zones always match what is drawn.
 type GestureDetectorConfig struct {
-	DoubleTapWindow         time.Duration
-	SingleTapDelay          time.Duration
-	InactivityTimeout       time.Duration
-	DebounceDuration        time.Duration
+	DoubleTapWindow   time.Duration
+	SingleTapDelay    time.Duration
+	InactivityTimeout time.Duration
+	DebounceDuration  time.Duration
+	// Transform maps a raw touch coordinate to design space. Nil = identity.
+	Transform               func(x, y int32) (int32, int32)
 	TopRightThresholdX      int32
 	TopRightThresholdY      int32
 	TopLeftThresholdX       int32
@@ -24,24 +31,32 @@ type GestureDetectorConfig struct {
 	ButtonRefreshThresholdX int32
 }
 
-// DefaultGestureConfig returns production settings tailored for Kindle Paperwhite 5
+// DesignWidth/DesignHeightMirror the renderer's logical layout for the PW5
+// panel (800 wide, and 600 tall for the 1648x1236 panel). The bottom button bar
+// is drawn at y in [DesignHeight-44, DesignHeight-10] with five equal columns.
+const DesignWidth = 800
+
+// DefaultGestureConfig returns production settings in design space, matching
+// the 800x600 layout used on the Paperwhite 5.
 func DefaultGestureConfig() GestureDetectorConfig {
 	return GestureDetectorConfig{
-		DoubleTapWindow:         380 * time.Millisecond,
-		SingleTapDelay:          200 * time.Millisecond,
-		InactivityTimeout:       100 * time.Millisecond,
-		DebounceDuration:        80 * time.Millisecond,
-		TopRightThresholdX:      1000,
-		TopRightThresholdY:      300,
-		TopLeftThresholdX:       300,
-		TopLeftThresholdY:       300,
-		BottomLeftThresholdX:    350,
-		BottomLeftThresholdY:    1300,
-		BottomBarThresholdY:     1200,
-		ButtonBusesThresholdX:   250,
-		ButtonBikesThresholdX:   490,
-		ButtonLightThresholdX:   740,
-		ButtonRefreshThresholdX: 990,
+		DoubleTapWindow:   380 * time.Millisecond,
+		SingleTapDelay:    200 * time.Millisecond,
+		InactivityTimeout: 100 * time.Millisecond,
+		DebounceDuration:  80 * time.Millisecond,
+		// Bottom button bar (design y ~= 556..590 for a 600-tall layout).
+		BottomBarThresholdY:     556,
+		ButtonBusesThresholdX:   164,
+		ButtonBikesThresholdX:   318,
+		ButtonLightThresholdX:   472,
+		ButtonRefreshThresholdX: 626,
+		// Corner zones in design space.
+		TopRightThresholdX:   640,
+		TopRightThresholdY:   120,
+		TopLeftThresholdX:    160,
+		TopLeftThresholdY:    120,
+		BottomLeftThresholdX: 160,
+		BottomLeftThresholdY: 480,
 	}
 }
 
@@ -207,8 +222,12 @@ func (gd *GestureDetector) TriggerTap(now time.Time) {
 
 // ProcessEvent feeds an input event into the gesture recognizer
 func (gd *GestureDetector) ProcessEvent(ev RawEventMsg) {
-	// Coordinate extraction
+	// Coordinate extraction, mapped into design space so the zone thresholds
+	// match the rendered layout.
 	if newX, newY, updated := ExtractCoordinates(ev, gd.curX, gd.curY); updated {
+		if gd.cfg.Transform != nil {
+			newX, newY = gd.cfg.Transform(newX, newY)
+		}
 		gd.mu.Lock()
 		gd.curX = newX
 		gd.curY = newY
