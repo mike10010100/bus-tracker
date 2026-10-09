@@ -324,14 +324,21 @@ def get_commute_lighting(dt=None):
     return 0, 0
 
 
+# When set (any non-empty value), the server always advertises the fast poll
+# interval regardless of the time of day. For testing only.
+FORCE_FAST_POLL = os.environ.get("FORCE_FAST_POLL", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def get_target_poll_interval(dt=None):
     """
     Returns target Kindle poll interval in seconds:
     - 60s during peak commute rush (the client aligns this to the top of each
       minute, so the on-screen clock rolls exactly when the new data lands)
     - 600s (10 min) off-peak Eco Mode
+
+    FORCE_FAST_POLL=1 forces the fast interval at all times (testing aid).
     """
-    if is_peak_commute_hours(dt=dt):
+    if FORCE_FAST_POLL or is_peak_commute_hours(dt=dt):
         return 60
     return 600
 

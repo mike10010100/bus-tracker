@@ -41,6 +41,17 @@ class TestCommuteSchedule(unittest.TestCase):
         self.assertTrue(is_peak_commute_hours(datetime(2026, 10, 8, 9, 29)))
         self.assertFalse(is_peak_commute_hours(datetime(2026, 10, 8, 9, 30)))
 
+    def test_force_fast_poll_overrides_schedule(self):
+        import server
+
+        original = server.FORCE_FAST_POLL
+        try:
+            server.FORCE_FAST_POLL = True
+            # Even at 3 AM, forced-fast returns 60s.
+            self.assertEqual(server.get_target_poll_interval(datetime(2026, 10, 8, 3, 0)), 60)
+        finally:
+            server.FORCE_FAST_POLL = original
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,6 +25,8 @@ services:
       - PEAK_AM_END=${PEAK_AM_END:-9.5}
       - PEAK_PM_START=${PEAK_PM_START:-16.5}
       - PEAK_PM_END=${PEAK_PM_END:-19.0}
+      # Testing aid: force the fast poll interval at all hours.
+      - FORCE_FAST_POLL=${FORCE_FAST_POLL:-}
     env_file:
       - path: .env
         required: false
