@@ -25,6 +25,11 @@ services:
       - PEAK_AM_END=${PEAK_AM_END:-9.5}
       - PEAK_PM_START=${PEAK_PM_START:-16.5}
       - PEAK_PM_END=${PEAK_PM_END:-19.0}
+      # Overnight deep-eco window and its long poll interval (seconds).
+      - OVERNIGHT_START=${OVERNIGHT_START:-22.0}
+      - OVERNIGHT_END=${OVERNIGHT_END:-6.0}
+      - OVERNIGHT_INTERVAL=${OVERNIGHT_INTERVAL:-3600}
+      - OFFPEAK_INTERVAL=${OFFPEAK_INTERVAL:-600}
       # Testing aid: force the fast poll interval at all hours.
       - FORCE_FAST_POLL=${FORCE_FAST_POLL:-}
     env_file:

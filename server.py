@@ -333,19 +333,44 @@ def get_commute_lighting(dt=None):
 # interval regardless of the time of day. For testing only.
 FORCE_FAST_POLL = os.environ.get("FORCE_FAST_POLL", "").strip().lower() in ("1", "true", "yes", "on")
 
+# Overnight "deep eco" window: a long poll interval while nobody is commuting.
+# The window may wrap past midnight (start > end).
+OVERNIGHT_START = _parse_hour_env("OVERNIGHT_START", 22.0)
+OVERNIGHT_END = _parse_hour_env("OVERNIGHT_END", 6.0)
+OVERNIGHT_INTERVAL = int(_parse_hour_env("OVERNIGHT_INTERVAL", 3600))
+OFFPEAK_INTERVAL = int(_parse_hour_env("OFFPEAK_INTERVAL", 600))
+
+
+def is_overnight_hours(dt=None):
+    """
+    Returns True inside the overnight deep-eco window (default 22:00-06:00).
+    Handles a window that wraps past midnight.
+    """
+    if dt is None:
+        dt = datetime.now()
+    hour = dt.hour + dt.minute / 60.0
+    if OVERNIGHT_START <= OVERNIGHT_END:
+        return OVERNIGHT_START <= hour < OVERNIGHT_END
+    return hour >= OVERNIGHT_START or hour < OVERNIGHT_END
+
 
 def get_target_poll_interval(dt=None):
     """
     Returns target Kindle poll interval in seconds:
     - 60s during peak commute rush (the client aligns this to the top of each
       minute, so the on-screen clock rolls exactly when the new data lands)
+    - 3600s (1 hour) overnight deep-eco mode
     - 600s (10 min) off-peak Eco Mode
 
     FORCE_FAST_POLL=1 forces the fast interval at all times (testing aid).
     """
-    if FORCE_FAST_POLL or is_peak_commute_hours(dt=dt):
+    if FORCE_FAST_POLL:
         return 60
-    return 600
+    if is_peak_commute_hours(dt=dt):
+        return 60
+    if is_overnight_hours(dt=dt):
+        return OVERNIGHT_INTERVAL
+    return OFFPEAK_INTERVAL
 
 
 tracker_stopped = False
