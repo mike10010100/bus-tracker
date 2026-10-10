@@ -1063,6 +1063,15 @@ func run(parent context.Context) {
 
 	// Send initial startup diagnostic
 	tc.logRemote(fmt.Sprintf("Transit Tracker v%s starting up (mode: %s, server: %s, view: %s)...", Version, currentModeName(), serverURL, initialView))
+	// Log the raw framebuffer geometry so panel/orientation issues are visible.
+	if modes, err := osReadFile("/sys/class/graphics/fb0/modes"); err == nil {
+		tc.logRemote("fb0/modes: " + strings.TrimSpace(string(modes)))
+	}
+	if vsize, err := osReadFile("/sys/class/graphics/fb0/virtual_size"); err == nil {
+		tc.logRemote("fb0/virtual_size: " + strings.TrimSpace(string(vsize)))
+	}
+	p := tc.getPanelSize()
+	tc.logRemote(fmt.Sprintf("Detected panel (landscape): %dx%d", p.LandscapeW, p.LandscapeH))
 	if devData, err := osReadFile("/proc/bus/input/devices"); err == nil {
 		tc.logRemote(fmt.Sprintf("Input devices:\n%s", string(devData)))
 	}
