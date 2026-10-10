@@ -92,6 +92,12 @@ from identity import (
     AUTH_HEADER,
     is_valid_nonce,
 )
+from device_registry import (
+    DeviceRecord,
+    DeviceRegistry,
+    get_device_registry,
+    sanitize_client_id,
+)
 
 PORT = int(os.environ.get("PORT", 8000))
 INTERACTIVE_TTL = 30
@@ -388,11 +394,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_empty(400)
             return None
 
+    def _extract_client_id(self, params: Optional[Dict[str, List[str]]] = None) -> str:
+        cid = self.headers.get("X-Tracker-Client-ID", "").strip()
+        if not cid and params:
+            cid = params.get("client_id", params.get("id", [""]))[0].strip()
+        return sanitize_client_id(cid)
+
+    def _remote_ip(self) -> str:
+        if hasattr(self, "client_address") and self.client_address:
+            return str(self.client_address[0])
+        try:
+            return self.address_string()
+        except Exception:
+            return ""
+
     def do_HEAD(self):
         self.do_GET()
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(parsed.query)
+
+        client_id = self._extract_client_id(params)
+        remote_ip = self._remote_ip()
+        registry = get_device_registry()
+        if client_id != "default" or parsed.path in ["/log", "/diag"]:
+            registry.get_or_register(client_id, remote_ip)
 
         if parsed.path == "/stop":
             if not check_control_auth(self):
@@ -429,20 +456,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if body is None:
                 return
             want = ""
+            target_id = ""
             try:
                 data = json.loads(body.decode("utf-8"))
                 if isinstance(data, dict):
-                    want = str(data.get("set", "")).lower().strip()
+                    want = str(data.get("set", data.get("mode", ""))).lower().strip()
+                    target_id = str(data.get("client_id", data.get("id", ""))).strip()
             except Exception:
                 qs = urllib.parse.parse_qs(body.decode("utf-8", errors="ignore"))
-                want = qs.get("set", [""])[0].lower().strip()
+                want = qs.get("set", qs.get("mode", [""]))[0].lower().strip()
+                target_id = qs.get("client_id", qs.get("id", [""]))[0].strip()
+            if not target_id:
+                target_id = params.get("client_id", params.get("id", ["all"]))[0].strip() or "all"
             global _mode_requested
             if want in VALID_RUN_MODES:
+                registry.set_mode(target_id, want)
                 with _diag_lock:
-                    _mode_requested = want
-                print(f"[Mode] requested client mode '{want}' on the next poll")
-            with _diag_lock:
-                pending = _mode_requested
+                    if target_id.lower() == "all" or target_id == "default":
+                        _mode_requested = want
+                print(f"[Mode] requested client mode '{want}' for {target_id} on the next poll")
+            if target_id and target_id.lower() != "all":
+                rec = registry.get_device(target_id)
+                pending = rec.target_mode if rec else (want if want in VALID_RUN_MODES else "")
+            else:
+                with _diag_lock:
+                    pending = _mode_requested
             payload = json.dumps({"pending": pending, "valid": list(VALID_RUN_MODES)}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -459,20 +497,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if body is None:
                 return
             do = ""
+            target_id = ""
             try:
                 data = json.loads(body.decode("utf-8"))
                 if isinstance(data, dict):
-                    do = str(data.get("do", "")).strip().lower()
+                    do = str(data.get("do", data.get("action", ""))).strip().lower()
+                    target_id = str(data.get("client_id", data.get("id", ""))).strip()
             except Exception:
                 qs = urllib.parse.parse_qs(body.decode("utf-8", errors="ignore"))
-                do = qs.get("do", [""])[0].strip().lower()
+                do = qs.get("do", qs.get("action", [""]))[0].strip().lower()
+                target_id = qs.get("client_id", qs.get("id", [""]))[0].strip()
+            if not target_id:
+                target_id = params.get("client_id", params.get("id", ["all"]))[0].strip() or "all"
             global _device_action
             if do:
+                registry.set_action(target_id, do)
                 with _diag_lock:
-                    _device_action = do
-                print(f"[Action] queued device action '{do}' for the next poll")
-            with _diag_lock:
-                pending = _device_action
+                    if target_id.lower() == "all" or target_id == "default":
+                        _device_action = do
+                print(f"[Action] queued device action '{do}' for {target_id} for the next poll")
+            if target_id and target_id.lower() != "all":
+                rec = registry.get_device(target_id)
+                pending = rec.pending_action if rec else do
+            else:
+                with _diag_lock:
+                    pending = _device_action
             payload = json.dumps({"pending": pending}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -489,18 +538,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if body is None:
                 return
             level = "1"
+            target_id = ""
             try:
                 data = json.loads(body.decode("utf-8"))
                 if isinstance(data, dict):
-                    level = str(data.get("level", "1")).strip().lower()
+                    level = str(data.get("level", data.get("mode", "1"))).strip().lower()
+                    target_id = str(data.get("client_id", data.get("id", ""))).strip()
             except Exception:
                 qs = urllib.parse.parse_qs(body.decode("utf-8", errors="ignore"))
-                level = qs.get("level", ["1"])[0].strip().lower()
-            req = "full" if level == "full" else "1"
+                level = qs.get("level", qs.get("mode", ["1"]))[0].strip().lower()
+                target_id = qs.get("client_id", qs.get("id", [""]))[0].strip()
+            if not target_id:
+                target_id = params.get("client_id", params.get("id", ["all"]))[0].strip() or "all"
+            req = "full" if level == "full" else ("quick" if level == "quick" else "1")
             global _diag_requested
+            registry.set_diag(target_id, req)
             with _diag_lock:
-                _diag_requested = req
-            print(f"[Diagnostics] requested a '{req}' dump from the next poll")
+                if target_id.lower() == "all" or target_id == "default":
+                    _diag_requested = req
+            print(f"[Diagnostics] requested a '{req}' dump for {target_id} from the next poll")
             payload = json.dumps({"requested": req}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -514,6 +570,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if body is None:
                 return
             text = body.decode("utf-8", errors="replace")
+            registry.append_log(client_id, text, resolve_cache_dir())
             for line in safe_log_lines(text):
                 print(f"[Kindle Log] {line}")
             self._send_empty(200)
@@ -525,6 +582,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             text = body.decode("utf-8", errors="replace")
             level, charging = parse_diag_battery(text)
+            registry.save_diagnostics(client_id, text, resolve_cache_dir())
+            registry.update_telemetry(
+                client_id=client_id,
+                remote_ip=remote_ip,
+                battery=float(level) if level is not None else None,
+                charging=charging,
+                client_mode=self.headers.get("X-Tracker-Mode", ""),
+                client_version=self.headers.get("X-Tracker-Client-Version", ""),
+                firmware_version=self.headers.get("X-Tracker-Firmware", ""),
+            )
             with _diag_lock:
                 _last_diagnostics["text"] = text
                 _last_diagnostics["time"] = time.time()
@@ -542,6 +609,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         global tracker_stopped, _diag_requested, _mode_requested, _device_action
         parsed = urllib.parse.urlparse(self.path)
         params = urllib.parse.parse_qs(parsed.query)
+
+        client_id = self._extract_client_id(params)
+        remote_ip = self._remote_ip()
+        registry = get_device_registry()
+        if client_id != "default" or parsed.path in ["/dashboard.png", "/bus.png"]:
+            registry.get_or_register(client_id, remote_ip)
 
         if parsed.path in ["/healthz", "/health"]:
             payload = json.dumps({
@@ -580,6 +653,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._write_body(payload)
             return
 
+        if parsed.path == "/devices":
+            devices = [d.to_dict() for d in registry.list_devices()]
+            payload = json.dumps({"devices": devices}, indent=2).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self._write_body(payload)
+            return
+
         if parsed.path == "/tracker-arm.manifest":
             info = get_valid_manifest()
             if info is None:
@@ -597,14 +681,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not check_control_auth(self):
                 self._send_forbidden()
                 return
-            req = params.get("request", ["0"])[0].lower()
-            if req in ("1", "true", "yes", "full"):
+            target_id = params.get("client_id", params.get("id", ["all"]))[0].strip() or "all"
+            req = params.get("request", params.get("level", params.get("mode", ["0"])))[0].lower()
+            if req in ("1", "true", "yes", "full", "quick"):
+                diag_mode = "full" if req == "full" else ("quick" if req == "quick" else "1")
+                registry.set_diag(target_id, diag_mode)
                 with _diag_lock:
-                    _diag_requested = "full" if req == "full" else "1"
-                print(f"[Diagnostics] requested a '{_diag_requested}' dump from the next poll")
+                    if target_id.lower() == "all" or target_id == "default":
+                        _diag_requested = diag_mode
+                print(f"[Diagnostics] requested a '{diag_mode}' dump for {target_id} from the next poll")
             with _diag_lock:
                 text = _last_diagnostics["text"]
                 ts = _last_diagnostics["time"]
+            dev_target = params.get("client_id", params.get("id", [""]))[0].strip()
+            if dev_target and dev_target.lower() != "all":
+                dev_rec = registry.get_device(dev_target)
+                if dev_rec and dev_rec.last_diagnostics_text:
+                    text = dev_rec.last_diagnostics_text
+                    ts = dev_rec.last_diagnostics_time
+                else:
+                    text = ""
+                    ts = 0.0
             if not text:
                 self._send_empty(404)
                 return
@@ -621,13 +718,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not check_control_auth(self):
                 self._send_forbidden()
                 return
-            want = params.get("set", [""])[0].lower()
+            target_id = params.get("client_id", params.get("id", ["all"]))[0].strip() or "all"
+            want = params.get("set", params.get("mode", [""]))[0].lower()
             if want in VALID_RUN_MODES:
+                registry.set_mode(target_id, want)
                 with _diag_lock:
-                    _mode_requested = want
-                print(f"[Mode] requested client mode '{want}' on the next poll")
-            with _diag_lock:
-                pending = _mode_requested
+                    if target_id.lower() == "all" or target_id == "default":
+                        _mode_requested = want
+                print(f"[Mode] requested client mode '{want}' for {target_id} on the next poll")
+            if target_id and target_id.lower() != "all":
+                rec = registry.get_device(target_id)
+                pending = rec.target_mode if rec else (want if want in VALID_RUN_MODES else "")
+            else:
+                with _diag_lock:
+                    pending = _mode_requested
             payload = json.dumps({"pending": pending, "valid": list(VALID_RUN_MODES)}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -640,13 +744,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not check_control_auth(self):
                 self._send_forbidden()
                 return
-            do = params.get("do", [""])[0].strip().lower()
+            target_id = params.get("client_id", params.get("id", ["all"]))[0].strip() or "all"
+            do = params.get("do", params.get("action", [""]))[0].strip().lower()
             if do:
+                registry.set_action(target_id, do)
                 with _diag_lock:
-                    _device_action = do
-                print(f"[Action] queued device action '{do}' for the next poll")
-            with _diag_lock:
-                pending = _device_action
+                    if target_id.lower() == "all" or target_id == "default":
+                        _device_action = do
+                print(f"[Action] queued device action '{do}' for {target_id} for the next poll")
+            if target_id and target_id.lower() != "all":
+                rec = registry.get_device(target_id)
+                pending = rec.pending_action if rec else do
+            else:
+                with _diag_lock:
+                    pending = _device_action
             payload = json.dumps({"pending": pending}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -794,18 +905,41 @@ class DashboardHandler(BaseHTTPRequestHandler):
             brightness, warmth = get_commute_lighting()
             poll_interval = get_target_poll_interval()
 
+            client_mode = self.headers.get("X-Tracker-Mode", "")
+            client_version = self.headers.get("X-Tracker-Client-Version", "")
+            firmware_version = self.headers.get("X-Tracker-Firmware", "")
+
+            registry.update_telemetry(
+                client_id=client_id,
+                remote_ip=remote_ip,
+                battery=float(batt_level) if batt_level is not None else None,
+                charging=is_charging if charging_param is not None else None,
+                client_mode=client_mode,
+                client_version=client_version,
+                firmware_version=firmware_version,
+            )
+
             diag_header = ""
             mode_header = ""
-            client_mode = self.headers.get("X-Tracker-Mode", "")
             action_header = ""
-            if is_kindle:
+            if is_kindle or bool(self.headers.get("X-Tracker-Client-ID")):
                 with _diag_lock:
-                    diag_header = _diag_requested
-                    _diag_requested = ""
-                    action_header = _device_action
-                    _device_action = ""
-                    if _mode_requested and client_mode != _mode_requested:
-                        mode_header = _mode_requested
+                    action_header = registry.pop_action(client_id)
+                    if client_id == "default":
+                        if not action_header and _device_action:
+                            action_header = _device_action
+                        _device_action = ""
+
+                    diag_header = registry.pop_diag(client_id)
+                    if client_id == "default":
+                        if not diag_header and _diag_requested:
+                            diag_header = _diag_requested
+                        _diag_requested = ""
+
+                    rec = registry.get_device(client_id)
+                    tgt_mode = rec.target_mode if (rec and rec.target_mode) else _mode_requested
+                    if tgt_mode and client_mode != tgt_mode:
+                        mode_header = tgt_mode
 
             try:
                 local_ip = self.connection.getsockname()[0]
@@ -886,6 +1020,98 @@ class DashboardHandler(BaseHTTPRequestHandler):
             else:
                 batt_html = " | Kindle: <em>no report</em>"
 
+            poll_interval = get_target_poll_interval()
+            devices = registry.list_devices()
+            total_count = len(devices)
+            online_count = sum(1 for d in devices if d.is_online(poll_interval))
+            offline_count = total_count - online_count
+
+            now_ts = time.time()
+            rows_html = []
+            for d in devices:
+                is_on = d.is_online(poll_interval)
+                status_color = "#2b8a3e" if is_on else "#c92a2a"
+                status_label = "ONLINE" if is_on else "OFFLINE"
+                dev_status = (
+                    f'<span class="badge" style="background:{status_color};color:#fff;'
+                    f'padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;">'
+                    f'{status_label}</span>'
+                )
+                safe_id = html.escape(d.client_id)
+                safe_ip = html.escape(d.remote_ip) if d.remote_ip else "-"
+
+                if d.battery is not None:
+                    b_bolt = "⚡ " if d.charging else ""
+                    batt_str = f"{b_bolt}{int(d.battery)}%"
+                else:
+                    batt_str = "-"
+                safe_batt = html.escape(batt_str)
+
+                if d.last_seen > 0:
+                    dt_str = datetime.fromtimestamp(d.last_seen).strftime("%Y-%m-%d %H:%M:%S")
+                    elapsed = max(0, int(now_ts - d.last_seen))
+                    if elapsed < 60:
+                        rel = f"{elapsed}s ago"
+                    elif elapsed < 3600:
+                        rel = f"{elapsed // 60}m ago"
+                    else:
+                        rel = f"{elapsed // 3600}h ago"
+                    seen_str = f"{dt_str} ({rel})"
+                else:
+                    seen_str = "never"
+                safe_seen = html.escape(seen_str)
+
+                safe_client_ver = html.escape(d.client_version) if d.client_version else "-"
+                safe_fw_ver = html.escape(d.firmware_version) if d.firmware_version else "-"
+                ver_display = f"{safe_client_ver} / {safe_fw_ver}"
+
+                safe_mode = html.escape(d.client_mode) if d.client_mode else "-"
+                if d.target_mode:
+                    safe_mode += f" (target: {html.escape(d.target_mode)})"
+
+                rows_html.append(f"""<tr>
+                    <td>{dev_status}</td>
+                    <td><strong>{safe_id}</strong></td>
+                    <td>{safe_ip}</td>
+                    <td>{safe_batt}</td>
+                    <td>{safe_seen}</td>
+                    <td>{ver_display}</td>
+                    <td>{safe_mode}</td>
+                    <td>
+                        <div class="ctrl-group">
+                            <select class="device-action-select" aria-label="Action for {safe_id}">
+                                <option value="restart">restart</option>
+                                <option value="reboot">reboot</option>
+                                <option value="update">update</option>
+                                <option value="clear_backup">clear_backup</option>
+                            </select>
+                            <button class="btn-small btn-device-action" data-client-id="{safe_id}">Action</button>
+                        </div>
+                        <div class="ctrl-group">
+                            <select class="device-diag-select" aria-label="Diagnostics for {safe_id}">
+                                <option value="1">quick</option>
+                                <option value="full">full</option>
+                            </select>
+                            <button class="btn-small btn-device-diag" data-client-id="{safe_id}">Diag</button>
+                            <button class="btn-small btn-device-view-diag" data-client-id="{safe_id}">View Diag</button>
+                        </div>
+                        <div class="ctrl-group">
+                            <select class="device-mode-select" aria-label="Run Mode for {safe_id}">
+                                <option value="resident">resident</option>
+                                <option value="oneshot">oneshot</option>
+                                <option value="sleep">sleep</option>
+                                <option value="sleep-suspend">sleep-suspend</option>
+                            </select>
+                            <button class="btn-small btn-device-mode" data-client-id="{safe_id}">Mode</button>
+                        </div>
+                    </td>
+                </tr>""")
+
+            if not rows_html:
+                fleet_table_body = '<tr><td colspan="8" style="text-align:center;color:#888;padding:16px;">No registered devices. Kindle devices will appear automatically upon first poll.</td></tr>'
+            else:
+                fleet_table_body = "\n".join(rows_html)
+
             script_nonce = secrets.token_hex(16)
             csp = (
                 "default-src 'self'; "
@@ -905,9 +1131,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             display: flex;
             flex-direction: column;
             align-items: center;
-            justify-content: center;
+            justify-content: flex-start;
             min-height: 100vh;
             margin: 0;
+            padding: 20px 0;
+            box-sizing: border-box;
             font-family: -apple-system, sans-serif;
             color: #ddd;
         }}
@@ -948,6 +1176,77 @@ class DashboardHandler(BaseHTTPRequestHandler):
         }}
         a {{ color: #4da6ff; text-decoration: none; margin: 0 8px; }}
         a:hover {{ text-decoration: underline; }}
+        .fleet-section {{
+            width: 95vw;
+            max-width: 1100px;
+            margin-top: 24px;
+            background: #2a2a2a;
+            border: 1px solid #444;
+            border-radius: 8px;
+            padding: 16px;
+            box-sizing: border-box;
+        }}
+        .fleet-summary {{
+            display: flex;
+            gap: 16px;
+            align-items: center;
+            flex-wrap: wrap;
+            font-size: 15px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #444;
+        }}
+        .broadcast-toolbar {{
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-top: 12px;
+            padding: 10px;
+            background: #222;
+            border-radius: 6px;
+            font-size: 13px;
+        }}
+        .fleet-table-container {{
+            overflow-x: auto;
+            margin-top: 14px;
+        }}
+        table.fleet-table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+            text-align: left;
+        }}
+        table.fleet-table th, table.fleet-table td {{
+            padding: 8px 10px;
+            border-bottom: 1px solid #3a3a3a;
+            white-space: nowrap;
+        }}
+        table.fleet-table th {{
+            background: #333;
+            color: #bbb;
+            font-weight: 600;
+        }}
+        table.fleet-table tr:hover {{
+            background: rgba(255, 255, 255, 0.04);
+        }}
+        .ctrl-group {{
+            display: inline-flex;
+            gap: 4px;
+            align-items: center;
+            margin-right: 6px;
+        }}
+        select {{
+            background: #333;
+            color: #fff;
+            border: 1px solid #555;
+            padding: 4px 6px;
+            border-radius: 4px;
+            font-size: 12px;
+        }}
+        button.btn-small {{
+            padding: 4px 8px;
+            font-size: 12px;
+        }}
     </style>
 </head>
 <body>
@@ -972,6 +1271,63 @@ class DashboardHandler(BaseHTTPRequestHandler):
         <a href="/dashboard.png?kindle=pw5&amp;rotate=90&amp;view={current_view}" target="_blank">Kindle PW5 (Rotated 90°)</a> |
         <a href="/dashboard.png?mock=1&amp;view={current_view}" target="_blank">Mock Preview</a>
     </div>
+
+    <div class="fleet-section">
+        <div class="fleet-summary">
+            <strong>Fleet Overview:</strong>
+            <span id="fleetTotal">Total: <strong>{total_count}</strong></span>
+            <span id="fleetOnline" style="color:#51cf66;">Online: <strong>{online_count}</strong></span>
+            <span id="fleetOffline" style="color:#adb5bd;">Offline: <strong>{offline_count}</strong></span>
+        </div>
+        <div class="broadcast-toolbar">
+            <span style="font-weight:600;">Broadcast Controls:</span>
+            <div class="ctrl-group">
+                <select id="broadcastActionSelect" aria-label="Broadcast Action">
+                    <option value="restart">restart</option>
+                    <option value="reboot">reboot</option>
+                    <option value="update">update</option>
+                    <option value="clear_backup">clear_backup</option>
+                </select>
+                <button class="btn-small" id="broadcastActionBtn">Broadcast Action</button>
+            </div>
+            <div class="ctrl-group">
+                <select id="broadcastDiagSelect" aria-label="Broadcast Diagnostics">
+                    <option value="1">quick</option>
+                    <option value="full">full</option>
+                </select>
+                <button class="btn-small" id="broadcastDiagBtn">Broadcast Diag</button>
+            </div>
+            <div class="ctrl-group">
+                <select id="broadcastModeSelect" aria-label="Broadcast Run Mode">
+                    <option value="resident">resident</option>
+                    <option value="oneshot">oneshot</option>
+                    <option value="sleep">sleep</option>
+                    <option value="sleep-suspend">sleep-suspend</option>
+                </select>
+                <button class="btn-small" id="broadcastModeBtn">Broadcast Mode</button>
+            </div>
+        </div>
+        <div class="fleet-table-container">
+            <table class="fleet-table">
+                <thead>
+                    <tr>
+                        <th>Status</th>
+                        <th>Device ID</th>
+                        <th>IP Address</th>
+                        <th>Battery</th>
+                        <th>Last Seen</th>
+                        <th>Client / FW</th>
+                        <th>Mode</th>
+                        <th>Per-Device Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {fleet_table_body}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
     <script nonce="{script_nonce}">
         const tokenInput = document.getElementById("tokenInput");
         const savedToken = localStorage.getItem("tracker_token") || "";
@@ -1002,13 +1358,138 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if (res.ok) {{
                 const text = await res.text();
                 const w = window.open();
-                w.document.open();
-                w.document.write("<pre>" + text.replace(/&/g,"&amp;").replace(/</g,"&lt;") + "</pre>");
-                w.document.close();
+                if (w) {{
+                    w.document.open();
+                    w.document.write("<pre>" + text.replace(/&/g,"&amp;").replace(/</g,"&lt;") + "</pre>");
+                    w.document.close();
+                }} else {{
+                    alert("Pop-up blocked. Open /diag manually.");
+                }}
             }} else {{
                 alert("Diagnostics access denied: HTTP " + res.status);
             }}
         }};
+
+        function getAuthToken() {{
+            return tokenInput.value.trim();
+        }}
+
+        async function apiPost(endpoint, data) {{
+            const tok = getAuthToken();
+            try {{
+                const res = await fetch(endpoint, {{
+                    method: "POST",
+                    headers: {{
+                        "Content-Type": "application/json",
+                        "X-Tracker-Token": tok
+                    }},
+                    body: JSON.stringify(data)
+                }});
+                if (res.ok) {{
+                    alert("Command sent successfully.");
+                    window.location.reload();
+                }} else {{
+                    alert("Command failed: HTTP " + res.status);
+                }}
+            }} catch (err) {{
+                alert("Network error: " + err.message);
+            }}
+        }}
+
+        document.querySelectorAll(".btn-device-action").forEach(btn => {{
+            btn.addEventListener("click", () => {{
+                const cid = btn.getAttribute("data-client-id");
+                const row = btn.closest("tr") || btn.parentElement;
+                const sel = row ? row.querySelector(".device-action-select") : null;
+                if (!sel || !sel.value) {{
+                    alert("Please select an action.");
+                    return;
+                }}
+                apiPost("/action", {{ action: sel.value, client_id: cid }});
+            }});
+        }});
+
+        document.querySelectorAll(".btn-device-diag").forEach(btn => {{
+            btn.addEventListener("click", () => {{
+                const cid = btn.getAttribute("data-client-id");
+                const row = btn.closest("tr") || btn.parentElement;
+                const sel = row ? row.querySelector(".device-diag-select") : null;
+                const lvl = sel ? sel.value : "1";
+                apiPost("/diag/request", {{ level: lvl, client_id: cid }});
+            }});
+        }});
+
+        document.querySelectorAll(".btn-device-mode").forEach(btn => {{
+            btn.addEventListener("click", () => {{
+                const cid = btn.getAttribute("data-client-id");
+                const row = btn.closest("tr") || btn.parentElement;
+                const sel = row ? row.querySelector(".device-mode-select") : null;
+                if (!sel || !sel.value) {{
+                    alert("Please select a mode.");
+                    return;
+                }}
+                apiPost("/mode", {{ mode: sel.value, client_id: cid }});
+            }});
+        }});
+
+        document.querySelectorAll(".btn-device-view-diag").forEach(btn => {{
+            btn.addEventListener("click", async () => {{
+                const cid = btn.getAttribute("data-client-id");
+                const tok = getAuthToken();
+                const url = "/diag?client_id=" + encodeURIComponent(cid);
+                try {{
+                    const res = await fetch(url, {{
+                        headers: {{ "X-Tracker-Token": tok }}
+                    }});
+                    if (res.ok) {{
+                        const text = await res.text();
+                        const w = window.open();
+                        if (w) {{
+                            w.document.open();
+                            w.document.write("<pre>" + text.replace(/&/g,"&amp;").replace(/</g,"&lt;") + "</pre>");
+                            w.document.close();
+                        }} else {{
+                            alert("Pop-up blocked. Open " + url + " manually.");
+                        }}
+                    }} else if (res.status === 404) {{
+                        alert("No diagnostics available for " + cid);
+                    }} else {{
+                        alert("Diagnostics access denied: HTTP " + res.status);
+                    }}
+                }} catch (err) {{
+                    alert("Error loading diagnostics: " + err.message);
+                }}
+            }});
+        }});
+
+        const bActionBtn = document.getElementById("broadcastActionBtn");
+        if (bActionBtn) {{
+            bActionBtn.addEventListener("click", () => {{
+                const sel = document.getElementById("broadcastActionSelect");
+                if (sel && sel.value) {{
+                    apiPost("/action", {{ action: sel.value, client_id: "all" }});
+                }}
+            }});
+        }}
+
+        const bDiagBtn = document.getElementById("broadcastDiagBtn");
+        if (bDiagBtn) {{
+            bDiagBtn.addEventListener("click", () => {{
+                const sel = document.getElementById("broadcastDiagSelect");
+                const lvl = sel ? sel.value : "1";
+                apiPost("/diag/request", {{ level: lvl, client_id: "all" }});
+            }});
+        }}
+
+        const bModeBtn = document.getElementById("broadcastModeBtn");
+        if (bModeBtn) {{
+            bModeBtn.addEventListener("click", () => {{
+                const sel = document.getElementById("broadcastModeSelect");
+                if (sel && sel.value) {{
+                    apiPost("/mode", {{ mode: sel.value, client_id: "all" }});
+                }}
+            }});
+        }}
     </script>
 </body>
 </html>"""
@@ -1025,6 +1506,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         print(f"[Server] {self.address_string()} - {args[0]}")
+
+
+TransitTrackerHandler = DashboardHandler
 
 
 if __name__ == "__main__":

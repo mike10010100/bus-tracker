@@ -15,6 +15,17 @@ import (
 	"time"
 )
 
+func init() {
+	origVerify := verifyServerFn
+	verifyServerFn = func(ctx context.Context, u string, timeout time.Duration) bool {
+		// Prevent tests from accidentally contacting a live host daemon on port 8000
+		if strings.Contains(u, "127.0.0.1:8000") || strings.Contains(u, "localhost:8000") {
+			return false
+		}
+		return origVerify(ctx, u, timeout)
+	}
+}
+
 // patchRuntime restores all process/file seams after the test.
 func patchRuntime(t *testing.T) {
 	t.Helper()
@@ -29,12 +40,15 @@ func patchRuntime(t *testing.T) {
 	origReadFile := osReadFile
 	origWriteFile := osWriteFile
 	origGetBattery := GetBatteryInfo
+	origGetClientID := GetClientID
 	origDiscover := autoDiscover
 	origExecCmd := execCommand
 	origExecCmdCtx := execCommandContext
 	origOTAPub := OTAPublicKey
 	origAllowLoopback := allowLoopbackDiscovery
 	origMinPoll := minPollIntervalSec
+
+	GetClientID = func() string { return "test-client-id-1234" }
 
 	// Discovery is disabled by default in tests so a real LAN server cannot
 	// interfere with assertions; individual tests may override it.
@@ -61,6 +75,7 @@ func patchRuntime(t *testing.T) {
 		osReadFile = origReadFile
 		osWriteFile = origWriteFile
 		GetBatteryInfo = origGetBattery
+		GetClientID = origGetClientID
 		autoDiscover = origDiscover
 		execCommand = origExecCmd
 		execCommandContext = origExecCmdCtx
@@ -826,5 +841,25 @@ func TestNewTrackerClient_Views(t *testing.T) {
 	tc2 := NewTrackerClient("http://127.0.0.1:8000", "evening")
 	if tc2.getViewMode() != "evening" {
 		t.Errorf("expected evening view, got %s", tc2.getViewMode())
+	}
+}
+
+func TestTrackerClient_ClientID(t *testing.T) {
+	patchRuntime(t)
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	if got := tc.getClientID(); got != "test-client-id-1234" {
+		t.Errorf("expected client ID test-client-id-1234, got %q", got)
+	}
+
+	tc.setClientID("custom-client-id-5678")
+	if got := tc.getClientID(); got != "custom-client-id-5678" {
+		t.Errorf("expected custom client ID, got %q", got)
+	}
+
+	// Test lazy resolution when clientID is empty
+	tc.setClientID("")
+	GetClientID = func() string { return "lazy-client-id-9999" }
+	if got := tc.getClientID(); got != "lazy-client-id-9999" {
+		t.Errorf("expected lazy client ID, got %q", got)
 	}
 }

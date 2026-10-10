@@ -9,6 +9,7 @@ import datetime
 import io
 import json
 import os
+import re
 import socket
 import tempfile
 import threading
@@ -703,6 +704,345 @@ class TestServerCoverageAdditions(ServerHTTPTestBase):
             with server._data_lock:
                 server._data_cache.clear()
                 server._data_cache.update(orig_cache)
+
+
+class TestMultiDeviceWebInterface(ServerHTTPTestBase):
+    def setUp(self):
+        super().setUp()
+        server.get_device_registry().clear()
+        with server._diag_lock:
+            server._device_action = ""
+            server._diag_requested = ""
+            server._mode_requested = ""
+            server._last_diagnostics = {"text": "", "time": 0.0, "battery": None, "charging": None}
+
+    def test_fleet_overview_empty_registry(self):
+        status, headers, body = _http_get(self.port, "/")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", headers.get("Content-Type", ""))
+        body_text = body.decode("utf-8")
+        self.assertIn("Fleet Overview:", body_text)
+        self.assertIn("Total: <strong>0</strong>", body_text)
+        self.assertIn("Online: <strong>0</strong>", body_text)
+        self.assertIn("Offline: <strong>0</strong>", body_text)
+        self.assertIn("No registered devices", body_text)
+        self.assertIn("Broadcast Controls:", body_text)
+
+    def test_fleet_overview_multi_device_rendering(self):
+        registry = server.get_device_registry()
+        # Device 1: online, 85% battery, charging, v1.2 / 5.14, resident mode
+        d1 = registry.update_telemetry(
+            client_id="kindle-dev-001",
+            remote_ip="192.168.1.101",
+            battery=85.0,
+            charging=True,
+            client_mode="resident",
+            client_version="v1.2",
+            firmware_version="5.14.2",
+        )
+        # Device 2: offline (seen 1 hour ago), 15% battery, not charging, v1.0 / 5.12, sleep mode with target oneshot
+        d2 = registry.update_telemetry(
+            client_id="kindle-dev-002",
+            remote_ip="192.168.1.102",
+            battery=15.0,
+            charging=False,
+            client_mode="sleep",
+            client_version="v1.0",
+            firmware_version="5.12.1",
+        )
+        d2.last_seen = time.time() - 3600.0
+        registry.set_mode("kindle-dev-002", "oneshot")
+
+        status, headers, body = _http_get(self.port, "/")
+        self.assertEqual(status, 200)
+        body_text = body.decode("utf-8")
+
+        # Summary
+        self.assertIn("Total: <strong>2</strong>", body_text)
+        self.assertIn("Online: <strong>1</strong>", body_text)
+        self.assertIn("Offline: <strong>1</strong>", body_text)
+
+        # Device 1 fields
+        self.assertIn("ONLINE", body_text)
+        self.assertIn("kindle-dev-001", body_text)
+        self.assertIn("192.168.1.101", body_text)
+        self.assertIn("⚡ 85%", body_text)
+        self.assertIn("v1.2 / 5.14.2", body_text)
+        self.assertIn("data-client-id=\"kindle-dev-001\"", body_text)
+
+        # Device 2 fields
+        self.assertIn("OFFLINE", body_text)
+        self.assertIn("kindle-dev-002", body_text)
+        self.assertIn("192.168.1.102", body_text)
+        self.assertIn("15%", body_text)
+        self.assertNotIn("⚡ 15%", body_text)
+        self.assertIn("v1.0 / 5.12.1", body_text)
+        self.assertIn("target: oneshot", body_text)
+        self.assertIn("data-client-id=\"kindle-dev-002\"", body_text)
+
+        # Controls
+        self.assertIn("broadcastActionBtn", body_text)
+        self.assertIn("broadcastDiagBtn", body_text)
+        self.assertIn("broadcastModeBtn", body_text)
+        self.assertIn("device-action-select", body_text)
+        self.assertIn("device-diag-select", body_text)
+        self.assertIn("device-mode-select", body_text)
+
+    def test_fleet_overview_xss_escaping(self):
+        registry = server.get_device_registry()
+        # Direct injection into fields
+        dev = registry.get_or_register("xss_safe_dev")
+        dev.remote_ip = "<script>alert('ip-xss')</script>"
+        dev.client_version = "v<script>alert('ver-xss')</script>"
+        dev.firmware_version = "<img src=x onerror=alert('fw-xss')>"
+        dev.client_mode = "<b>bold</b>"
+        dev.target_mode = "<i>italic</i>"
+        dev.last_seen = time.time()
+
+        status, _, body = _http_get(self.port, "/")
+        self.assertEqual(status, 200)
+        body_text = body.decode("utf-8")
+
+        # Unescaped XSS payloads must NOT be present
+        self.assertNotIn("<script>alert('ip-xss')</script>", body_text)
+        self.assertNotIn("<script>alert('ver-xss')</script>", body_text)
+        self.assertNotIn("<img src=x onerror=alert('fw-xss')>", body_text)
+        self.assertNotIn("<b>bold</b>", body_text)
+        self.assertNotIn("<i>italic</i>", body_text)
+
+        # Escaped versions MUST be present
+        self.assertIn("&lt;script&gt;alert(&#x27;ip-xss&#x27;)&lt;/script&gt;", body_text)
+        self.assertIn("&lt;img src=x onerror=alert(&#x27;fw-xss&#x27;)&gt;", body_text)
+
+    def test_existing_dashboard_functionality_operational(self):
+        # Default view
+        status, _, body = _http_get(self.port, "/")
+        self.assertEqual(status, 200)
+        self.assertIn(b'<img src="/dashboard.png?view=auto&amp;t=', body)
+        self.assertIn(b"Status: <span style=\"color:#51cf66;\">ACTIVE</span>", body)
+        self.assertIn(b"Auto (AM Citi / PM Bus)", body)
+        self.assertIn(b"Morning (Citi Bike Hero)", body)
+        self.assertIn(b"Evening (Bus Hero)", body)
+        self.assertIn(b"Standard (800x480)", body)
+        self.assertIn(b"Kindle PW5 (Rotated 90\xc2\xb0)", body)
+
+        # View switcher parameter propagation
+        status_m, _, body_m = _http_get(self.port, "/?view=morning")
+        self.assertEqual(status_m, 200)
+        self.assertIn(b'<img src="/dashboard.png?view=morning&amp;t=', body_m)
+
+        status_e, _, body_e = _http_get(self.port, "/index.html?view=evening")
+        self.assertEqual(status_e, 200)
+        self.assertIn(b'<img src="/dashboard.png?view=evening&amp;t=', body_e)
+
+    def test_csp_nonce_and_script_security(self):
+        status, headers, body = _http_get(self.port, "/")
+        self.assertEqual(status, 200)
+        csp = headers.get("Content-Security-Policy", "")
+        self.assertIn("script-src 'self' 'nonce-", csp)
+
+        body_text = body.decode("utf-8")
+        match_csp = re.search(r"nonce-([a-f0-9]+)", csp)
+        self.assertIsNotNone(match_csp)
+        csp_nonce = match_csp.group(1)
+
+        match_script = re.search(r'<script nonce="([a-f0-9]+)">', body_text)
+        self.assertIsNotNone(match_script)
+        script_nonce = match_script.group(1)
+
+        self.assertEqual(csp_nonce, script_nonce)
+
+        self.assertNotIn("onclick=", body_text)
+        self.assertNotIn("onload=", body_text)
+
+    def test_per_device_action_and_broadcast_controls_end_to_end(self):
+        registry = server.get_device_registry()
+        dev1 = registry.get_or_register("device-alpha")
+        dev2 = registry.get_or_register("device-beta")
+
+        # 1. Targeted Action to device-alpha
+        status, _, body = _http(
+            "POST",
+            self.port,
+            "/action",
+            headers=_auth_headers({"Content-Type": "application/json"}),
+            body=json.dumps({"action": "restart", "client_id": "device-alpha"}).encode("utf-8"),
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["pending"], "restart")
+
+        # device-beta polling does NOT receive action
+        _s, h_beta, _ = _http_get(
+            self.port,
+            "/dashboard.png?mock=1&kindle=pw5",
+            headers={"X-Tracker-Client-ID": "device-beta"},
+        )
+        self.assertNotIn("X-Tracker-Action", h_beta)
+
+        # device-alpha polling receives restart action
+        _s, h_alpha, _ = _http_get(
+            self.port,
+            "/dashboard.png?mock=1&kindle=pw5",
+            headers={"X-Tracker-Client-ID": "device-alpha"},
+        )
+        self.assertEqual(h_alpha.get("X-Tracker-Action"), "restart")
+
+        # Second poll of device-alpha -> action already popped
+        _s, h_alpha2, _ = _http_get(
+            self.port,
+            "/dashboard.png?mock=1&kindle=pw5",
+            headers={"X-Tracker-Client-ID": "device-alpha"},
+        )
+        self.assertNotIn("X-Tracker-Action", h_alpha2)
+
+        # 2. Broadcast Action to 'all'
+        status, _, body = _http(
+            "POST",
+            self.port,
+            "/action",
+            headers=_auth_headers({"Content-Type": "application/json"}),
+            body=json.dumps({"action": "update", "client_id": "all"}).encode("utf-8"),
+        )
+        self.assertEqual(status, 200)
+
+        # Both devices receive update action
+        _s, h_alpha_bc, _ = _http_get(
+            self.port,
+            "/dashboard.png?mock=1&kindle=pw5",
+            headers={"X-Tracker-Client-ID": "device-alpha"},
+        )
+        self.assertEqual(h_alpha_bc.get("X-Tracker-Action"), "update")
+
+        _s, h_beta_bc, _ = _http_get(
+            self.port,
+            "/dashboard.png?mock=1&kindle=pw5",
+            headers={"X-Tracker-Client-ID": "device-beta"},
+        )
+        self.assertEqual(h_beta_bc.get("X-Tracker-Action"), "update")
+
+        # 3. Targeted Diag to device-beta
+        status, _, body = _http(
+            "POST",
+            self.port,
+            "/diag/request",
+            headers=_auth_headers({"Content-Type": "application/json"}),
+            body=json.dumps({"level": "full", "client_id": "device-beta"}).encode("utf-8"),
+        )
+        self.assertEqual(status, 200)
+
+        _s, h_alpha_diag, _ = _http_get(
+            self.port,
+            "/dashboard.png?mock=1&kindle=pw5",
+            headers={"X-Tracker-Client-ID": "device-alpha"},
+        )
+        self.assertNotIn("X-Tracker-Diag", h_alpha_diag)
+
+        _s, h_beta_diag, _ = _http_get(
+            self.port,
+            "/dashboard.png?mock=1&kindle=pw5",
+            headers={"X-Tracker-Client-ID": "device-beta"},
+        )
+        self.assertEqual(h_beta_diag.get("X-Tracker-Diag"), "full")
+
+        # 4. Broadcast Diag to 'all'
+        status, _, body = _http(
+            "POST",
+            self.port,
+            "/diag/request",
+            headers=_auth_headers({"Content-Type": "application/json"}),
+            body=json.dumps({"level": "1", "client_id": "all"}).encode("utf-8"),
+        )
+        self.assertEqual(status, 200)
+
+        _s, h_alpha_diag_bc, _ = _http_get(
+            self.port,
+            "/dashboard.png?mock=1&kindle=pw5",
+            headers={"X-Tracker-Client-ID": "device-alpha"},
+        )
+        self.assertEqual(h_alpha_diag_bc.get("X-Tracker-Diag"), "1")
+
+        _s, h_beta_diag_bc, _ = _http_get(
+            self.port,
+            "/dashboard.png?mock=1&kindle=pw5",
+            headers={"X-Tracker-Client-ID": "device-beta"},
+        )
+        self.assertEqual(h_beta_diag_bc.get("X-Tracker-Diag"), "1")
+
+        # 5. Targeted Mode to device-alpha
+        status, _, body = _http(
+            "POST",
+            self.port,
+            "/mode",
+            headers=_auth_headers({"Content-Type": "application/json"}),
+            body=json.dumps({"mode": "sleep-suspend", "client_id": "device-alpha"}).encode("utf-8"),
+        )
+        self.assertEqual(status, 200)
+
+        _s, h_alpha_mode, _ = _http_get(
+            self.port,
+            "/dashboard.png?mock=1&kindle=pw5",
+            headers={"X-Tracker-Client-ID": "device-alpha", "X-Tracker-Mode": "resident"},
+        )
+        self.assertEqual(h_alpha_mode.get("X-Tracker-Mode"), "sleep-suspend")
+
+        _s, h_beta_mode, _ = _http_get(
+            self.port,
+            "/dashboard.png?mock=1&kindle=pw5",
+            headers={"X-Tracker-Client-ID": "device-beta", "X-Tracker-Mode": "resident"},
+        )
+        self.assertNotIn("X-Tracker-Mode", h_beta_mode)
+
+        # 6. Broadcast Mode to 'all'
+        status, _, body = _http(
+            "POST",
+            self.port,
+            "/mode",
+            headers=_auth_headers({"Content-Type": "application/json"}),
+            body=json.dumps({"mode": "oneshot", "client_id": "all"}).encode("utf-8"),
+        )
+        self.assertEqual(status, 200)
+
+        _s, h_alpha_mode_bc, _ = _http_get(
+            self.port,
+            "/dashboard.png?mock=1&kindle=pw5",
+            headers={"X-Tracker-Client-ID": "device-alpha", "X-Tracker-Mode": "resident"},
+        )
+        self.assertEqual(h_alpha_mode_bc.get("X-Tracker-Mode"), "oneshot")
+
+        _s, h_beta_mode_bc, _ = _http_get(
+            self.port,
+            "/dashboard.png?mock=1&kindle=pw5",
+            headers={"X-Tracker-Client-ID": "device-beta", "X-Tracker-Mode": "resident"},
+        )
+        self.assertEqual(h_beta_mode_bc.get("X-Tracker-Mode"), "oneshot")
+
+        # 7. Auth failure tests
+        status_unauth, _, _ = _http(
+            "POST",
+            self.port,
+            "/action",
+            headers={"Content-Type": "application/json"},
+            body=b'{"action": "restart"}',
+        )
+        self.assertEqual(status_unauth, 403)
+
+        status_unauth2, _, _ = _http(
+            "POST",
+            self.port,
+            "/diag/request",
+            headers={"Content-Type": "application/json"},
+            body=b'{"level": "1"}',
+        )
+        self.assertEqual(status_unauth2, 403)
+
+        status_unauth3, _, _ = _http(
+            "POST",
+            self.port,
+            "/mode",
+            headers={"Content-Type": "application/json"},
+            body=b'{"mode": "sleep"}',
+        )
+        self.assertEqual(status_unauth3, 403)
 
 
 if __name__ == "__main__":

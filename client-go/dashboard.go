@@ -230,6 +230,7 @@ func (tc *TrackerClient) maybeUpdateBinary(ctx context.Context, serverVer, serve
 		recordOTAFailure(serverSHA)
 		return false
 	}
+	req.Header.Set("X-Tracker-Client-ID", tc.getClientID())
 	resp, err := otaHTTPClient.Do(req)
 	if err != nil {
 		recordOTAFailure(serverSHA)
@@ -274,6 +275,7 @@ func (tc *TrackerClient) maybeUpdateBinary(ctx context.Context, serverVer, serve
 		recordOTAFailure(serverSHA)
 		return false
 	}
+	binReq.Header.Set("X-Tracker-Client-ID", tc.getClientID())
 	binResp, err := otaHTTPClient.Do(binReq)
 	if err != nil {
 		recordOTAFailure(serverSHA)
@@ -379,6 +381,7 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 		return 0
 	}
 	req.Header.Set(otasig.NonceHeader, nonce)
+	req.Header.Set("X-Tracker-Client-ID", tc.getClientID())
 
 	req.Header.Set("X-Kindle-Battery", strconv.Itoa(batt.Level))
 	req.Header.Set("X-Kindle-Charging", strconv.Itoa(chargeVal))

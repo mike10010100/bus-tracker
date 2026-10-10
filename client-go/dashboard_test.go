@@ -162,7 +162,9 @@ func TestFetchAndDrawDashboard_Success(t *testing.T) {
 	patchRuntime(t)
 	png := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
 
+	var receivedClientID string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedClientID = r.Header.Get("X-Tracker-Client-ID")
 		w.Header().Set("X-Kindle-Poll-Interval", "45")
 		w.Header().Set("X-Tracker-View", r.Header.Get("X-Tracker-View"))
 		w.Header().Set("X-Resolved-View", "morning")
@@ -183,6 +185,9 @@ func TestFetchAndDrawDashboard_Success(t *testing.T) {
 	}
 	if tc.lastRenderedView != "morning" {
 		t.Errorf("expected resolved view captured, got %q", tc.lastRenderedView)
+	}
+	if receivedClientID != "test-client-id-1234" {
+		t.Errorf("expected X-Tracker-Client-ID %q, got %q", "test-client-id-1234", receivedClientID)
 	}
 }
 
@@ -1047,5 +1052,63 @@ func TestGetOwnExeSHA_Branches(t *testing.T) {
 	sha2 := getOwnExeSHA()
 	if sha2 == "" || sha2 == sha1 {
 		t.Error("expected valid distinct sha from osExecutable fallback")
+	}
+}
+
+func TestMaybeUpdateBinary_SendsClientIDHeader(t *testing.T) {
+	patchRuntime(t)
+	binary := []byte("HEADER-CHECK-BINARY")
+	sum := sha256.Sum256(binary)
+	digest := hex.EncodeToString(sum[:])
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	OTAPublicKey = otasig.EncodePublicKey(pub)
+	manifest, err := otasig.SignManifest(priv, "9.9.9", digest, int64(len(binary)))
+	if err != nil {
+		t.Fatalf("SignManifest: %v", err)
+	}
+	manifestBytes, _ := json.Marshal(manifest)
+
+	var manifestClientID, binaryClientID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tracker-arm.manifest":
+			manifestClientID = r.Header.Get("X-Tracker-Client-ID")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write(manifestBytes)
+		case "/tracker-arm":
+			binaryClientID = r.Header.Get("X-Tracker-Client-ID")
+			w.Header().Set("X-Tracker-SHA256", digest)
+			w.WriteHeader(http.StatusOK)
+			w.Write(binary)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	osOpenFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+		return os.CreateTemp(t.TempDir(), "ota-*")
+	}
+	osRename = func(oldpath, newpath string) error { return nil }
+	osChmod = func(name string, mode os.FileMode) error { return nil }
+	sysExec = func(argv0 string, argv []string, envv []string) error { return nil }
+
+	tc := NewTrackerClient(srv.URL, "auto")
+	tc.setClientID("ota-custom-client-id-42")
+
+	if !tc.maybeUpdateBinary(context.Background(), "9.9.9", digest) {
+		t.Fatal("expected OTA update to succeed")
+	}
+
+	if manifestClientID != "ota-custom-client-id-42" {
+		t.Errorf("manifest X-Tracker-Client-ID = %q, want ota-custom-client-id-42", manifestClientID)
+	}
+	if binaryClientID != "ota-custom-client-id-42" {
+		t.Errorf("binary X-Tracker-Client-ID = %q, want ota-custom-client-id-42", binaryClientID)
 	}
 }

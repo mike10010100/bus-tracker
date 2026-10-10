@@ -43,10 +43,11 @@ check-sh:
 	@echo "==> Checking shell scripts syntax..."
 	@bash -n scripts/check_coverage_go.sh
 	@bash -n scripts/deploy.sh
+	@bash -n tests/test_launcher.sh
 	@sh -n $(LAUNCHER)
 	@if command -v shellcheck >/dev/null 2>&1; then \
 		echo "==> Running shellcheck..."; \
-		shellcheck --severity=warning -s bash scripts/check_coverage_go.sh scripts/deploy.sh; \
+		shellcheck --severity=warning -s bash scripts/check_coverage_go.sh scripts/deploy.sh tests/test_launcher.sh; \
 		shellcheck --severity=warning -s sh $(LAUNCHER); \
 	fi
 

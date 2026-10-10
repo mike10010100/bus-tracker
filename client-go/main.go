@@ -73,6 +73,7 @@ type TrackerClient struct {
 
 	mu sync.Mutex
 	// Fields protected by mu:
+	clientID string
 	// interacting is true while the client is in an awake power-button session,
 	// during which it requests the full tappable dashboard from the server.
 	interacting         bool
@@ -103,6 +104,7 @@ func NewTrackerClient(server string, initialView string) *TrackerClient {
 		mvt = time.Now()
 	}
 	return &TrackerClient{
+		clientID:       GetClientID(),
 		serverURL:      server,
 		viewMode:       initialView,
 		manualViewTime: mvt,
@@ -176,6 +178,21 @@ func (tc *TrackerClient) setServerURL(url string) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	tc.serverURL = url
+}
+
+func (tc *TrackerClient) getClientID() string {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	if tc.clientID == "" {
+		tc.clientID = GetClientID()
+	}
+	return tc.clientID
+}
+
+func (tc *TrackerClient) setClientID(id string) {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	tc.clientID = id
 }
 
 // setPresentation records the server-advised visual/interaction state.

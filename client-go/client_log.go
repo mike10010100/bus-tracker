@@ -62,6 +62,7 @@ func (tc *TrackerClient) postText(ctx context.Context, path, msg string) {
 		return
 	}
 	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("X-Tracker-Client-ID", tc.getClientID())
 	resp, err := tc.client.Do(req)
 	if err == nil {
 		resp.Body.Close()
