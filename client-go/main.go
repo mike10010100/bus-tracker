@@ -601,6 +601,7 @@ func (tc *TrackerClient) configureGestureHandlers(gd *GestureDetector, cancel co
 		// ("only brightness changed"). Still acknowledge the touch so an awake
 		// interaction session doesn't expire while the user is poking around.
 		tc.noteTouch()
+		tc.logRemote(fmt.Sprintf("Main-area tap at (%d, %d) [inert]", x, y))
 	}
 	gd.OnDoubleTap = func(x, y int32) {
 		// A double tap is trivially easy to trigger accidentally; do NOT exit.
