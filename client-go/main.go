@@ -144,6 +144,28 @@ func (tc *TrackerClient) dataInteraction() {
 	tc.lastDataInteraction = time.Now()
 }
 
+// setInteractionLighting lights the panel for an interaction session and, while
+// on, suppresses the schedule auto-lighting. On session end (on=false) the
+// manual hold is cleared so the schedule lighting resumes (e.g. off overnight).
+func (tc *TrackerClient) setInteractionLighting(on bool) {
+	tc.mu.Lock()
+	if on {
+		tc.manualLightTime = time.Now()
+	} else {
+		tc.manualLightTime = time.Time{}
+	}
+	tc.mu.Unlock()
+	if !on {
+		return
+	}
+	curr := lipcGet("com.lab126.powerd", "flIntensity")
+	if curr == "" || curr == "0" {
+		lipcSet("com.lab126.powerd", "flIntensity", "8")
+		lipcSet("com.lab126.powerd", "schedAmberLevel", "12")
+		tc.logRemote(fmt.Sprintf("Interaction lighting on (was %q).", curr))
+	}
+}
+
 // noteTouch signals that the user touched the screen. Used to keep an awake
 // interaction session alive while the user is interacting, even for a tap that
 // only changes (say) the frontlight. Non-blocking.
@@ -498,6 +520,10 @@ var interactionHoldDuration = 90 * time.Second
 func (tc *TrackerClient) interactionAwake(ctx context.Context, cancel context.CancelFunc, d time.Duration) bool {
 	// Hold the screensaver open so powerd doesn't auto-sleep mid-browse.
 	lipcSet("com.lab126.powerd", "preventScreenSaver", "1")
+	// Light the panel for the session (off-peak the auto-lighting leaves it
+	// dark, so a night-time interaction would be unreadable).
+	tc.setInteractionLighting(true)
+	defer tc.setInteractionLighting(false)
 
 	// Render the full tappable dashboard: the user just pressed power to engage
 	// and the suspended face was the inert strip. Wi-Fi is still re-associating
