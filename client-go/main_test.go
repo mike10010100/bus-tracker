@@ -1506,3 +1506,38 @@ func TestInteractionAwake_TimesOutAndResets(t *testing.T) {
 		t.Fatal("interactionAwake did not return on cancel")
 	}
 }
+
+func TestInteractionAwake_TouchKeepsAlive(t *testing.T) {
+	patchRuntime(t)
+	png := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Kindle-Poll-Interval", "600")
+		w.WriteHeader(http.StatusOK)
+		w.Write(png)
+	}))
+	defer srv.Close()
+	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
+	osCreate = tempFileCreate(t)
+	origCheck := checkNetworkFn
+	checkNetworkFn = func(context.Context) bool { return true }
+	defer func() { checkNetworkFn = origCheck }()
+	execCommand = func(name string, arg ...string) *exec.Cmd { return exec.Command("true") }
+
+	tc := NewTrackerClient(srv.URL, "auto")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() { done <- tc.interactionAwake(ctx, cancel, 80*time.Millisecond) }()
+
+	// Touches arriving well past the 80ms window must keep the session alive.
+	for i := 0; i < 8; i++ {
+		time.Sleep(30 * time.Millisecond)
+		tc.noteTouch()
+	}
+	select {
+	case <-done:
+		t.Fatal("touches should have kept the interaction session alive")
+	default:
+	}
+	cancel()
+}

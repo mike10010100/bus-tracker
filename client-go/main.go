@@ -47,14 +47,18 @@ type TrackerClient struct {
 	lastDataInteraction time.Time
 	mu                  sync.Mutex
 	refreshCh           chan struct{}
-	lastETag            string
-	consecutiveErrors   int
-	viewMode            string
-	lastRenderedView    string
-	panelOnce           sync.Once
-	panelSize           PanelSize
-	logCh               chan string
-	logStarted          sync.Once
+	// touchCh fires on ANY recognised touch, so an interaction session stays
+	// alive while the user is poking at the screen (a frontlight tap must reset
+	// the idle timer too, not just data taps).
+	touchCh           chan struct{}
+	lastETag          string
+	consecutiveErrors int
+	viewMode          string
+	lastRenderedView  string
+	panelOnce         sync.Once
+	panelSize         PanelSize
+	logCh             chan string
+	logStarted        sync.Once
 	// exitOnPowerKey, when true (resident mode), treats a hardware power-key
 	// press as a request to exit. In low-power dashboard mode it is false: the
 	// power key is a wake source, not an exit, so a press must not kill us.
@@ -79,6 +83,7 @@ func NewTrackerClient(server string, initialView string) *TrackerClient {
 			Timeout: 15 * time.Second,
 		},
 		refreshCh:      make(chan struct{}, 1),
+		touchCh:        make(chan struct{}, 1),
 		logCh:          make(chan string, 64),
 		exitOnPowerKey: true,
 		presentation:   "interactive",
@@ -137,6 +142,16 @@ func (tc *TrackerClient) dataInteraction() {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	tc.lastDataInteraction = time.Now()
+}
+
+// noteTouch signals that the user touched the screen. Used to keep an awake
+// interaction session alive while the user is interacting, even for a tap that
+// only changes (say) the frontlight. Non-blocking.
+func (tc *TrackerClient) noteTouch() {
+	select {
+	case tc.touchCh <- struct{}{}:
+	default:
+	}
 }
 
 func (tc *TrackerClient) getNextPollInterval(serverIntervalSec int) time.Duration {
@@ -476,21 +491,27 @@ func (tc *TrackerClient) interactionAwake(ctx context.Context, cancel context.Ca
 
 	timer := time.NewTimer(d)
 	defer timer.Stop()
+	reset := func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(d)
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return false
 		case <-timer.C:
 			return true
+		case <-tc.touchCh:
+			// Any touch keeps the session alive (even a frontlight-only tap).
+			reset()
 		case <-tc.refreshCh:
 			tc.fetchAndDrawDashboard(ctx, cancel)
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			timer.Reset(d)
+			reset()
 		}
 	}
 }
@@ -533,6 +554,7 @@ func (tc *TrackerClient) cycleFrontlight() {
 // without opening real input devices.
 func (tc *TrackerClient) configureGestureHandlers(gd *GestureDetector, cancel context.CancelFunc) {
 	refresh := func() {
+		tc.noteTouch()
 		select {
 		case tc.refreshCh <- struct{}{}:
 		default:
@@ -543,7 +565,9 @@ func (tc *TrackerClient) configureGestureHandlers(gd *GestureDetector, cancel co
 
 	gd.OnSingleTap = func(x, y int32) {
 		// Screen-only action: cycleFrontlight() arms the lighting hold itself;
-		// do not arm the fast-poll hold (nothing on the wire changed).
+		// do not arm the fast-poll hold (nothing on the wire changed). Still
+		// note the touch so an interaction session doesn't expire under us.
+		tc.noteTouch()
 		tc.logRemote(fmt.Sprintf("Single tap recognized at (%d, %d)", x, y))
 		tc.cycleFrontlight()
 	}
@@ -585,6 +609,7 @@ func (tc *TrackerClient) configureGestureHandlers(gd *GestureDetector, cancel co
 	}
 	gd.OnLightTap = func(x, y int32) {
 		// Screen-only action: no fast-poll hold (see OnSingleTap).
+		tc.noteTouch()
 		tc.logRemote(fmt.Sprintf("LIGHT button tapped at (%d, %d)! Cycling frontlight...", x, y))
 		tc.cycleFrontlight()
 	}
