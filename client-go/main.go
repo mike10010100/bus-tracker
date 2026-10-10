@@ -310,23 +310,50 @@ func (tc *TrackerClient) handleNetworkError(ctx context.Context) {
 	}
 }
 
-// lipcSet executes a lipc-set-prop command, discarding output
+// lipcCallTimeout bounds how long a caller waits on a lipc property call. The
+// gesture handlers run on the input dispatcher goroutine, so a slow or
+// unresponsive daemon (notably powerd right after a power-button wake) must
+// never be able to block input forever. If a call exceeds the timeout the
+// caller moves on (the subprocess is abandoned).
+var lipcCallTimeout = 2 * time.Second
+
+// lipcSet executes a lipc-set-prop command, discarding output.
 func lipcSet(prop, key, val string) {
-	cmd := execCommand("lipc-set-prop", "-i", prop, key, val)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	_ = cmd.Run()
+	fn := execCommand // capture now; the goroutine must not touch the seam var
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		cmd := fn("lipc-set-prop", "-i", prop, key, val)
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+		_ = cmd.Run()
+	}()
+	select {
+	case <-done:
+	case <-time.After(lipcCallTimeout):
+	}
 }
 
-// lipcGet reads a property using lipc-get-prop
+// lipcGet reads a property using lipc-get-prop, bounded by lipcCallTimeout.
 func lipcGet(prop, key string) string {
-	cmd := execCommand("lipc-get-prop", prop, key)
-	cmd.Stderr = io.Discard
-	out, err := cmd.Output()
-	if err != nil {
+	fn := execCommand // capture now; the goroutine must not touch the seam var
+	ch := make(chan string, 1)
+	go func() {
+		cmd := fn("lipc-get-prop", prop, key)
+		cmd.Stderr = io.Discard
+		out, err := cmd.Output()
+		if err != nil {
+			ch <- ""
+			return
+		}
+		ch <- strings.TrimSpace(string(out))
+	}()
+	select {
+	case res := <-ch:
+		return res
+	case <-time.After(lipcCallTimeout):
 		return ""
 	}
-	return strings.TrimSpace(string(out))
 }
 
 // cleanup performs full cleanup, resets screensaver, clears screen, and restores Kindle UI
@@ -607,7 +634,9 @@ func (tc *TrackerClient) configureGestureHandlers(gd *GestureDetector, cancel co
 		refresh()
 	}
 	gd.OnLightTap = func(x, y int32) {
-		// Screen-only action: no fast-poll hold (see OnSingleTap).
+		// Screen-only action: no fast-poll hold (see OnSingleTap). The lipc calls
+		// inside are individually bounded by lipcCallTimeout, so a slow powerd
+		// can stall the dispatcher at most briefly.
 		tc.noteTouch()
 		tc.logRemote(fmt.Sprintf("LIGHT button tapped at (%d, %d)! Cycling frontlight...", x, y))
 		tc.cycleFrontlight()
