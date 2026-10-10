@@ -59,6 +59,10 @@ type TrackerClient struct {
 	panelSize         PanelSize
 	logCh             chan string
 	logStarted        sync.Once
+	// Per-input-device byte counters, for diagnosing a touch device that goes
+	// silent (logged periodically by startInputListeners).
+	inputMu     sync.Mutex
+	inputCounts map[string]int
 	// exitOnPowerKey, when true (resident mode), treats a hardware power-key
 	// press as a request to exit. In low-power dashboard mode it is false: the
 	// power key is a wake source, not an exit, so a press must not kill us.
@@ -85,6 +89,7 @@ func NewTrackerClient(server string, initialView string) *TrackerClient {
 		refreshCh:      make(chan struct{}, 1),
 		touchCh:        make(chan struct{}, 1),
 		logCh:          make(chan string, 64),
+		inputCounts:    map[string]int{},
 		exitOnPowerKey: true,
 		presentation:   "interactive",
 	}
@@ -719,6 +724,11 @@ func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context
 					time.Sleep(100 * time.Millisecond)
 					continue
 				}
+				if n > 0 {
+					tc.inputMu.Lock()
+					tc.inputCounts[path] += n
+					tc.inputMu.Unlock()
+				}
 
 				events := ParseInputEvents(buf, n, path)
 				for _, ev := range events {
@@ -733,6 +743,28 @@ func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context
 
 	// Dispatcher goroutine: processes all events from all devices
 	go tc.runEventLoop(ctx, cancel, eventCh)
+
+	// Diagnostic: periodically log per-device input byte counts so we can tell
+	// exactly when (and which) input device goes silent.
+	go func() {
+		t := time.NewTicker(10 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				tc.inputMu.Lock()
+				msg := "Input bytes/10s:"
+				for p, c := range tc.inputCounts {
+					msg += fmt.Sprintf(" %s=%d", p, c)
+					tc.inputCounts[p] = 0
+				}
+				tc.inputMu.Unlock()
+				tc.logRemote(msg)
+			}
+		}
+	}()
 }
 
 // startPowerListener watches for power button sleep events via lipc
