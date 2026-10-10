@@ -12,6 +12,13 @@ fi
 BINARY="/tmp/tracker"
 BACKUP="/mnt/us/documents/tracker_backup"
 
+# 0. Wait for Wi-Fi (up to ~30s) so the download below can succeed after a boot.
+i=0
+while [ $i -lt 15 ] && ! curl -s -m 3 -o /dev/null "$SERVER/healthz"; do
+    sleep 2
+    i=$((i+1))
+done
+
 # 1. Check for binary update over Wi-Fi
 curl -s -m 20 -z "$BINARY" "$SERVER/tracker-arm" -o "/tmp/tracker.dl"
 if [ -s "/tmp/tracker.dl" ]; then
