@@ -28,12 +28,14 @@ fi
 VERSION=""
 if [[ -f "VERSION" ]]; then
     VERSION=$(cat VERSION | tr -d ' \n\r')
+elif [[ -f "server/server.py" ]]; then
+    VERSION=$(grep -m1 '^SERVER_VERSION\s*=' server/server.py | sed -E 's/SERVER_VERSION\s*=\s*"([^"]+)".*/\1/')
 elif [[ -f "server.py" ]]; then
     VERSION=$(grep -m1 '^SERVER_VERSION\s*=' server.py | sed -E 's/SERVER_VERSION\s*=\s*"([^"]+)".*/\1/')
 fi
 
 if [[ -z "${VERSION}" ]]; then
-    echo "Error: Could not parse version from VERSION or server.py!" >&2
+    echo "Error: Could not parse version from VERSION or server/server.py!" >&2
     exit 1
 fi
 

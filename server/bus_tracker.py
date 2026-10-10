@@ -22,12 +22,19 @@ def load_env_file(env_file: str) -> None:
                     os.environ[k] = v
 
 
+_local_env = os.path.join(os.path.dirname(__file__), ".env")
+_parent_env = os.path.join(os.path.dirname(__file__), "..", ".env")
+_env_file = _local_env if os.path.exists(_local_env) else _parent_env
+
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    if os.path.exists(_env_file):
+        load_dotenv(_env_file)
+    else:
+        load_dotenv()
 except ImportError:
     # Native fallback if python-dotenv is not installed
-    load_env_file(os.path.join(os.path.dirname(__file__), ".env"))
+    load_env_file(_env_file)
 
 def normalize_arrival(t: Dict[str, Any]) -> Dict[str, Any]:
     """

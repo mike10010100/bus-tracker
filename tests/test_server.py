@@ -174,10 +174,6 @@ class TestDataCache(unittest.TestCase):
         self.assertEqual(img3.size, (800, 600))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestVersionFallback(unittest.TestCase):
     def test_get_version_falls_back_on_oserror(self):
         from unittest.mock import patch
@@ -185,3 +181,7 @@ class TestVersionFallback(unittest.TestCase):
 
         with patch("builtins.open", side_effect=OSError("missing")):
             self.assertEqual(version.get_version(), "0.0.0")
+
+
+if __name__ == "__main__":
+    unittest.main()

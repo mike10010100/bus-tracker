@@ -1,7 +1,8 @@
 .PHONY: all check test test-go test-py vet fmt fmt-check coverage coverage-go coverage-py build clean
 
-# Coverage gate (percentage of statements). Enforced by `make coverage`.
-COVERAGE_MIN ?= 90
+# Coverage gates (percentage of statements). Enforced by `make coverage`.
+COVERAGE_MIN_GO ?= 93
+COVERAGE_MIN_PY ?= 92
 
 # Default target
 all: check build
@@ -19,7 +20,7 @@ test-go:
 # Run Python unit tests
 test-py:
 	@echo "==> Running Python unit tests..."
-	@python3 -m unittest discover -s . -p "test_*.py" -v
+	@PYTHONPATH=server python3 -m unittest discover -s tests -p "test_*.py" -v
 
 # Run static analysis
 vet:
@@ -45,13 +46,13 @@ fmt-check:
 coverage: coverage-go coverage-py
 
 coverage-go:
-	@echo "==> Enforcing Go coverage gate ($(COVERAGE_MIN)%)..."
-	@bash scripts/check_coverage_go.sh $(COVERAGE_MIN)
+	@echo "==> Enforcing Go coverage gate ($(COVERAGE_MIN_GO)%)..."
+	@bash scripts/check_coverage_go.sh $(COVERAGE_MIN_GO)
 
 coverage-py:
-	@echo "==> Enforcing Python coverage gate ($(COVERAGE_MIN)%)..."
+	@echo "==> Enforcing Python coverage gate ($(COVERAGE_MIN_PY)%)..."
 	@python3 -m coverage erase
-	@python3 -m coverage run -m unittest discover -s . -p "test_*.py" >/dev/null
+	@PYTHONPATH=server python3 -m coverage run --source=server -m unittest discover -s tests -p "test_*.py" >/dev/null
 	@python3 -m coverage report -m
 
 # Build static ARM binary for Kindle Paperwhite (PW5 / Linux ARMv7)
@@ -65,5 +66,5 @@ build:
 
 # Clean build artifacts
 clean:
-	@rm -f tracker-arm /tmp/server_dashboard.png
+	@rm -f tracker-arm server/tracker-arm client-go/client-go client-go/cover.out /tmp/server_dashboard*.png
 	@rm -rf htmlcov .coverage

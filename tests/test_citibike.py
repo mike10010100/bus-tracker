@@ -81,6 +81,14 @@ class TestCitiBikeTracker(unittest.TestCase):
             res = tracker.get_station_status(force_refresh=True)
             self.assertEqual(len(res), 6)
 
+    def test_network_failure_falls_back_to_cached(self):
+        tracker = CitiBikeTracker()
+        tracker._cached_data = [{"id": "cached_1", "name": "Cached Station"}]
+        with patch("urllib.request.urlopen", side_effect=Exception("Connection refused")):
+            res = tracker.get_station_status(force_refresh=True)
+            self.assertEqual(res, tracker._cached_data)
+
+
     def test_successful_gbfs_parsing(self):
         fake_payload = {
             "data": {

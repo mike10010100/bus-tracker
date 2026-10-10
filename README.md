@@ -118,9 +118,9 @@ curl -H "X-Tracker-Token: my-secret" http://<SERVER_IP>:8000/stop
 
 ## Kindle Paperwhite Setup
 
-1. Copy `TransitTracker.sh` to your Kindle's `documents/` directory:
+1. Copy `scripts/TransitTracker.sh` to your Kindle's `documents/` directory:
    ```bash
-   cp TransitTracker.sh /Volumes/Kindle/documents/
+   cp scripts/TransitTracker.sh /Volumes/Kindle/documents/
    ```
 2. In your Kindle Library, tap **"Transit Tracker"**.
    - **Auto-Discovery:** The Go client will automatically scan your Wi-Fi network via UDP broadcast, locate the running server, and persist its IP address.

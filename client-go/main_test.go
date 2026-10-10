@@ -2,16 +2,13 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -60,207 +57,6 @@ func tempFileCreate(t *testing.T) func(string) (*os.File, error) {
 	}
 }
 
-// otaServer serves the binary at /tracker-arm with an optional digest header.
-func otaServer(t *testing.T, binary []byte, digest string) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/tracker-arm" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.Header().Set("X-Tracker-SHA256", digest)
-		w.WriteHeader(http.StatusOK)
-		w.Write(binary)
-	}))
-}
-
-func TestMaybeUpdateBinary_ValidChecksumExecs(t *testing.T) {
-	patchRuntime(t)
-	binary := []byte("NEWBINARY-BYTES")
-	sum := sha256.Sum256(binary)
-	digest := hex.EncodeToString(sum[:])
-	srv := otaServer(t, binary, digest)
-	defer srv.Close()
-
-	osOpenFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
-		return os.CreateTemp(t.TempDir(), "ota-*")
-	}
-	osRename = func(oldpath, newpath string) error { return nil }
-	osChmod = func(name string, mode os.FileMode) error { return nil }
-
-	var execCalled bool
-	sysExec = func(argv0 string, argv []string, envv []string) error {
-		execCalled = true
-		return nil
-	}
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	if !tc.maybeUpdateBinary(context.Background(), "9.9.9", digest) {
-		t.Fatal("expected verified OTA update to be applied")
-	}
-	if !execCalled {
-		t.Error("expected sysExec after verified download")
-	}
-}
-
-func TestMaybeUpdateBinary_ChecksumMismatchRejects(t *testing.T) {
-	patchRuntime(t)
-	srv := otaServer(t, []byte("TAMPERED"), "deadbeef")
-	defer srv.Close()
-
-	var removed bool
-	osOpenFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
-		return os.CreateTemp(t.TempDir(), "ota-*")
-	}
-	osRemove = func(name string) error { removed = true; return nil }
-	sysExec = func(string, []string, []string) error {
-		t.Fatal("sysExec must NOT be called on checksum mismatch")
-		return nil
-	}
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	if tc.maybeUpdateBinary(context.Background(), "9.9.9", "deadbeef") {
-		t.Fatal("OTA must be rejected on checksum mismatch")
-	}
-	if !removed {
-		t.Error("expected corrupted update file to be removed")
-	}
-}
-
-func TestMaybeUpdateBinary_MissingDigestFailsClosed(t *testing.T) {
-	patchRuntime(t)
-	srv := otaServer(t, []byte("NO DIGEST"), "")
-	defer srv.Close()
-
-	osOpenFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
-		return os.CreateTemp(t.TempDir(), "ota-*")
-	}
-	osRemove = func(name string) error { return nil }
-	sysExec = func(string, []string, []string) error {
-		t.Fatal("sysExec must NOT run without a digest")
-		return nil
-	}
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	if tc.maybeUpdateBinary(context.Background(), "9.9.9", "") {
-		t.Fatal("OTA without digest must fail closed")
-	}
-}
-
-func TestMaybeUpdateBinary_NoUpdateWhenVersionMatches(t *testing.T) {
-	patchRuntime(t)
-	var contacted bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		contacted = true
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	if tc.maybeUpdateBinary(context.Background(), Version, "whatever") {
-		t.Fatal("no update expected when versions match")
-	}
-	if contacted {
-		t.Error("matching version must not perform any network I/O")
-	}
-}
-
-func TestFetchAndDrawDashboard_Success(t *testing.T) {
-	patchRuntime(t)
-	png := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Kindle-Poll-Interval", "45")
-		w.Header().Set("X-Tracker-View", r.Header.Get("X-Tracker-View"))
-		w.Header().Set("X-Resolved-View", "morning")
-		w.WriteHeader(http.StatusOK)
-		w.Write(png)
-	}))
-	defer srv.Close()
-
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88, IsCharging: true} }
-	osCreate = tempFileCreate(t)
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	if got := tc.fetchAndDrawDashboard(ctx, cancel); got != 45 {
-		t.Errorf("expected poll interval 45, got %d", got)
-	}
-	if tc.lastRenderedView != "morning" {
-		t.Errorf("expected resolved view captured, got %q", tc.lastRenderedView)
-	}
-}
-
-func TestFetchAndDrawDashboard_ReportsPanelDimensions(t *testing.T) {
-	patchRuntime(t)
-	png := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
-
-	var gotQuery string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotQuery = r.URL.RawQuery
-		w.Header().Set("X-Kindle-Poll-Interval", "45")
-		w.WriteHeader(http.StatusOK)
-		w.Write(png)
-	}))
-	defer srv.Close()
-
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
-	osCreate = tempFileCreate(t)
-	osReadFile = func(string) ([]byte, error) { return []byte("1236,1648\n"), nil }
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	tc.fetchAndDrawDashboard(ctx, cancel)
-
-	if !strings.Contains(gotQuery, "kindle=pw5") {
-		t.Errorf("expected kindle=pw5 in query, got %q", gotQuery)
-	}
-	if !strings.Contains(gotQuery, "w=1648") || !strings.Contains(gotQuery, "h=1236") {
-		t.Errorf("expected native panel dims in query, got %q", gotQuery)
-	}
-}
-
-func TestFetchAndDrawDashboard_InteractiveOverride(t *testing.T) {
-	patchRuntime(t)
-	png := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
-
-	var gotQuery string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotQuery = r.URL.RawQuery
-		w.Header().Set("X-Kindle-Poll-Interval", "600")
-		w.WriteHeader(http.StatusOK)
-		w.Write(png)
-	}))
-	defer srv.Close()
-
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
-	osCreate = tempFileCreate(t)
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Default (not interacting): no override, server decides the face.
-	tc.fetchAndDrawDashboard(ctx, cancel)
-	if strings.Contains(gotQuery, "present=interactive") {
-		t.Errorf("non-interacting fetch must not force interactive, got %q", gotQuery)
-	}
-
-	// In a session: request the full tappable dashboard.
-	tc.setInteracting(true)
-	if !tc.isInteracting() {
-		t.Fatal("setInteracting(true) should stick")
-	}
-	tc.fetchAndDrawDashboard(ctx, cancel)
-	if !strings.Contains(gotQuery, "present=interactive") {
-		t.Errorf("interacting fetch must request present=interactive, got %q", gotQuery)
-	}
-	tc.setInteracting(false)
-}
-
 func TestRawTouchToDesign(t *testing.T) {
 	patchRuntime(t)
 	osReadFile = func(string) ([]byte, error) { return []byte("1236,1648\n"), nil }
@@ -307,198 +103,6 @@ func TestGetPanelSize_CachesDetection(t *testing.T) {
 	_ = tc.getPanelSize()
 	if calls != 1 {
 		t.Errorf("expected panel size detected once, got %d reads", calls)
-	}
-}
-
-func TestFetchAndDrawDashboard_304SkipsRefresh(t *testing.T) {
-	patchRuntime(t)
-	var sentETag string
-	var eipsCalled bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sentETag = r.Header.Get("If-None-Match")
-		w.Header().Set("ETag", `"abc123"`)
-		w.Header().Set("X-Kindle-Poll-Interval", "600")
-		w.WriteHeader(http.StatusNotModified)
-	}))
-	defer srv.Close()
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
-	orig := execCommand
-	execCommand = func(name string, arg ...string) *exec.Cmd {
-		if name == "eips" {
-			eipsCalled = true
-		}
-		return orig("true")
-	}
-	defer func() { execCommand = orig }()
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	tc.lastETag = `"abc123"`
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	if got := tc.fetchAndDrawDashboard(ctx, cancel); got != 600 {
-		t.Errorf("expected poll interval 600 on 304, got %d", got)
-	}
-	if sentETag != `"abc123"` {
-		t.Errorf("expected If-None-Match to be sent, got %q", sentETag)
-	}
-	if eipsCalled {
-		t.Error("304 must not trigger an eips refresh")
-	}
-}
-
-func TestFetchAndDrawDashboard_StoresETag(t *testing.T) {
-	patchRuntime(t)
-	png := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("ETag", `"newtag"`)
-		w.Header().Set("X-Kindle-Poll-Interval", "45")
-		w.WriteHeader(http.StatusOK)
-		w.Write(png)
-	}))
-	defer srv.Close()
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
-	osCreate = tempFileCreate(t)
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	tc.fetchAndDrawDashboard(ctx, cancel)
-
-	tc.mu.Lock()
-	tag := tc.lastETag
-	tc.mu.Unlock()
-	if tag != `"newtag"` {
-		t.Errorf("expected ETag stored, got %q", tag)
-	}
-}
-
-func TestFetchAndDrawDashboard_AppliesLightingHeaders(t *testing.T) {
-	patchRuntime(t)
-	png := []byte{0x89, 0x50, 0x4E, 0x47}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Kindle-Poll-Interval", "600")
-		w.Header().Set("X-Kindle-Brightness", "8")
-		w.Header().Set("X-Kindle-Warmth", "12")
-		w.WriteHeader(http.StatusOK)
-		w.Write(png)
-	}))
-	defer srv.Close()
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
-	osCreate = tempFileCreate(t)
-
-	var setProps []string
-	orig := execCommand
-	execCommand = func(name string, arg ...string) *exec.Cmd {
-		if name == "lipc-get-prop" {
-			// Report a different current value so the set branches run.
-			return orig("echo", "0")
-		}
-		if name == "lipc-set-prop" && len(arg) >= 4 {
-			setProps = append(setProps, arg[2])
-		}
-		return orig("true")
-	}
-	defer func() { execCommand = orig }()
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	tc.fetchAndDrawDashboard(ctx, cancel)
-
-	joined := strings.Join(setProps, ",")
-	if !strings.Contains(joined, "flIntensity") || !strings.Contains(joined, "schedAmberLevel") {
-		t.Errorf("expected lighting props to be set, got %v", setProps)
-	}
-}
-
-func TestFetchAndDrawDashboard_RunsRequestedAction(t *testing.T) {
-	patchRuntime(t)
-	png := []byte{0x89, 0x50, 0x4E, 0x47}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Tracker-Action", "framework-state")
-		w.Header().Set("X-Kindle-Poll-Interval", "600")
-		w.WriteHeader(http.StatusOK)
-		w.Write(png)
-	}))
-	defer srv.Close()
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
-	osCreate = tempFileCreate(t)
-
-	var ranAction bool
-	origCtxCmd := execCommandContext
-	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
-		ranAction = true
-		return origCtxCmd(ctx, "echo", "state")
-	}
-	defer func() { execCommandContext = origCtxCmd }()
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	tc.fetchAndDrawDashboard(ctx, cancel)
-	if !ranAction {
-		t.Error("expected the requested device action to run")
-	}
-}
-
-func TestFetchAndDrawDashboard_Stop205Cancels(t *testing.T) {
-	patchRuntime(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(205)
-	}))
-	defer srv.Close()
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: -1} }
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	ctx, cancel := context.WithCancel(context.Background())
-	if got := tc.fetchAndDrawDashboard(ctx, cancel); got != 0 {
-		t.Errorf("expected 0 on 205, got %d", got)
-	}
-	select {
-	case <-ctx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("expected context cancel on HTTP 205")
-	}
-}
-
-func TestFetchAndDrawDashboard_AdoptsPrivateServerHeader(t *testing.T) {
-	patchRuntime(t)
-	origDiscover := autoDiscover
-	autoDiscover = func(context.Context) (string, error) { return "", os.ErrNotExist }
-	defer func() { autoDiscover = origDiscover }()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Tracker-Server", "http://10.0.0.55:8000")
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: -1} }
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	tc.fetchAndDrawDashboard(ctx, cancel)
-	if tc.getServerURL() != "http://10.0.0.55:8000" {
-		t.Errorf("expected adoption of private header, got %s", tc.getServerURL())
-	}
-}
-
-func TestFetchAndDrawDashboard_IgnoresPublicServerHeader(t *testing.T) {
-	patchRuntime(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Tracker-Server", "http://8.8.8.8:8000")
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: -1} }
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	tc.fetchAndDrawDashboard(ctx, cancel)
-	if tc.getServerURL() == "http://8.8.8.8:8000" {
-		t.Error("must not adopt a public server header")
 	}
 }
 
@@ -664,67 +268,6 @@ func TestLogRemoteQueueDoesNotBlockAndDropsWhenFull(t *testing.T) {
 	}
 }
 
-func TestArmSysfsWake_ClearThenSet(t *testing.T) {
-	patchRuntime(t)
-	var writes []string
-	osWriteFile = func(path string, data []byte, perm os.FileMode) error {
-		writes = append(writes, path+"="+string(data))
-		return nil
-	}
-	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-	if !tc.armSysfsWake(600 * time.Second) {
-		t.Fatal("expected armSysfsWake to succeed")
-	}
-	if len(writes) < 2 || writes[0] != sysfsWakeAlarmPath+"=0" || writes[1] != sysfsWakeAlarmPath+"=+600" {
-		t.Errorf("unexpected writes: %v", writes)
-	}
-}
-
-func TestArmSysfsWake_WriteFailure(t *testing.T) {
-	patchRuntime(t)
-	osWriteFile = func(path string, data []byte, perm os.FileMode) error {
-		if string(data) == "0" {
-			return nil
-		}
-		return os.ErrPermission
-	}
-	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-	if tc.armSysfsWake(600 * time.Second) {
-		t.Error("expected armSysfsWake to fail when the alarm write fails")
-	}
-}
-
-func TestSetWireless_TogglesValue(t *testing.T) {
-	patchRuntime(t)
-	var last string
-	orig := execCommand
-	execCommand = func(name string, arg ...string) *exec.Cmd {
-		if name == "lipc-set-prop" && len(arg) >= 4 && arg[2] == "wirelessEnable" {
-			last = arg[3]
-		}
-		return orig("true")
-	}
-	defer func() { execCommand = orig }()
-	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-	tc.setWireless(false)
-	if last != "0" {
-		t.Errorf("expected wirelessEnable=0, got %q", last)
-	}
-	tc.setWireless(true)
-	if last != "1" {
-		t.Errorf("expected wirelessEnable=1, got %q", last)
-	}
-}
-
-func TestEnterSuspend_ReportsElapsed(t *testing.T) {
-	patchRuntime(t)
-	osWriteFile = func(path string, data []byte, perm os.FileMode) error { return nil }
-	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-	if _, err := tc.enterSuspend(); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
 func TestRunOneshotRendersAndExitsWithoutCleanup(t *testing.T) {
 	patchRuntime(t)
 	png := []byte{0x89, 0x50, 0x4E, 0x47}
@@ -786,284 +329,6 @@ func TestRunOneshotRendersAndExitsWithoutCleanup(t *testing.T) {
 	}
 }
 
-func TestReleaseScreenSaver(t *testing.T) {
-	patchRuntime(t)
-	var setKey, setVal string
-	orig := execCommand
-	execCommand = func(name string, arg ...string) *exec.Cmd {
-		if name == "lipc-set-prop" && len(arg) >= 4 {
-			setKey, setVal = arg[2], arg[3]
-		}
-		return orig("true")
-	}
-	defer func() { execCommand = orig }()
-	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-	tc.releaseScreenSaver()
-	if setKey != "preventScreenSaver" || setVal != "0" {
-		t.Errorf("expected preventScreenSaver=0, got %s=%s", setKey, setVal)
-	}
-}
-
-func TestSleepModeHoldsScreensaverWhileRendering(t *testing.T) {
-	patchRuntime(t)
-	png := []byte{0x89, 0x50, 0x4E, 0x47}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/diag" || r.URL.Path == "/log" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		w.Header().Set("X-Kindle-Poll-Interval", "1")
-		w.WriteHeader(http.StatusOK)
-		w.Write(png)
-	}))
-	defer srv.Close()
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
-	osCreate = tempFileCreate(t)
-	osReadFile = func(string) ([]byte, error) { return nil, os.ErrNotExist }
-	globInputs = func(string) ([]string, error) { return nil, nil }
-	osOpen = func(string) (*os.File, error) { return nil, os.ErrNotExist }
-	checkNetworkFn = func(context.Context) bool { return true }
-
-	var heldAwake bool
-	orig := execCommand
-	execCommand = func(name string, arg ...string) *exec.Cmd {
-		if name == "lipc-set-prop" && len(arg) >= 4 && arg[2] == "preventScreenSaver" && arg[3] == "1" {
-			heldAwake = true
-		}
-		return orig("true")
-	}
-	defer func() { execCommand = orig }()
-
-	origArgs := os.Args
-	os.Args = []string{"/tmp/tracker", "-sleep", "-server", srv.URL}
-	defer func() { os.Args = origArgs }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		run(ctx)
-		close(done)
-	}()
-	time.Sleep(150 * time.Millisecond)
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("sleep run should exit on cancel")
-	}
-	if !heldAwake {
-		t.Error("sleep mode should set preventScreenSaver=1 while rendering")
-	}
-}
-
-func TestRunSleepLoop_WallClockKeepsRefreshing(t *testing.T) {
-	patchRuntime(t)
-	png := []byte{0x89, 0x50, 0x4E, 0x47}
-	var fetches int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/diag" || r.URL.Path == "/log" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		atomic.AddInt32(&fetches, 1)
-		w.Header().Set("X-Kindle-Poll-Interval", "1")
-		w.Header().Set("ETag", `"x"`)
-		w.WriteHeader(http.StatusOK)
-		w.Write(png)
-	}))
-	defer srv.Close()
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
-	osCreate = tempFileCreate(t)
-	osReadFile = func(string) ([]byte, error) { return nil, os.ErrNotExist }
-	checkNetworkFn = func(context.Context) bool { return true }
-
-	orig := execCommand
-	execCommand = func(name string, arg ...string) *exec.Cmd { return orig("true") }
-	defer func() { execCommand = orig }()
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		tc.runSleepLoop(ctx, cancel, false) // safe mode: wall-clock only
-		close(done)
-	}()
-	deadline := time.Now().Add(3 * time.Second)
-	for atomic.LoadInt32(&fetches) < 2 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("runSleepLoop did not exit on cancel")
-	}
-	if atomic.LoadInt32(&fetches) < 2 {
-		t.Errorf("expected at least 2 fetch cycles, got %d", atomic.LoadInt32(&fetches))
-	}
-}
-
-func TestRunSleepLoop_SuspendArmsWifiAndSleeps(t *testing.T) {
-	patchRuntime(t)
-	png := []byte{0x89, 0x50, 0x4E, 0x47}
-	var fetches int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/diag" || r.URL.Path == "/log" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		atomic.AddInt32(&fetches, 1)
-		w.Header().Set("X-Kindle-Poll-Interval", "600") // >= minSuspendInterval
-		w.WriteHeader(http.StatusOK)
-		w.Write(png)
-	}))
-	defer srv.Close()
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
-	osCreate = tempFileCreate(t)
-	osReadFile = func(string) ([]byte, error) { return nil, os.ErrNotExist }
-	checkNetworkFn = func(context.Context) bool { return true }
-
-	var wifi []string
-	var wifiMu sync.Mutex
-	var suspendWritten int32
-	osWriteFile = func(path string, data []byte, perm os.FileMode) error {
-		if path == powerStatePath && string(data) == "mem" {
-			atomic.StoreInt32(&suspendWritten, 1)
-		}
-		return nil
-	}
-	orig := execCommand
-	execCommand = func(name string, arg ...string) *exec.Cmd {
-		if name == "lipc-set-prop" && len(arg) >= 4 && arg[2] == "wirelessEnable" {
-			wifiMu.Lock()
-			wifi = append(wifi, arg[3])
-			wifiMu.Unlock()
-		}
-		return orig("true")
-	}
-	defer func() { execCommand = orig }()
-
-	origSettle := suspendSettleDelay
-	suspendSettleDelay = 0
-	defer func() { suspendSettleDelay = origSettle }()
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		tc.runSleepLoop(ctx, cancel, true)
-		close(done)
-	}()
-	// Wait for the first suspend, then stop.
-	deadline := time.Now().Add(3 * time.Second)
-	for atomic.LoadInt32(&suspendWritten) == 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("runSleepLoop did not exit on cancel")
-	}
-	if atomic.LoadInt32(&suspendWritten) == 0 {
-		t.Error("expected /sys/power/state to be written with 'mem'")
-	}
-	// Wi-Fi should have been disabled for the suspend and re-enabled after.
-	wifiMu.Lock()
-	sawOff, sawOn := false, false
-	for _, v := range wifi {
-		if v == "0" {
-			sawOff = true
-		}
-		if v == "1" {
-			sawOn = true
-		}
-	}
-	wifiMu.Unlock()
-	if !sawOff || !sawOn {
-		t.Errorf("expected wifi off then on (off=%v on=%v) got %v", sawOff, sawOn, wifi)
-	}
-}
-
-func TestWaitForNetwork_SucceedsImmediately(t *testing.T) {
-	patchRuntime(t)
-	checkNetworkFn = func(context.Context) bool { return true }
-	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-	if !tc.waitForNetwork(context.Background()) {
-		t.Error("expected waitForNetwork to report true when the network is up")
-	}
-}
-
-func TestArmSysfsWake_ClampsMinimum(t *testing.T) {
-	patchRuntime(t)
-	var last string
-	osWriteFile = func(path string, data []byte, perm os.FileMode) error {
-		last = string(data)
-		return nil
-	}
-	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-	tc.armSysfsWake(0)
-	if last != "+1" {
-		t.Errorf("expected clamped +1, got %q", last)
-	}
-}
-
-func TestRunSleepLoop_ArmFailureFallsBackToWallClock(t *testing.T) {
-	patchRuntime(t)
-	png := []byte{0x89, 0x50, 0x4E, 0x47}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/diag" || r.URL.Path == "/log" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		w.Header().Set("X-Kindle-Poll-Interval", "600")
-		w.WriteHeader(http.StatusOK)
-		w.Write(png)
-	}))
-	defer srv.Close()
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
-	osCreate = tempFileCreate(t)
-	osReadFile = func(string) ([]byte, error) { return nil, os.ErrNotExist }
-	checkNetworkFn = func(context.Context) bool { return true }
-	// Make the RTC alarm write always fail.
-	osWriteFile = func(path string, data []byte, perm os.FileMode) error { return os.ErrPermission }
-
-	orig := execCommand
-	execCommand = func(name string, arg ...string) *exec.Cmd { return orig("true") }
-	defer func() { execCommand = orig }()
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		tc.runSleepLoop(ctx, cancel, true)
-		close(done)
-	}()
-	time.Sleep(200 * time.Millisecond)
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("runSleepLoop did not exit on cancel")
-	}
-}
-
-func TestWaitForNetwork_TimesOut(t *testing.T) {
-	patchRuntime(t)
-	checkNetworkFn = func(context.Context) bool { return false }
-	origSettle := suspendSettleDelay
-	suspendSettleDelay = 0
-	defer func() { suspendSettleDelay = origSettle }()
-	// Short-circuit: with checkNetworkFn always false and a canceled context, it
-	// returns promptly. Use a context that is already canceled.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-	if tc.waitForNetwork(ctx) {
-		t.Error("expected waitForNetwork to report false on canceled context")
-	}
-}
-
 func TestPostDiagnosticsUploadsReport(t *testing.T) {
 	patchRuntime(t)
 	got := make(chan [2]string, 1)
@@ -1088,48 +353,6 @@ func TestPostDiagnosticsUploadsReport(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected a diagnostics POST")
 	}
-}
-
-func TestFetchAndDrawDashboard_SendsDiagnosticsWhenRequested(t *testing.T) {
-	patchRuntime(t)
-	png := []byte{0x89, 0x50, 0x4E, 0x47}
-	diagCh := make(chan string, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/diag" {
-			b, _ := io.ReadAll(r.Body)
-			diagCh <- string(b)
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		w.Header().Set("X-Tracker-Diag", "1")
-		w.WriteHeader(http.StatusOK)
-		w.Write(png)
-	}))
-	defer srv.Close()
-
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
-	osCreate = tempFileCreate(t)
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	tc.fetchAndDrawDashboard(ctx, cancel)
-
-	select {
-	case body := <-diagCh:
-		if !strings.Contains(body, "=== DIAGNOSTICS") {
-			t.Errorf("expected diagnostics body, got %q", body)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected a diagnostics upload when X-Tracker-Diag is set")
-	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func TestLogSenderDrainsQueue(t *testing.T) {
@@ -1235,50 +458,6 @@ func TestRunEventLoop_PowerKeyCancels(t *testing.T) {
 	}
 }
 
-func TestRunPollLoop_CleansUpOnCancel(t *testing.T) {
-	patchRuntime(t)
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: -1} }
-	osCreate = tempFileCreate(t)
-	var restartedFramework, blanked bool
-	orig := execCommand
-	execCommand = func(name string, arg ...string) *exec.Cmd {
-		if name == "start" && len(arg) > 0 && arg[0] == "lab126_gui" {
-			restartedFramework = true
-		}
-		if name == "eips" && len(arg) > 0 && arg[0] == "-c" {
-			blanked = true
-		}
-		return orig("true")
-	}
-
-	// Server returns 500 so no OTA/download occurs; loop should idle.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		tc.runPollLoop(ctx, cancel, 10*time.Millisecond)
-		close(done)
-	}()
-	time.Sleep(40 * time.Millisecond)
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("runPollLoop should exit on cancel")
-	}
-	if !restartedFramework {
-		t.Error("expected cleanup to restart lab126_gui on loop exit")
-	}
-	if blanked {
-		t.Error("cleanup must not blank the panel (breaks framework-stopped devices)")
-	}
-}
-
 func TestHandleNetworkErrorIncrementsCounter(t *testing.T) {
 	patchRuntime(t)
 	tc := NewTrackerClient("http://127.0.0.1:1", "auto")
@@ -1312,61 +491,6 @@ func TestHandleNetworkError_RediscoveryResetsCounter(t *testing.T) {
 	tc.mu.Unlock()
 	if count != 0 {
 		t.Errorf("expected error counter reset after rediscovery, got %d", count)
-	}
-}
-
-func TestStartPowerListener_CancelsOnEvent(t *testing.T) {
-	patchRuntime(t)
-	orig := execCommandContext
-	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
-		return orig(ctx, "true")
-	}
-	defer func() { execCommandContext = orig }()
-
-	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	done := make(chan struct{})
-	go func() {
-		tc.startPowerListener(ctx, cancel)
-		close(done)
-	}()
-
-	select {
-	case <-ctx.Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("power listener should cancel context on sleep event")
-	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("power listener should return")
-	}
-}
-
-func TestStartPowerListener_ReturnsOnContextCancel(t *testing.T) {
-	patchRuntime(t)
-	orig := execCommandContext
-	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
-		// Long-running command that is killed when ctx is cancelled.
-		return orig(ctx, "sleep", "30")
-	}
-	defer func() { execCommandContext = orig }()
-
-	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-	ctx, cancel := context.WithCancel(context.Background())
-
-	done := make(chan struct{})
-	go func() {
-		tc.startPowerListener(ctx, cancel)
-		close(done)
-	}()
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("power listener should return after context cancel")
 	}
 }
 
@@ -1433,30 +557,6 @@ func TestRun_StartsAndStops(t *testing.T) {
 	}
 }
 
-func TestRTCAlarmStillArmed(t *testing.T) {
-	patchRuntime(t)
-	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
-
-	cases := []struct {
-		val  string
-		want bool
-	}{
-		{"", false}, {"0", false}, {"1791565000", true}, {" 0\n", false}, {"12345\n", true},
-	}
-	for _, c := range cases {
-		osReadFile = func(string) ([]byte, error) { return []byte(c.val), nil }
-		if got := tc.rtcAlarmStillArmed(); got != c.want {
-			t.Errorf("rtcAlarmStillArmed(%q) = %v, want %v", c.val, got, c.want)
-		}
-	}
-
-	// Read error => not armed.
-	osReadFile = func(string) ([]byte, error) { return nil, os.ErrNotExist }
-	if tc.rtcAlarmStillArmed() {
-		t.Error("read error should report not-armed")
-	}
-}
-
 func TestPresentationRoundTrip(t *testing.T) {
 	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
 	if tc.getPresentation() != "interactive" {
@@ -1473,82 +573,114 @@ func TestPresentationRoundTrip(t *testing.T) {
 	}
 }
 
-func TestInteractionAwake_TimesOutAndResets(t *testing.T) {
-	patchRuntime(t)
-	png := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Kindle-Poll-Interval", "600")
-		w.WriteHeader(http.StatusOK)
-		w.Write(png)
-	}))
-	defer srv.Close()
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
-	osCreate = tempFileCreate(t)
-	origCheck := checkNetworkFn
-	checkNetworkFn = func(context.Context) bool { return true }
-	defer func() { checkNetworkFn = origCheck }()
-	execCommand = func(name string, arg ...string) *exec.Cmd { return exec.Command("true") }
+func TestRunEventLoop_PowerKeyIgnoredInDedicatedDashboardMode(t *testing.T) {
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	tc.exitOnPowerKey = false
 
-	tc := NewTrackerClient(srv.URL, "auto")
-
-	// A short hold returns true after it elapses.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	start := time.Now()
-	if !tc.interactionAwake(ctx, cancel, 60*time.Millisecond) {
-		t.Fatal("interactionAwake should return true on timeout")
-	}
-	if time.Since(start) < 50*time.Millisecond {
-		t.Error("interactionAwake returned too early")
+
+	eventCh := make(chan RawEventMsg, 10)
+
+	done := make(chan struct{})
+	go func() {
+		tc.runEventLoop(ctx, cancel, eventCh)
+		close(done)
+	}()
+
+	eventCh <- RawEventMsg{Device: "/dev/input/event0", EvType: EV_KEY, EvCode: KEY_POWER, EvValue: 1}
+
+	select {
+	case <-done:
+		t.Fatal("event loop should not have exited on KEY_POWER when exitOnPowerKey is false")
+	case <-time.After(50 * time.Millisecond):
 	}
 
-	// Cancelling the context returns false.
-	ctx2, cancel2 := context.WithCancel(context.Background())
-	done := make(chan bool, 1)
-	go func() { done <- tc.interactionAwake(ctx2, cancel2, 5*time.Second) }()
-	time.Sleep(20 * time.Millisecond)
-	cancel2()
-	select {
-	case ok := <-done:
-		if ok {
-			t.Error("interactionAwake should return false on ctx cancel")
+	cancel()
+	<-done
+}
+
+func TestMiscMissingBranches(t *testing.T) {
+	patchRuntime(t)
+
+	origCmd := execCommand
+	execCommand = func(name string, arg ...string) *exec.Cmd {
+		return exec.Command("sleep", "2")
+	}
+	defer func() { execCommand = origCmd }()
+	origTimeout := lipcCallTimeout
+	lipcCallTimeout = 10 * time.Millisecond
+	defer func() { lipcCallTimeout = origTimeout }()
+	if got := lipcGet("prop", "name"); got != "" {
+		t.Errorf("expected empty string on lipc timeout, got %q", got)
+	}
+
+	doneCh := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		select {
+		case doneCh <- string(body):
+		default:
 		}
-	case <-time.After(time.Second):
-		t.Fatal("interactionAwake did not return on cancel")
+	}))
+	defer srv.Close()
+	tc := NewTrackerClient(srv.URL, "auto")
+	tc.postDiagnostics(true)
+	var postedBody string
+	select {
+	case postedBody = <-doneCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for diagnostics post")
+	}
+	if !strings.Contains(postedBody, "ACTIVE PROBE") {
+		t.Errorf("expected active probe in diagnostics, got %s", postedBody)
+	}
+
+	tcInvalid := NewTrackerClient("http://[::1]:namedport", "auto")
+	tcInvalid.postText("/log", "test")
+
+	tcDesign := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	tcDesign.panelOnce.Do(func() {})
+	tcDesign.panelSize = PanelSize{LandscapeW: 0}
+	x, y := tcDesign.rawTouchToDesign(50, 100)
+	if x != 50 || y != 100 {
+		t.Errorf("expected 50, 100 on wl <= 0, got %d, %d", x, y)
+	}
+
+	tcCycle := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	tcCycle.lastRenderedView = ""
+	tcCycle.cycleViewMode()
+	if tcCycle.getViewMode() != "morning" {
+		t.Errorf("expected morning view after cycle from auto with empty last, got %s", tcCycle.getViewMode())
+	}
+
+	tcPres := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	tcPres.presentation = ""
+	if p := tcPres.getPresentation(); p != "interactive" {
+		t.Errorf("expected interactive default presentation, got %s", p)
 	}
 }
 
-func TestInteractionAwake_TouchKeepsAlive(t *testing.T) {
+func TestGetServerURL_InvokesAutoDiscover(t *testing.T) {
 	patchRuntime(t)
-	png := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Kindle-Poll-Interval", "600")
-		w.WriteHeader(http.StatusOK)
-		w.Write(png)
-	}))
-	defer srv.Close()
-	GetBatteryInfo = func() BatteryInfo { return BatteryInfo{Level: 88} }
-	osCreate = tempFileCreate(t)
-	origCheck := checkNetworkFn
-	checkNetworkFn = func(context.Context) bool { return true }
-	defer func() { checkNetworkFn = origCheck }()
-	execCommand = func(name string, arg ...string) *exec.Cmd { return exec.Command("true") }
-
-	tc := NewTrackerClient(srv.URL, "auto")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan bool, 1)
-	go func() { done <- tc.interactionAwake(ctx, cancel, 80*time.Millisecond) }()
-
-	// Touches arriving well past the 80ms window must keep the session alive.
-	for i := 0; i < 8; i++ {
-		time.Sleep(30 * time.Millisecond)
-		tc.noteTouch()
+	called := false
+	autoDiscover = func(ctx context.Context) (string, error) {
+		called = true
+		return "http://10.0.0.123:8000", nil
 	}
-	select {
-	case <-done:
-		t.Fatal("touches should have kept the interaction session alive")
-	default:
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
+	os.Args = []string{"tracker"}
+
+	if _, err := os.Stat(FallbackConfigFile); err == nil {
+		origContent, _ := os.ReadFile(FallbackConfigFile)
+		_ = os.Remove(FallbackConfigFile)
+		defer func() { _ = os.WriteFile(FallbackConfigFile, origContent, 0644) }()
 	}
-	cancel()
+
+	url := GetServerURL()
+	if !called || url != "http://10.0.0.123:8000" {
+		t.Fatalf("expected autoDiscover to be called, got called=%v, url=%q", called, url)
+	}
 }

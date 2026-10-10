@@ -276,3 +276,45 @@ func TestPersistServerURL_AllWritesFail(t *testing.T) {
 		t.Fatal("expected error when all writes fail")
 	}
 }
+
+func TestParseDiscoveryOffer_Malformed(t *testing.T) {
+	if _, err := ParseDiscoveryOffer("TRANSIT_TRACKER_OFFER"); err == nil {
+		t.Fatal("expected error for offer with < 2 tokens")
+	}
+}
+
+func TestDiscoverViaUDP_ContextCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := DiscoverViaUDP(ctx, 12345, 100*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected context cancellation error")
+	}
+}
+
+func TestDiscoverViaSubnetSweep_NetInterfacesError(t *testing.T) {
+	withDiscoverySeams(t)
+	netInterfaces = func() ([]net.Interface, error) {
+		return nil, os.ErrPermission
+	}
+	_, err := DiscoverViaSubnetSweep(context.Background(), 8000)
+	if err == nil {
+		t.Fatal("expected error when netInterfaces fails")
+	}
+}
+
+func TestDiscoverViaSubnetSweep_ContextCancelled(t *testing.T) {
+	withDiscoverySeams(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := DiscoverViaSubnetSweep(ctx, 8000)
+	if err == nil {
+		t.Fatal("expected context cancellation error from subnet sweep")
+	}
+}
+
+func TestVerifyServer_InvalidURL(t *testing.T) {
+	if verifyServer(context.Background(), "http://[invalid-url]", 50*time.Millisecond) {
+		t.Fatal("expected verifyServer to return false for invalid URL")
+	}
+}

@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import hmac
 import time
@@ -14,9 +15,9 @@ from PIL import Image
 
 try:
     from zeroconf import Zeroconf, ServiceInfo
-    ZEROCONF_AVAILABLE = True
 except ImportError:
-    ZEROCONF_AVAILABLE = False
+    Zeroconf = None
+    ServiceInfo = None
 
 from bus_tracker import NJTransitBusTracker, normalize_arrival
 from citibike import CitiBikeTracker
@@ -24,8 +25,50 @@ from gtfs_bus import GTFSBusTracker
 from render_dashboard import render_dashboard, STOPS, get_mock_data, resolve_view, WIDTH
 from version import VERSION
 
+# Modularized sub-components
+from discovery import (
+    ZEROCONF_AVAILABLE,
+    DISCOVERY_PORT,
+    is_private_address,
+    get_local_ip,
+    start_discovery_responder,
+    start_mdns_advertiser,
+)
+from ota import (
+    BINARY_PATH,
+    _binary_info_cache,
+    _binary_info_lock,
+    sha256_file,
+    get_binary_info,
+)
+from kindle_image import (
+    PW5_NATIVE,
+    PW5_LANDSCAPE,
+    native_render_scale,
+    sanitize_kindle_panel,
+    format_for_kindle,
+)
+from schedule import (
+    _parse_hour_env,
+    PEAK_AM_START,
+    PEAK_AM_END,
+    PEAK_PM_START,
+    PEAK_PM_END,
+    is_peak_commute_hours,
+    get_commute_lighting,
+    FORCE_FAST_POLL,
+    OVERNIGHT_START,
+    OVERNIGHT_END,
+    OVERNIGHT_INTERVAL,
+    OFFPEAK_INTERVAL,
+    is_overnight_hours,
+    get_presentation,
+    get_status_note,
+    get_dormant_note,
+    get_target_poll_interval,
+)
+
 PORT = int(os.environ.get("PORT", 8000))
-DISCOVERY_PORT = 8001
 # Interactive sessions (a power-button wake) refresh upstream at this cadence so
 # the user sees current data while they're at the device.
 INTERACTIVE_TTL = 30
@@ -38,50 +81,6 @@ SERVER_VERSION = VERSION
 tracker = None
 gtfs_tracker = None
 cb_tracker = CitiBikeTracker(cache_ttl=30)
-
-
-def sha256_file(path: str) -> str:
-    """Returns the lowercase hex SHA-256 digest of a file."""
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-BINARY_PATH = os.path.join(os.path.dirname(__file__), "tracker-arm")
-_binary_info_cache = {"mtime": None, "sha256": "", "size": 0}
-_binary_info_lock = threading.Lock()
-
-
-def get_binary_info():
-    """
-    Returns (exists, mtime, sha256, size) for the OTA binary, caching the
-    (expensive) SHA-256 digest and keying the cache on mtime so repeated
-    dashboard requests don't re-hash the 6MB binary every cycle.
-    """
-    try:
-        stat = os.stat(BINARY_PATH)
-    except OSError:
-        return False, 0, "", 0
-
-    with _binary_info_lock:
-        if _binary_info_cache["mtime"] == stat.st_mtime:
-            return True, stat.st_mtime, _binary_info_cache["sha256"], _binary_info_cache["size"]
-        digest = sha256_file(BINARY_PATH)
-        _binary_info_cache.update({"mtime": stat.st_mtime, "sha256": digest, "size": stat.st_size})
-    return True, stat.st_mtime, _binary_info_cache["sha256"], _binary_info_cache["size"]
-
-
-def is_private_address(addr: str) -> bool:
-    """Returns True for loopback, link-local and RFC1918 private addresses."""
-    import ipaddress
-
-    try:
-        ip = ipaddress.ip_address(addr)
-    except ValueError:
-        return False
-    return ip.is_loopback or ip.is_link_local or ip.is_private
 
 
 def check_control_auth(handler) -> bool:
@@ -262,211 +261,6 @@ def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False
         _render_cache[cache_key] = img_bytes
 
     return Image.open(io.BytesIO(img_bytes))
-
-
-# Kindle Paperwhite 5 native framebuffer (portrait). Landscape = 1648x1236.
-PW5_NATIVE = (1236, 1648)
-PW5_LANDSCAPE = (1648, 1236)
-
-
-def native_render_scale(landscape_w=1648, landscape_h=1236, logical_w=800):
-    """
-    Computes the scale factor that maps the logical 800px design space onto a
-    native landscape panel. We render at this scale so glyphs are rasterized
-    natively rather than upscaled from an 800px bitmap.
-    """
-    return landscape_w / logical_w
-
-
-def sanitize_kindle_panel(w, h):
-    """
-    Validates client-reported landscape panel dimensions, falling back to the
-    PW5 default when they are implausible. Guards against a client that reports
-    a backing-buffer size (double-buffered / height-aligned, e.g. 3296x1248)
-    rather than the true visible resolution, which would render a distorted,
-    needlessly huge canvas.
-    """
-    try:
-        w = int(w)
-        h = int(h)
-    except (TypeError, ValueError):
-        return PW5_LANDSCAPE
-    if not (600 <= w <= 2200 and 400 <= h <= 1800):
-        return PW5_LANDSCAPE
-    ratio = w / h
-    if not (1.2 <= ratio <= 1.6):
-        return PW5_LANDSCAPE
-    return (w, h)
-
-
-def format_for_kindle(base_img, orientation="landscape", rotation=90, target=None):
-    """
-    Prepares an already-rendered dashboard for the Kindle Paperwhite 5.
-
-    When the server renders natively (the base image is already the exact
-    landscape panel size) this only rotates it to portrait and converts to
-    8-bit grayscale -- no resampling. For backward compatibility with callers
-    that pass an 800x480/800x600 base image, it falls back to a single LANCZOS
-    fit into the target landscape size.
-    """
-    if orientation == "landscape":
-        target_w, target_h = target or PW5_LANDSCAPE
-        if (base_img.width, base_img.height) == (target_w, target_h):
-            canvas = base_img
-        else:
-            ratio = min(target_w / base_img.width, target_h / base_img.height)
-            new_w = int(base_img.width * ratio)
-            new_h = int(base_img.height * ratio)
-            resized = base_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            canvas = Image.new("RGB", (target_w, target_h), "white")
-            offset_x = (target_w - new_w) // 2
-            offset_y = (target_h - new_h) // 2
-            canvas.paste(resized, (offset_x, offset_y))
-
-        # Rotate to match Kindle's portrait framebuffer
-        if rotation != 0:
-            canvas = canvas.rotate(rotation, expand=True)
-
-        # Kindle's eips expects 8-bit grayscale ('L')
-        # If given RGB, eips reads 3 bytes per pixel, squishing the image by 3x!
-        return canvas.convert("L")
-    return base_img.convert("L")
-
-
-def _parse_hour_env(name, default):
-    """Parses a decimal-hour env var (e.g. '9.5' or '10'), falling back to
-    default on any error."""
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
-
-
-# Peak commute windows are configurable so the schedule can be tuned without a
-# code change (e.g. extending the morning window while testing on the device).
-PEAK_AM_START = _parse_hour_env("PEAK_AM_START", 7.5)
-PEAK_AM_END = _parse_hour_env("PEAK_AM_END", 9.5)
-PEAK_PM_START = _parse_hour_env("PEAK_PM_START", 16.5)
-PEAK_PM_END = _parse_hour_env("PEAK_PM_END", 19.0)
-
-
-def is_peak_commute_hours(dt=None):
-    """
-    Returns True during peak commute windows in Hoboken, NJ. Defaults:
-    - Morning commute: 7:30 AM - 9:30 AM
-    - Evening commute: 4:30 PM - 7:00 PM (16:30 - 19:00)
-    Override with PEAK_AM_START/PEAK_AM_END/PEAK_PM_START/PEAK_PM_END.
-    """
-    if dt is None:
-        dt = datetime.now()
-    hour = dt.hour + dt.minute / 60.0
-    return (PEAK_AM_START <= hour < PEAK_AM_END) or (PEAK_PM_START <= hour < PEAK_PM_END)
-
-
-def get_commute_lighting(dt=None):
-    """
-    Returns (brightness, warmth) for the Hoboken, NJ local time.
-    A cozy ambient glow (8, 12) is used during the peak morning and evening
-    commute windows; the frontlight is off (0, 0) off-peak and overnight to
-    save battery. This is a fixed schedule, not sunrise/sunset calculation.
-    """
-    if is_peak_commute_hours(dt=dt):
-        return 8, 12
-    return 0, 0
-
-
-# When set (any non-empty value), the server always advertises the fast poll
-# interval regardless of the time of day. For testing only.
-FORCE_FAST_POLL = os.environ.get("FORCE_FAST_POLL", "").strip().lower() in ("1", "true", "yes", "on")
-
-# Overnight "deep eco" window: a long poll interval while nobody is commuting.
-# The window may wrap past midnight (start > end).
-OVERNIGHT_START = _parse_hour_env("OVERNIGHT_START", 22.0)
-OVERNIGHT_END = _parse_hour_env("OVERNIGHT_END", 6.0)
-OVERNIGHT_INTERVAL = int(_parse_hour_env("OVERNIGHT_INTERVAL", 3600))
-OFFPEAK_INTERVAL = int(_parse_hour_env("OFFPEAK_INTERVAL", 600))
-
-
-def is_overnight_hours(dt=None):
-    """
-    Returns True inside the overnight deep-eco window (default 22:00-06:00).
-    Handles a window that wraps past midnight.
-    """
-    if dt is None:
-        dt = datetime.now()
-    hour = dt.hour + dt.minute / 60.0
-    if OVERNIGHT_START <= OVERNIGHT_END:
-        return OVERNIGHT_START <= hour < OVERNIGHT_END
-    return hour >= OVERNIGHT_START or hour < OVERNIGHT_END
-
-
-def get_presentation(dt=None):
-    """
-    Returns the client-facing presentation state:
-    - "interactive" during peak commute: the client stays awake, so the panel is
-      a live, tappable dashboard with buttons.
-    - "idle" off-peak daytime: the client deep-suspends between polls and a tap
-      cannot wake the SoC, so the panel shows an inert "press power" strip.
-    - "dormant" overnight (22:00-06:00): deep-suspend with an inert "sleeping"
-      face; a power press still starts an interaction session.
-
-    A client may override to "interactive" while it is awake in a power-button
-    interaction session (see the ?present= param).
-
-    FORCE_FAST_POLL=1 (testing) forces "interactive" so experiments are unaffected.
-    """
-    if FORCE_FAST_POLL:
-        return "interactive"
-    if is_peak_commute_hours(dt=dt):
-        return "interactive"
-    if is_overnight_hours(dt=dt):
-        return "dormant"
-    return "idle"
-
-
-def get_status_note(presentation):
-    """
-    Bottom-strip label for a non-interactive presentation (idle/dormant).
-    """
-    if presentation == "dormant":
-        return get_dormant_note()
-    if presentation == "idle":
-        return "PRESS POWER BUTTON TO INTERACT"
-    return ""
-
-
-def get_dormant_note():
-    """
-    Human-readable label for the dormant overnight strip, announcing when the
-    dashboard wakes (the overnight window end).
-    """
-    hour = int(OVERNIGHT_END) % 24
-    minute = int(round((OVERNIGHT_END - int(OVERNIGHT_END)) * 60)) % 60
-    suffix = "AM" if hour < 12 else "PM"
-    hour12 = hour % 12 or 12
-    return f"SLEEPING — back at {hour12}:{minute:02d} {suffix} · press power to interact"
-
-
-def get_target_poll_interval(dt=None):
-    """
-    Returns target Kindle poll interval in seconds:
-    - 60s during peak commute rush (the client aligns this to the top of each
-      minute, so the on-screen clock rolls exactly when the new data lands)
-    - 3600s (1 hour) overnight deep-eco mode
-    - 600s (10 min) off-peak Eco Mode
-
-    FORCE_FAST_POLL=1 forces the fast interval at all times (testing aid).
-    """
-    if FORCE_FAST_POLL:
-        return 60
-    if is_peak_commute_hours(dt=dt):
-        return 60
-    if is_overnight_hours(dt=dt):
-        return OVERNIGHT_INTERVAL
-    return OFFPEAK_INTERVAL
 
 
 tracker_stopped = False
@@ -650,7 +444,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/tracker-arm":
-            exists, mtime, digest, size = get_binary_info()
+            server_mod = sys.modules.get("server")
+            bin_path = getattr(server_mod, "BINARY_PATH", BINARY_PATH) if server_mod else BINARY_PATH
+            if not os.path.exists(bin_path):
+                _local_binary = os.path.join(os.path.dirname(__file__), "tracker-arm")
+                _parent_binary = os.path.join(os.path.dirname(__file__), "..", "tracker-arm")
+                if os.path.exists(_local_binary):
+                    bin_path = _local_binary
+                elif os.path.exists(_parent_binary):
+                    bin_path = _parent_binary
+            exists, mtime, digest, size = get_binary_info(bin_path)
             if not exists:
                 self.send_response(404)
                 self.end_headers()
@@ -678,9 +481,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             if self.command == "GET":
                 try:
-                    with open(BINARY_PATH, "rb") as f:
+                    with open(bin_path, "rb") as f:
                         self._write_body(f.read())
-                except (BrokenPipeError, ConnectionResetError):
+                except (BrokenPipeError, ConnectionResetError, OSError):
                     pass
             return
 
@@ -732,7 +535,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
                 logical_w = WIDTH
                 logical_h = max(1, int(round(logical_w * land_h / land_w)))
-                scale = land_w / logical_w
+                scale = native_render_scale(land_w, land_h, logical_w)
                 render_w, render_h = logical_w, logical_h
 
                 img = get_fresh_dashboard_image(
@@ -862,7 +665,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             html = f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>NJ Transit 126 & Citi Bike Tracker</title>
+    <title>NJ Transit 126 &amp; Citi Bike Tracker</title>
     <meta http-equiv="refresh" content="30">
     <style>
         body {{
@@ -922,87 +725,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         # Concise logging
         print(f"[Server] {self.address_string()} - {args[0]}")
-
-
-def get_local_ip():
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "localhost"
-
-
-def start_discovery_responder(http_port=PORT, version=SERVER_VERSION):
-    """
-    Listens on UDP 8001 for TRANSIT_TRACKER_DISCOVER broadcasts
-    and replies with the server URL and version.
-    """
-    def responder_loop():
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        except (AttributeError, OSError):
-            pass
-        try:
-            sock.bind(("", DISCOVERY_PORT))
-            print(f"[Discovery] UDP broadcast responder active on port {DISCOVERY_PORT}")
-        except Exception as e:
-            print(f"[Discovery] Could not bind UDP {DISCOVERY_PORT}: {e}")
-            return
-
-        while True:
-            try:
-                data, addr = sock.recvfrom(1024)
-                msg = data.decode("utf-8", errors="ignore").strip()
-                # Accept the legacy BUS_TRACKER_DISCOVER probe so devices running
-                # an older binary can still locate the server and OTA-upgrade.
-                if "TRANSIT_TRACKER_DISCOVER" in msg or "BUS_TRACKER_DISCOVER" in msg:
-                    resp_ip = get_local_ip()
-                    reply = f"TRANSIT_TRACKER_OFFER http://{resp_ip}:{http_port} {version}\n".encode("utf-8")
-                    sock.sendto(reply, addr)
-                    print(f"[Discovery] Answered probe from {addr[0]}:{addr[1]} -> http://{resp_ip}:{http_port}")
-            except Exception:
-                pass
-
-    t = threading.Thread(target=responder_loop, daemon=True, name="DiscoveryResponder")
-    t.start()
-    return t
-
-
-def start_mdns_advertiser(http_port=PORT, version=SERVER_VERSION):
-    """
-    Registers _transittracker._tcp.local. service with Zeroconf / mDNS.
-    """
-    if not ZEROCONF_AVAILABLE:
-        print("[mDNS] Zeroconf library not installed; skipping mDNS advertisement.")
-        return None, None
-
-    try:
-        local_ip = get_local_ip()
-        ip_bytes = socket.inet_aton(local_ip)
-        service_type = "_transittracker._tcp.local."
-        service_name = f"TransitTracker._transittracker._tcp.local."
-        desc = {"version": version, "endpoint": "/dashboard.png"}
-
-        info = ServiceInfo(
-            service_type,
-            service_name,
-            addresses=[ip_bytes],
-            port=http_port,
-            properties=desc,
-            server="transittracker.local.",
-        )
-        zc = Zeroconf()
-        zc.register_service(info)
-        print(f"[mDNS] Registered service {service_name} at {local_ip}:{http_port}")
-        return zc, info
-    except Exception as e:
-        print(f"[mDNS] Failed to register Zeroconf service: {e}")
-        return None, None
 
 
 if __name__ == "__main__":

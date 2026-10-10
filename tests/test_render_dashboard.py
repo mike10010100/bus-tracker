@@ -5,11 +5,13 @@ comprehensive containment harness that asserts every glyph stays inside the box
 it was drawn into across both views, both heights, and a matrix of data shapes.
 """
 
+from datetime import datetime
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from PIL import Image, ImageDraw, ImageFont
+
 
 import render_dashboard as rd
 
@@ -517,6 +519,120 @@ class TestEllipsizeToWidth(unittest.TestCase):
         d = self._draw()
         self.assertEqual(rd.ellipsize_to_width(d, "", rd.get_font(12), 100), "")
 
+    def test_ellipsis_exceeds_budget_returns_empty(self):
+        d = self._draw()
+        font = rd.get_font(20, bold=True)
+        self.assertEqual(rd.ellipsize_to_width(d, "hello", font, 1), "")
+
+
+class TestUncoveredDashboardBranches(unittest.TestCase):
+    def test_modular_view_and_canvas_imports(self):
+        import canvas
+        import morning_view
+        import evening_view
+        self.assertEqual(canvas.WIDTH, 800)
+        self.assertTrue(callable(morning_view.render_morning_view))
+        self.assertTrue(callable(evening_view.render_evening_view))
+
+    def test_draw_battery_indicator_without_font(self):
+        img = Image.new("RGB", (100, 100), "white")
+        draw = ImageDraw.Draw(img)
+        w = rd.draw_battery_indicator(draw, 10, 10, 75, is_charging=False, font=None)
+        self.assertGreater(w, 0)
+
+    def test_draw_bottom_button_bar_default_font(self):
+        img = Image.new("RGB", (800, 480), "white")
+        draw = ImageDraw.Draw(img)
+        rd.draw_bottom_button_bar(draw, 800, 480, font=None)
+
+    def test_scaled_draw_font_exception(self):
+        img = Image.new("RGB", (100, 100), "white")
+        sd = rd.ScaledDraw(ImageDraw.Draw(img), 1.5)
+        mock_font = MagicMock()
+        mock_font._transit_path = "/nonexistent/fake.ttf"
+        mock_font._transit_size = 14
+        f = sd._font(mock_font)
+        self.assertEqual(f, mock_font)
+
+    def test_render_morning_view_narrow_title_and_no_ebikes_status(self):
+        img = Image.new("RGB", (600, 480), "white")
+        draw = rd.ScaledDraw(ImageDraw.Draw(img), 1.0)
+        citi_data = [
+            {
+                "name": "9th & Clinton",
+                "walk_min": 3,
+                "ebikes": 0,
+                "classic": 10,
+                "total_bikes": 10,
+                "docks": 5,
+                "is_offline": False,
+                "is_returning": True,
+            }
+        ]
+        stops_data = {"20512": []}
+        now = datetime(2026, 10, 10, 8, 30)
+        rd.render_morning_view(
+            draw, stops_data, citi_data, now,
+            batt_level=80, is_charging=False, is_mock=False,
+            width=400, height=480,
+        )
+
+    def test_render_evening_view_bus_meta_variations(self):
+        img = Image.new("RGB", (800, 480), "white")
+        draw = rd.ScaledDraw(ImageDraw.Draw(img), 1.0)
+        now = datetime(2026, 10, 10, 18, 30)
+        stops_data_1 = {
+            "20512": [
+                {
+                    "route": "126",
+                    "destination": "126 NEW YORK",
+                    "eta": "in 5 mins",
+                    "live": True,
+                    "vehicle_id": "9999",
+                    "occupancy": None,
+                }
+            ]
+        }
+        rd.render_evening_view(
+            draw, stops_data_1, citibike_data=[], now=now,
+            batt_level=80, is_charging=False, is_mock=False,
+            width=800, height=480,
+        )
+
+        stops_data_2 = {
+            "20512": [
+                {
+                    "route": "126",
+                    "destination": "126 NEW YORK",
+                    "eta": "in 8 mins",
+                    "live": True,
+                    "vehicle_id": None,
+                    "occupancy": None,
+                }
+            ]
+        }
+        rd.render_evening_view(
+            draw, stops_data_2, citibike_data=[], now=now,
+            batt_level=80, is_charging=False, is_mock=False,
+            width=800, height=480,
+        )
+
+    def test_render_dashboard_citibike_fetch_exception(self):
+        out_path = "/tmp/test_citibike_err.png"
+        with patch("citibike.CitiBikeTracker.get_station_status", side_effect=Exception("GBFS down")):
+            with patch("citibike.CitiBikeTracker.get_mock_data", side_effect=Exception("Mock down")):
+                res = rd.render_dashboard(
+                    stops_data={"20512": []},
+                    citibike_data=None,
+                    output_path=out_path,
+                    is_mock=False,
+                )
+                self.assertEqual(res, out_path)
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
