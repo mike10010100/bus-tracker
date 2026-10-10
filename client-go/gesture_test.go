@@ -247,6 +247,44 @@ func TestGestureDetectorInactivityFallback(t *testing.T) {
 	}
 }
 
+func TestGestureDetectorProcessEventTransformMaintainsRawState(t *testing.T) {
+	cfg := DefaultGestureConfig()
+	// Transform mapping Kindle PW5 raw touch (1236x1648) to 800x600 design space:
+	// px (0..1235) -> dy (0..600), py (0..1647) -> dx (0..800)
+	cfg.Transform = func(px, py int32) (int32, int32) {
+		scale := 1648.0 / 800.0
+		return int32(float64(py)/scale + 0.5), int32(float64(px)/scale + 0.5)
+	}
+
+	gd := NewGestureDetector(cfg)
+	defer gd.Stop()
+
+	var (
+		bikesTapped int
+		tapX, tapY  int32
+	)
+	gd.OnBikesTap = func(x, y int32) {
+		bikesTapped++
+		tapX, tapY = x, y
+	}
+
+	// Simulate touch on Citi Bike button: raw px=1197 (bottom edge), raw py=580 (center-left)
+	// Sent as two distinct sequential EV_ABS events
+	gd.ProcessEvent(RawEventMsg{EvType: EV_ABS, EvCode: ABS_MT_POSITION_X, EvValue: 1197})
+	gd.ProcessEvent(RawEventMsg{EvType: EV_ABS, EvCode: ABS_MT_POSITION_Y, EvValue: 580})
+	gd.ProcessEvent(RawEventMsg{EvType: EV_KEY, EvCode: BTN_TOUCH, EvValue: 0})
+
+	if bikesTapped != 1 {
+		t.Fatalf("expected OnBikesTap to be called once, got %d (tap at %d, %d)", bikesTapped, tapX, tapY)
+	}
+	if tapX < 275 || tapX > 290 || tapY < 556 || tapY > 590 {
+		t.Errorf("tap coords = (%d, %d), expected Citi Bike zone ~(282, 581)", tapX, tapY)
+	}
+	if gd.rawX != 1197 || gd.rawY != 580 {
+		t.Errorf("raw coords = (%d, %d), expected (1197, 580)", gd.rawX, gd.rawY)
+	}
+}
+
 func TestGestureDetectorInactivityTimerAfterReleaseIsNoop(t *testing.T) {
 	cfg := DefaultGestureConfig()
 	cfg.InactivityTimeout = 25 * time.Millisecond

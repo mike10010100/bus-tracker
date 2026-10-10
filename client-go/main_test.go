@@ -277,10 +277,21 @@ func TestRawTouchToDesign(t *testing.T) {
 	if by < 556 || by > 590 {
 		t.Errorf("button bar design y = %d, want 556..590", by)
 	}
-	// Raw py drives design dx: portrait py=41 -> design x ~780 (right edge).
+	// Raw py drives design dx:
+	// Portrait py=41 -> left edge, design x ~20 (BUSES button area).
 	bx, _ := tc.rawTouchToDesign(600, 41)
-	if bx < 770 || bx > 790 {
-		t.Errorf("right-edge design x = %d, want ~780", bx)
+	if bx < 15 || bx > 25 {
+		t.Errorf("left-edge design x = %d, want ~20", bx)
+	}
+	// Portrait py=1607 -> right edge, design x ~780 (REFRESH button area).
+	rx, _ := tc.rawTouchToDesign(600, 1607)
+	if rx < 770 || rx > 790 {
+		t.Errorf("right-edge design x = %d, want ~780", rx)
+	}
+	// Citi Bike button: raw py ≈ 580 -> design x ~282 (CITI BIKE zone 202..394).
+	cbX, cbY := tc.rawTouchToDesign(1197, 580)
+	if cbX < 275 || cbX > 290 || cbY < 556 || cbY > 590 {
+		t.Errorf("citi bike map = (%d,%d), want ~(282,581)", cbX, cbY)
 	}
 }
 

@@ -65,6 +65,8 @@ type GestureDetector struct {
 	cfg             GestureDetectorConfig
 	curX            int32
 	curY            int32
+	rawX            int32
+	rawY            int32
 	touchActive     bool
 	inactivityTimer *time.Timer
 	singleTapTimer  *time.Timer
@@ -218,13 +220,16 @@ func (gd *GestureDetector) TriggerTap(now time.Time) {
 func (gd *GestureDetector) ProcessEvent(ev RawEventMsg) {
 	// Coordinate extraction, mapped into design space so the zone thresholds
 	// match the rendered layout.
-	if newX, newY, updated := ExtractCoordinates(ev, gd.curX, gd.curY); updated {
+	if rawX, rawY, updated := ExtractCoordinates(ev, gd.rawX, gd.rawY); updated {
+		dx, dy := rawX, rawY
 		if gd.cfg.Transform != nil {
-			newX, newY = gd.cfg.Transform(newX, newY)
+			dx, dy = gd.cfg.Transform(rawX, rawY)
 		}
 		gd.mu.Lock()
-		gd.curX = newX
-		gd.curY = newY
+		gd.rawX = rawX
+		gd.rawY = rawY
+		gd.curX = dx
+		gd.curY = dy
 		gd.mu.Unlock()
 	}
 
