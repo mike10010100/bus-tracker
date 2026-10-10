@@ -1,3 +1,4 @@
 # Configuration for shellcheck
 # SC2030 & SC2031: Modifications local to subshells are by design in test harnesses to isolate env vars.
-disable=SC2030,SC2031
+# SC2317 & SC2329: Trap handlers and cleanup functions are invoked indirectly.
+disable=SC2030,SC2031,SC2317,SC2329
