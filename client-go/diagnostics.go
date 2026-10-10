@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -493,8 +494,7 @@ func parseUptimeSeconds(s string) float64 {
 	if len(fields) == 0 {
 		return 0
 	}
-	var secs float64
-	fmt.Sscanf(fields[0], "%f", &secs)
+	secs, _ := strconv.ParseFloat(fields[0], 64)
 	return secs
 }
 

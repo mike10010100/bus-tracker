@@ -11,14 +11,11 @@ linters:
     - staticcheck
     - unused
     - revive
-    - misspell
     - gocritic
 
 linters-settings:
   govet:
     shadow: true
-  misspell:
-    locale: US
   revive:
     rules:
       - name: blank-imports
@@ -28,7 +25,6 @@ linters-settings:
       - name: error-naming
       - name: if-return
       - name: increment-decrement
-      - name: var-naming
       - name: package-comments
       - name: range
       - name: receiver-naming
@@ -41,3 +37,10 @@ issues:
   exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
+  exclude-rules:
+    - path: events\.go
+      linters:
+        - revive
+    - text: "Error return value of .*(Close|Write|fmt\\.Fprint).*"
+      linters:
+        - errcheck

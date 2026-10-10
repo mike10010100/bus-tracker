@@ -12,11 +12,6 @@ import (
 // screensaver, before attempting to suspend. Variable for tests.
 var suspendSettleDelay = 2 * time.Second
 
-// suspendDeadlineMargin bounds how long past the poll interval we wait for a
-// powerd suspend/resume event before falling back to a wall-clock refresh.
-// Variable for tests.
-var suspendDeadlineMargin = 30 * time.Second
-
 // Sysfs wakealarm and power-state nodes. On the PW5 (BD71828 RTC) the kernel
 // wakealarm is the reliable wake source; powerd's rtcWakeup is only writable
 // inside its readyToSuspend window and adds a ~60s delay, so we drive the

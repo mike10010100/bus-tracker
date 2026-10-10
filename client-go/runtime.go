@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"net"
 	"os"
 	"os/exec"
@@ -33,7 +32,7 @@ var (
 	osLstat            = os.Lstat
 	osExecutable       = os.Executable
 	osGetuid           = os.Getuid
-	autoDiscover       = func(ctx context.Context) (string, error) { return AutoDiscoverServer(ctx) }
+	autoDiscover       = AutoDiscoverServer
 
 	netInterfaces    = net.Interfaces
 	verifyServerFn   = verifyServer

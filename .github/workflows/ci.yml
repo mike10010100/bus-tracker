@@ -43,10 +43,9 @@ jobs:
         run: go vet ./...
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@971e284b6050e8a5849b72094c50ab08da042db8 # v6.1.1
-        with:
-          version: v1.57.2
-          working-directory: client-go
+        run: |
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+          $(go env GOPATH)/bin/golangci-lint run ./...
 
       - name: Run Unit Tests with Race Detector
         run: go test -v -race ./...
@@ -146,5 +145,5 @@ jobs:
           docker run -d --name tt -p 18000:8000 transit-tracker:ci
           for i in $(seq 1 30); do curl -fsS http://localhost:18000/healthz && break; sleep 1; done
           curl -fsS -o /dev/null http://localhost:18000/tracker-arm.manifest
-          docker top tt -eo user,args | grep 'server.py' | grep -vq '^root'
+          docker top tt | grep 'server.py' | grep -vq '^root'
           docker rm -f tt

@@ -1,3 +1,4 @@
+// Package main implements the Kindle Transit Tracker client.
 package main
 
 import (
@@ -306,7 +307,7 @@ func actionTouchWakeTest(ctx context.Context) string {
 	powerMoved := wakeupCountersChanged(wakeupBefore, wakeupAfter, "gpio-keys.7.auto") ||
 		wakeupCountersChanged(wakeupBefore, wakeupAfter, "bd71827-power.4.auto")
 
-	verdict := "INCONCLUSIVE"
+	var verdict string
 	switch {
 	case powerMoved:
 		verdict = "POWER BUTTON WOKE IT (power-key wake counter moved) -- deep-suspend + press-to-interact POSSIBLE"
