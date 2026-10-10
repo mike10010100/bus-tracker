@@ -1152,7 +1152,15 @@ func (tc *TrackerClient) runSleepLoop(ctx context.Context, cancel context.Cancel
 			return
 		}
 		serverPollSec := tc.fetchAndDrawDashboard(ctx, cancel)
-		interval := tc.getNextPollInterval(serverPollSec)
+		// Sleep mode follows the *schedule's* cadence, deliberately ignoring the
+		// resident-mode "fast poll" hold. Otherwise an off-peak data tap held the
+		// device awake for 10 minutes showing the idle face -- while the button
+		// handlers were still live (deceptive). Off-peak we suspend; peak (60s)
+		// keeps us awake and interactive.
+		interval := time.Duration(serverPollSec) * time.Second
+		if serverPollSec <= 0 {
+			interval = tc.getNextPollInterval(serverPollSec)
+		}
 
 		if !allowSuspend || interval < minSuspendInterval {
 			tc.logRemote(fmt.Sprintf("Sleep mode: staying awake for %s.", interval.Round(time.Second)))
