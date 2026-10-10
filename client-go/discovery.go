@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -10,6 +11,23 @@ import (
 	"strings"
 	"sync"
 	"time"
+)
+
+var (
+	// ErrNoServerFound indicates no reachable server was discovered during a subnet sweep.
+	ErrNoServerFound = errors.New("no server found in subnet sweep")
+	// ErrEmptyServerURL indicates an empty server URL was supplied for persistence.
+	ErrEmptyServerURL = errors.New("empty server url")
+	// ErrServerNotFound indicates neither UDP broadcast nor subnet sweep located a server.
+	ErrServerNotFound = errors.New("auto-discovery could not locate bus tracker server")
+	// ErrNoUDPReply indicates no server responded to the UDP discovery broadcast probe.
+	ErrNoUDPReply = errors.New("no server replied to discovery UDP broadcast")
+	// ErrUDPListen indicates failure to bind the local UDP discovery socket.
+	ErrUDPListen = errors.New("failed to open UDP listener")
+	// ErrInvalidOfferHeader indicates the discovery offer payload lacked the expected header prefix.
+	ErrInvalidOfferHeader = errors.New("invalid offer header")
+	// ErrMalformedOffer indicates the discovery offer payload lacked required fields.
+	ErrMalformedOffer = errors.New("malformed discovery offer")
 )
 
 const (
@@ -32,12 +50,12 @@ type ServerOffer struct {
 func ParseDiscoveryOffer(raw string) (*ServerOffer, error) {
 	trimmed := strings.TrimSpace(raw)
 	if !strings.HasPrefix(trimmed, "TRANSIT_TRACKER_OFFER") && !strings.HasPrefix(trimmed, "BUS_TRACKER_OFFER") {
-		return nil, fmt.Errorf("invalid offer header: %s", trimmed)
+		return nil, fmt.Errorf("%w: %s", ErrInvalidOfferHeader, trimmed)
 	}
 
 	parts := strings.Fields(trimmed)
 	if len(parts) < 2 {
-		return nil, fmt.Errorf("malformed discovery offer: %s", trimmed)
+		return nil, fmt.Errorf("%w: %s", ErrMalformedOffer, trimmed)
 	}
 
 	offer := &ServerOffer{
@@ -93,7 +111,7 @@ func GetBroadcastAddresses(port int) []string {
 func DiscoverViaUDP(ctx context.Context, port int, timeout time.Duration) (string, error) {
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
-		return "", fmt.Errorf("failed to open UDP listener: %w", err)
+		return "", fmt.Errorf("%w: %w", ErrUDPListen, err)
 	}
 	defer conn.Close()
 
@@ -121,7 +139,7 @@ func DiscoverViaUDP(ctx context.Context, port int, timeout time.Duration) (strin
 
 		n, remoteAddr, err := conn.ReadFrom(buf)
 		if err != nil {
-			return "", fmt.Errorf("no server replied to discovery UDP broadcast: %w", err)
+			return "", fmt.Errorf("%w: %w", ErrNoUDPReply, err)
 		}
 
 		offer, err := ParseDiscoveryOffer(string(buf[:n]))
@@ -221,7 +239,7 @@ func DiscoverViaSubnetSweep(ctx context.Context, httpPort int) (string, error) {
 	case found := <-resultChan:
 		return found, nil
 	case <-done:
-		return "", fmt.Errorf("no server found in subnet sweep")
+		return "", ErrNoServerFound
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
@@ -249,7 +267,7 @@ func verifyServer(ctx context.Context, serverURL string, timeout time.Duration) 
 func PersistServerURL(serverURL string, writeFile func(string, []byte, os.FileMode) error) error {
 	trimmed := strings.TrimSpace(serverURL)
 	if trimmed == "" {
-		return fmt.Errorf("empty server url")
+		return ErrEmptyServerURL
 	}
 
 	paths := []string{ServerConfigFile, FallbackConfigFile}
@@ -297,5 +315,5 @@ func AutoDiscoverServer(ctx context.Context) (string, error) {
 		return discovered, nil
 	}
 
-	return "", fmt.Errorf("auto-discovery could not locate bus tracker server")
+	return "", ErrServerNotFound
 }

@@ -110,10 +110,18 @@ class TestDiagnosticsEndpoints(ServerHTTPTestBase):
         self.assertEqual(status, 404)
 
     def test_parse_diag_battery(self):
-        self.assertEqual(server.parse_diag_battery("battery_level=83 charging=true"), (83, True))
-        self.assertEqual(server.parse_diag_battery("battery_level=42 charging=false"), (42, False))
-        self.assertEqual(server.parse_diag_battery("no battery here"), (None, None))
-        self.assertEqual(server.parse_diag_battery("battery_level=-1 charging=false"), (None, None))
+        cases = [
+            ("battery_level=83 charging=true", 83, True),
+            ("battery_level=42 charging=false", 42, False),
+            ("no battery here", None, None),
+            ("battery_level=-1 charging=false", None, None),
+        ]
+        for text, exp_level, exp_charging in cases:
+            with self.subTest(text=text):
+                res = server.parse_diag_battery(text)
+                self.assertEqual(res, (exp_level, exp_charging))
+                self.assertEqual(res.level, exp_level)
+                self.assertEqual(res.charging, exp_charging)
 
     def test_post_diag_extracts_and_exposes_battery(self):
         body = b"--- Kindle Diagnostics ---\nbattery_level=87 charging=true\nfw=5.16.21\n"

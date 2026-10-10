@@ -135,7 +135,9 @@ func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context
 		}
 		tc.logRemote(fmt.Sprintf("Opened input device listener on %s", devPath))
 
+		tc.wg.Add(1)
 		go func(path string, file *os.File) {
+			defer tc.wg.Done()
 			defer file.Close()
 			buf := make([]byte, 512)
 
@@ -148,7 +150,11 @@ func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context
 
 				n, err := file.Read(buf)
 				if err != nil {
-					time.Sleep(100 * time.Millisecond)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(100 * time.Millisecond):
+					}
 					continue
 				}
 
@@ -164,7 +170,11 @@ func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context
 	}
 
 	// Dispatcher goroutine: processes all events from all devices
-	go tc.runEventLoop(ctx, cancel, eventCh)
+	tc.wg.Add(1)
+	go func() {
+		defer tc.wg.Done()
+		tc.runEventLoop(ctx, cancel, eventCh)
+	}()
 }
 
 // startPowerListener watches for power button sleep events via lipc
@@ -183,6 +193,14 @@ func (tc *TrackerClient) startPowerListener(ctx context.Context, exitCancel cont
 			tc.logRemote("powerd goingToScreenSaver event received! Exiting...")
 			exitCancel()
 			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
 		}
 	}
 }

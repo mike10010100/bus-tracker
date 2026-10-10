@@ -1,4 +1,6 @@
-.PHONY: all check test test-go test-py vet fmt fmt-check coverage coverage-go coverage-py build clean
+.PHONY: all check test test-go test-py vet fmt fmt-check coverage coverage-go coverage-py check-sh build clean
+
+SHELL := /bin/bash
 
 # Coverage gates (percentage of statements). Enforced by `make coverage`.
 COVERAGE_MIN_GO ?= 93
@@ -7,8 +9,8 @@ COVERAGE_MIN_PY ?= 92
 # Default target
 all: check build
 
-# Run complete verification suite (format, vet, tests, coverage gate)
-check: fmt-check vet test-go test-py coverage
+# Run complete verification suite (format, vet, tests, coverage gate, shell syntax)
+check: fmt-check vet test-go test-py coverage check-sh
 
 test: test-go test-py
 
@@ -42,6 +44,18 @@ fmt-check:
 		exit 1; \
 	fi
 
+# Syntax and idiom check for shell scripts
+check-sh:
+	@echo "==> Checking shell scripts syntax..."
+	@bash -n scripts/check_coverage_go.sh
+	@bash -n scripts/deploy.sh
+	@sh -n scripts/TransitTracker.sh
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		echo "==> Running shellcheck..."; \
+		shellcheck --severity=warning -s bash scripts/check_coverage_go.sh scripts/deploy.sh; \
+		shellcheck --severity=warning -s sh scripts/TransitTracker.sh; \
+	fi
+
 # Enforce coverage gates for both stacks
 coverage: coverage-go coverage-py
 
@@ -53,10 +67,10 @@ coverage-py:
 	@echo "==> Enforcing Python coverage gate ($(COVERAGE_MIN_PY)%)..."
 	@python3 -m coverage erase
 	@PYTHONPATH=server python3 -m coverage run --source=server -m unittest discover -s tests -p "test_*.py" >/dev/null
-	@python3 -m coverage report -m
+	@python3 -m coverage report -m --fail-under=$(COVERAGE_MIN_PY)
 
 # Build static ARM binary for Kindle Paperwhite (PW5 / Linux ARMv7)
-VERSION := $(shell cat VERSION)
+VERSION := $(strip $(shell tr -d '[:space:]' < VERSION 2>/dev/null || echo "0.0.0"))
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 
 build:
@@ -64,7 +78,9 @@ build:
 	@cd client-go && CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="$(LDFLAGS)" -o ../tracker-arm .
 	@echo "==> Build complete: tracker-arm ($$(ls -lh tracker-arm | awk '{print $$5}'))"
 
-# Clean build artifacts
+# Clean build artifacts and bytecode caches
 clean:
 	@rm -f tracker-arm server/tracker-arm client-go/client-go client-go/cover.out /tmp/server_dashboard*.png
 	@rm -rf htmlcov .coverage
+	@find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+	@find . -name "*.pyc" -delete 2>/dev/null || true

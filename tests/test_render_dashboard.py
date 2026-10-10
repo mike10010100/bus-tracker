@@ -67,7 +67,8 @@ class TestParseMinutes(unittest.TestCase):
 
     def test_zero_phrases(self):
         for phrase in ["APPROACHING", "due now", "All Aboard", "now boarding", "BOARD"]:
-            self.assertEqual(rd.parse_minutes(phrase), 0, phrase)
+            with self.subTest(phrase=phrase):
+                self.assertEqual(rd.parse_minutes(phrase), 0, phrase)
 
     def test_numeric(self):
         self.assertEqual(rd.parse_minutes("in 9 mins (11:36 PM)"), 9)
@@ -229,14 +230,15 @@ class TestRenderingBranches(unittest.TestCase):
 
     def test_evening_citibike_badge_thresholds(self):
         for ebikes, docks in [(5, 9), (2, 9), (0, 0), (0, 4)]:
-            cb = _cb()
-            cb[0]["ebikes"], cb[0]["docks"] = ebikes, docks
-            rd.render_dashboard(
-                _stops(), citibike_data=cb, output_path=self.out,
-                view="evening", is_mock=True, width=800, height=600,
-            )
-            self.assertTrue(os.path.exists(self.out))
-            os.remove(self.out)
+            with self.subTest(ebikes=ebikes, docks=docks):
+                cb = _cb()
+                cb[0]["ebikes"], cb[0]["docks"] = ebikes, docks
+                rd.render_dashboard(
+                    _stops(), citibike_data=cb, output_path=self.out,
+                    view="evening", is_mock=True, width=800, height=600,
+                )
+                self.assertTrue(os.path.exists(self.out))
+                os.remove(self.out)
 
     def test_resolve_view_default_hour_branch(self):
         # Forces the datetime.now() branch (hour=None).

@@ -28,6 +28,8 @@ func patchRuntime(t *testing.T) {
 	origReadFile := osReadFile
 	origGetBattery := GetBatteryInfo
 	origDiscover := autoDiscover
+	origExecCmd := execCommand
+	origExecCmdCtx := execCommandContext
 
 	// Discovery is disabled by default in tests so a real LAN server cannot
 	// interfere with assertions; individual tests may override it.
@@ -45,6 +47,8 @@ func patchRuntime(t *testing.T) {
 		osReadFile = origReadFile
 		GetBatteryInfo = origGetBattery
 		autoDiscover = origDiscover
+		execCommand = origExecCmd
+		execCommandContext = origExecCmdCtx
 	})
 }
 
@@ -135,13 +139,11 @@ func TestStartInputListenersFallsBackWhenGlobEmpty(t *testing.T) {
 func TestCycleFrontlightReadsAndWrites(t *testing.T) {
 	patchRuntime(t)
 	var setProps int
-	orig := execCommand
-	execCommand = func(name string, arg ...string) *exec.Cmd {
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
 		if name == "lipc-set-prop" {
 			setProps++
 		}
-		// Route through a harmless command that always succeeds.
-		return orig("true")
+		return exec.CommandContext(ctx, "true")
 	}
 	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
 	tc.cycleFrontlight()
@@ -293,17 +295,22 @@ func TestRunOneshotRendersAndExitsWithoutCleanup(t *testing.T) {
 	// Capture commands to ensure oneshot does NOT clear the screen via 'eips -c'
 	// and does NOT set preventScreenSaver=1.
 	var cleanedScreen, heldAwake bool
-	orig := execCommand
+	origCmd := execCommand
 	execCommand = func(name string, arg ...string) *exec.Cmd {
 		if name == "eips" && len(arg) > 0 && arg[0] == "-c" {
 			cleanedScreen = true
 		}
+		return origCmd("true")
+	}
+	defer func() { execCommand = origCmd }()
+	origCtx := execCommandContext
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
 		if name == "lipc-set-prop" && len(arg) >= 4 && arg[2] == "preventScreenSaver" && arg[3] == "1" {
 			heldAwake = true
 		}
-		return orig("true")
+		return exec.CommandContext(ctx, "true")
 	}
-	defer func() { execCommand = orig }()
+	defer func() { execCommandContext = origCtx }()
 
 	origArgs := os.Args
 	// Pass an explicit -server so GetServerURL doesn't consult a stale
@@ -603,11 +610,11 @@ func TestRunEventLoop_PowerKeyIgnoredInDedicatedDashboardMode(t *testing.T) {
 func TestMiscMissingBranches(t *testing.T) {
 	patchRuntime(t)
 
-	origCmd := execCommand
-	execCommand = func(name string, arg ...string) *exec.Cmd {
-		return exec.Command("sleep", "2")
+	origCmdCtx := execCommandContext
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sleep", "2")
 	}
-	defer func() { execCommand = origCmd }()
+	defer func() { execCommandContext = origCmdCtx }()
 	origTimeout := lipcCallTimeout
 	lipcCallTimeout = 10 * time.Millisecond
 	defer func() { lipcCallTimeout = origTimeout }()
@@ -638,7 +645,7 @@ func TestMiscMissingBranches(t *testing.T) {
 	}
 
 	tcInvalid := NewTrackerClient("http://[::1]:namedport", "auto")
-	tcInvalid.postText("/log", "test")
+	tcInvalid.postText(context.Background(), "/log", "test")
 
 	tcDesign := NewTrackerClient("http://127.0.0.1:8000", "auto")
 	tcDesign.panelOnce.Do(func() {})
@@ -682,5 +689,20 @@ func TestGetServerURL_InvokesAutoDiscover(t *testing.T) {
 	url := GetServerURL()
 	if !called || url != "http://10.0.0.123:8000" {
 		t.Fatalf("expected autoDiscover to be called, got called=%v, url=%q", called, url)
+	}
+}
+
+func TestTrackerClient_Wait(t *testing.T) {
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+	completed := false
+	tc.wg.Add(1)
+	go func() {
+		defer tc.wg.Done()
+		time.Sleep(10 * time.Millisecond)
+		completed = true
+	}()
+	tc.Wait()
+	if !completed {
+		t.Fatal("expected tc.Wait to block until background goroutine completes")
 	}
 }

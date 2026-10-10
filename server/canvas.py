@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from PIL import Image, ImageDraw, ImageFont
 
 # Design-space canvas dimensions. All layout math in this module is expressed
@@ -26,27 +26,27 @@ class ScaledDraw:
     (and the ellipsize helper) keep operating in one consistent space.
     """
 
-    def __init__(self, draw: ImageDraw.ImageDraw, scale: float = 1.0):
+    def __init__(self, draw: ImageDraw.ImageDraw, scale: float = 1.0) -> None:
         self._d = draw
         self._s = float(scale)
-        self._font_cache = {}
+        self._font_cache: Dict[Tuple[str, int], Any] = {}
 
     # -- helpers -----------------------------------------------------------
-    def _pt(self, p):
+    def _pt(self, p: Any) -> Tuple[float, float]:
         return (p[0] * self._s, p[1] * self._s)
 
-    def _box(self, xy):
+    def _box(self, xy: Any) -> Any:
         """Accepts [(x0,y0),(x1,y1)] or flat [x0,y0,x1,y1] and scales it."""
         if len(xy) == 4 and not hasattr(xy[0], "__len__"):
             return [xy[0] * self._s, xy[1] * self._s, xy[2] * self._s, xy[3] * self._s]
         return [self._pt(xy[0]), self._pt(xy[1])]
 
-    def _outline(self, w):
+    def _outline(self, w: Optional[float]) -> Optional[int]:
         if w is None:
             return None
         return max(1, int(round(w * self._s)))
 
-    def _font(self, font):
+    def _font(self, font: Any) -> Any:
         if font is None or self._s == 1.0:
             return font
         path = getattr(font, "_transit_path", None)
@@ -70,24 +70,24 @@ class ScaledDraw:
         return scaled
 
     # -- drawing primitives ------------------------------------------------
-    def text(self, xy, text, fill=None, font=None, **kwargs):
-        return self._d.text(self._pt(xy), text, fill=fill, font=self._font(font), **kwargs)
+    def text(self, xy: Any, text: str, fill: Any = None, font: Any = None, **kwargs: Any) -> None:
+        self._d.text(self._pt(xy), text, fill=fill, font=self._font(font), **kwargs)
 
-    def textbbox(self, xy, text, font=None, **kwargs):
+    def textbbox(self, xy: Any, text: str, font: Any = None, **kwargs: Any) -> Tuple[float, float, float, float]:
         bbox = self._d.textbbox(self._pt(xy), text, font=self._font(font), **kwargs)
-        return tuple(v / self._s for v in bbox)
+        return tuple(v / self._s for v in bbox)  # type: ignore[return-value]
 
-    def textlength(self, text, font=None, **kwargs):
+    def textlength(self, text: str, font: Any = None, **kwargs: Any) -> float:
         return self._d.textlength(text, font=self._font(font), **kwargs) / self._s
 
-    def line(self, xy, fill=None, width=1, **kwargs):
-        return self._d.line([self._pt(p) for p in xy], fill=fill, width=self._outline(width), **kwargs)
+    def line(self, xy: Any, fill: Any = None, width: float = 1, **kwargs: Any) -> None:
+        self._d.line([self._pt(p) for p in xy], fill=fill, width=self._outline(width), **kwargs)
 
-    def rectangle(self, xy, fill=None, outline=None, width=1, **kwargs):
-        return self._d.rectangle(self._box(xy), fill=fill, outline=outline, width=self._outline(width), **kwargs)
+    def rectangle(self, xy: Any, fill: Any = None, outline: Any = None, width: float = 1, **kwargs: Any) -> None:
+        self._d.rectangle(self._box(xy), fill=fill, outline=outline, width=self._outline(width), **kwargs)
 
-    def rounded_rectangle(self, xy, radius=0, fill=None, outline=None, width=1, **kwargs):
-        return self._d.rounded_rectangle(
+    def rounded_rectangle(self, xy: Any, radius: float = 0, fill: Any = None, outline: Any = None, width: float = 1, **kwargs: Any) -> None:
+        self._d.rounded_rectangle(
             self._box(xy),
             radius=max(0, int(round(radius * self._s))),
             fill=fill,
@@ -96,8 +96,8 @@ class ScaledDraw:
             **kwargs,
         )
 
-    def polygon(self, xy, fill=None, outline=None, width=1, **kwargs):
-        return self._d.polygon([self._pt(p) for p in xy], fill=fill, outline=outline, width=self._outline(width), **kwargs)
+    def polygon(self, xy: Any, fill: Any = None, outline: Any = None, width: float = 1, **kwargs: Any) -> None:
+        self._d.polygon([self._pt(p) for p in xy], fill=fill, outline=outline, width=self._outline(width), **kwargs)
 
 
 STOPS = [
@@ -116,7 +116,7 @@ STOPS = [
 ]
 
 
-def get_font(size: int, bold: bool = False):
+def get_font(size: int, bold: bool = False) -> Optional[ImageFont.ImageFont]:
     """
     Attempts to load a clean sans-serif system font (Arial/Helvetica),
     falling back gracefully to Pillow's default font.
@@ -164,7 +164,7 @@ _NO_BUS_MESSAGE = "No buses tracked in next hour"
 _ERROR_MESSAGE = "Live data unavailable — retrying"
 
 
-def empty_state_message(status: Optional[str]) -> tuple:
+def empty_state_message(status: Optional[str]) -> Tuple[str, str]:
     """
     Maps an upstream fetch status to the message (and colour) shown in an
     empty arrival card, so an upstream outage is never presented as
@@ -175,7 +175,7 @@ def empty_state_message(status: Optional[str]) -> tuple:
     return _NO_BUS_MESSAGE, "#666666"
 
 
-def parse_minutes(eta_text: str) -> Optional[int]:
+def parse_minutes(eta_text: Optional[str]) -> Optional[int]:
     """
     Extracts the arrival minute countdown from ETA strings like:
     'in 9 mins (11:36 PM)', 'in 3 mins', 'APPROACHING', 'All Aboard', etc.
@@ -192,11 +192,11 @@ def parse_minutes(eta_text: str) -> Optional[int]:
 
 
 def draw_header_badge(
-    draw: ImageDraw.ImageDraw,
+    draw: Any,
     x0: int,
     y0: int,
     text: str,
-    font,
+    font: Any,
     pad_x: int = 14,
     pad_y: int = 5,
     radius: int = 6,
@@ -219,7 +219,7 @@ def draw_header_badge(
     return box_x1
 
 
-def ellipsize_to_width(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> str:
+def ellipsize_to_width(draw: Any, text: str, font: Any, max_width: int) -> str:
     """
     Truncates text with a trailing ellipsis so its rendered width never exceeds
     max_width. Returns the original string when it already fits (or when the
@@ -242,13 +242,13 @@ def ellipsize_to_width(draw: ImageDraw.ImageDraw, text: str, font, max_width: in
     return text[:lo].rstrip() + ellipsis
 
 
-def mock_badge_width(draw: ImageDraw.ImageDraw, font) -> int:
+def mock_badge_width(draw: Any, font: Any) -> int:
     """Returns the width of a 'MOCK DATA' badge, to reserve header space."""
     bbox = draw.textbbox((0, 0), "MOCK DATA", font=font)
     return (bbox[2] - bbox[0]) + 16
 
 
-def draw_mock_badge(draw: ImageDraw.ImageDraw, x: int, y: int, font=None) -> int:
+def draw_mock_badge(draw: Any, x: int, y: int, font: Any = None) -> int:
     """
     Draws a prominent 'MOCK DATA' badge so fabricated preview data is never
     mistaken for live telemetry. Returns the right edge of the badge.
@@ -266,12 +266,12 @@ def draw_mock_badge(draw: ImageDraw.ImageDraw, x: int, y: int, font=None) -> int
 
 
 def draw_battery_indicator(
-    draw: ImageDraw.ImageDraw,
+    draw: Any,
     x: int,
     y: int,
     level: Optional[int],
     is_charging: bool = False,
-    font=None,
+    font: Any = None,
 ) -> int:
     """
     Draws a clean, high-contrast e-ink battery icon with percentage text and optional charging bolt.
@@ -326,12 +326,12 @@ def draw_battery_indicator(
 
 
 def draw_bottom_button_bar(
-    draw: ImageDraw.ImageDraw,
+    draw: Any,
     width: int,
     height: int,
     active_view: str = "morning",
-    font=None,
-):
+    font: Any = None,
+) -> None:
     """
     Renders 5 tactile touch buttons across the bottom edge of the dashboard:
     [ BUSES ] [ CITI BIKE ] [ ☼ LIGHT ] [ ↻ REFRESH ] [ ✕ EXIT ]
@@ -379,11 +379,11 @@ def draw_bottom_button_bar(
 
 
 def draw_status_strip(
-    draw: ImageDraw.ImageDraw,
+    draw: Any,
     width: int,
     height: int,
     note: str = "",
-):
+) -> None:
     """
     Overpaints the bottom button bar with an inert status strip.
 

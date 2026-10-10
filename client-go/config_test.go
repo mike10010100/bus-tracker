@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 )
@@ -250,5 +252,30 @@ func TestResolveViewMode(t *testing.T) {
 				t.Errorf("ResolveViewMode() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolveServerURLWithDiscoverer_CandidateProbeWithContext(t *testing.T) {
+	origCandidates := DefaultCandidateServers
+	defer func() { DefaultCandidateServers = origCandidates }()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead && r.URL.Path == "/tracker-arm" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	DefaultCandidateServers = []string{srv.URL}
+	got := ResolveServerURLWithDiscoverer(
+		[]string{"/tmp/tracker"},
+		func(string) string { return "" },
+		func(string) ([]byte, error) { return nil, os.ErrNotExist },
+		func() (string, error) { return "", os.ErrNotExist },
+	)
+	if got != srv.URL {
+		t.Errorf("got %q, want %q", got, srv.URL)
 	}
 }

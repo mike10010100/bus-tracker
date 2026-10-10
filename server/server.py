@@ -11,6 +11,7 @@ from datetime import datetime
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import socket
 import threading
+from typing import NamedTuple, Optional, Tuple, List, Dict, Any, Union
 from PIL import Image
 
 try:
@@ -19,8 +20,8 @@ except ImportError:
     Zeroconf = None
     ServiceInfo = None
 
-from bus_tracker import NJTransitBusTracker, normalize_arrival
-from citibike import CitiBikeTracker
+from bus_tracker import NJTransitBusTracker, normalize_arrival, ArrivalRecord
+from citibike import CitiBikeTracker, StationConfig, StationStatus
 from gtfs_bus import GTFSBusTracker
 from render_dashboard import render_dashboard, STOPS, get_mock_data, resolve_view, WIDTH
 from version import VERSION
@@ -40,6 +41,7 @@ from ota import (
     _binary_info_lock,
     sha256_file,
     get_binary_info,
+    BinaryInfo,
 )
 from kindle_image import (
     PW5_NATIVE,
@@ -56,6 +58,7 @@ from schedule import (
     PEAK_PM_END,
     is_peak_commute_hours,
     get_commute_lighting,
+    CommuteLighting,
     FORCE_FAST_POLL,
     OVERNIGHT_START,
     OVERNIGHT_END,
@@ -120,18 +123,23 @@ if _mode_requested not in VALID_RUN_MODES:
 _device_action = ""
 
 
-def parse_diag_battery(text):
+class BatteryDiag(NamedTuple):
+    level: Optional[int]
+    charging: Optional[bool]
+
+
+def parse_diag_battery(text: str) -> BatteryDiag:
     """
     Extracts (level, charging) from a diagnostics report's machine-readable
     'battery_level=<n> charging=<bool>' line. Returns (None, None) if absent.
     """
     m = re.search(r"battery_level=(-?\d+)\s+charging=(true|false)", text)
     if not m:
-        return None, None
+        return BatteryDiag(None, None)
     level = int(m.group(1))
     if level < 0:
-        return None, None
-    return level, m.group(2) == "true"
+        return BatteryDiag(None, None)
+    return BatteryDiag(level, m.group(2) == "true")
 
 
 # Upstream data cache (bus arrivals + Citi Bike status), decoupled from render.
@@ -144,7 +152,7 @@ _render_cache = {}
 _render_lock = threading.Lock()
 
 
-def data_cache_ttl(interactive=False):
+def data_cache_ttl(interactive: bool = False) -> int:
     """
     How long upstream data may be reused. Tied to the schedule so the fetch
     cadence follows the dashboard's refresh cadence (60s peak / 600s daytime /
@@ -156,7 +164,7 @@ def data_cache_ttl(interactive=False):
     return get_target_poll_interval()
 
 
-def get_fresh_data(use_mock=False, interactive=False):
+def get_fresh_data(use_mock: bool = False, interactive: bool = False) -> Tuple[Dict[str, Any], Dict[str, str], Any]:
     """
     Returns (stops_data, stop_status, cb_data), refreshing upstream sources at
     most once per data_cache_ttl(). Shared by all render requests.
@@ -215,7 +223,7 @@ def get_fresh_data(use_mock=False, interactive=False):
     return stops_data, stop_status, cb_data
 
 
-def warm_up_gtfs():
+def warm_up_gtfs() -> None:
     """Builds the GTFS static index ahead of the first client render."""
     global gtfs_tracker
     try:
@@ -226,7 +234,18 @@ def warm_up_gtfs():
         print(f"[GTFS] warm-up failed ({e})")
 
 
-def get_fresh_dashboard_image(use_mock=False, batt_level=None, is_charging=False, view="auto", width=800, height=480, scale=1.0, presentation="interactive", status_note="", interactive=False):
+def get_fresh_dashboard_image(
+    use_mock: bool = False,
+    batt_level: Optional[int] = None,
+    is_charging: bool = False,
+    view: str = "auto",
+    width: int = 800,
+    height: int = 480,
+    scale: float = 1.0,
+    presentation: str = "interactive",
+    status_note: str = "",
+    interactive: bool = False,
+) -> Image.Image:
     stops_data, stop_status, cb_data = get_fresh_data(use_mock=use_mock, interactive=interactive)
 
     cache_key = (use_mock, view, width, height, scale, batt_level, is_charging, presentation, status_note, _data_cache["time"])
@@ -275,7 +294,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     # indefinitely (each connection is handled by its own thread).
     timeout = 30
 
-    def _send_forbidden(self):
+    def _send_forbidden(self) -> None:
         msg = b"<h1>403 Forbidden</h1><p>Control endpoint requires a token or a private-network origin.</p>"
         self.send_response(403)
         self.send_header("Content-Type", "text/html")
@@ -284,13 +303,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(msg)
 
-    def _send_empty(self, code):
+    def _send_empty(self, code: int) -> None:
         # Content-Length is required to keep an HTTP/1.1 connection usable.
         self.send_response(code)
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def _write_body(self, data: bytes):
+    def _send_tracker_headers(self, status: int, headers: List[Tuple[str, str]]) -> None:
+        self.send_response(status)
+        for name, value in headers:
+            self.send_header(name, value)
+        self.end_headers()
+
+    def _write_body(self, data: bytes) -> None:
         """Writes a response body, suppressing it for HEAD requests so the
         HTTP/1.1 connection framing (Content-Length) stays valid."""
         if self.command != "HEAD":
@@ -501,8 +526,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             view_param = params.get("view", [self.headers.get("X-Tracker-View", "auto")])[0]
 
             # Extract battery and charging status from query params or headers
-            batt_param = params.get("batt", params.get("battery", [self.headers.get("X-Kindle-Battery")]))[0]
-            charging_param = params.get("charging", [self.headers.get("X-Kindle-Charging")])[0]
+            batt_param = params.get("batt", [None])[0] or params.get("battery", [None])[0] or self.headers.get("X-Kindle-Battery")
+            charging_param = params.get("charging", [None])[0] or self.headers.get("X-Kindle-Charging")
 
             batt_level = None
             if batt_param and str(batt_param).strip().lstrip("-").isdigit():
@@ -602,45 +627,36 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     if _mode_requested and client_mode != _mode_requested:
                         mode_header = _mode_requested
 
+            common_headers = [
+                ("ETag", etag),
+                ("X-Tracker-Version", SERVER_VERSION),
+                ("X-Tracker-SHA256", bin_sha),
+                ("X-Kindle-Poll-Interval", str(poll_interval)),
+                ("X-Tracker-Presentation", presentation),
+                ("X-Tracker-Server", f"http://{get_local_ip()}:{PORT}"),
+                ("X-Resolved-View", resolve_view(view_param)),
+            ]
+            if diag_header:
+                common_headers.append(("X-Tracker-Diag", diag_header))
+            if mode_header:
+                common_headers.append(("X-Tracker-Mode", mode_header))
+            if action_header:
+                common_headers.append(("X-Tracker-Action", action_header))
+
             if self.headers.get("If-None-Match") == etag:
-                self.send_response(304)
-                self.send_header("ETag", etag)
-                self.send_header("X-Tracker-Version", SERVER_VERSION)
-                self.send_header("X-Tracker-SHA256", bin_sha)
-                self.send_header("X-Kindle-Poll-Interval", str(poll_interval))
-                self.send_header("X-Tracker-Presentation", presentation)
-                self.send_header("X-Tracker-Server", f"http://{get_local_ip()}:{PORT}")
-                self.send_header("X-Resolved-View", resolve_view(view_param))
-                if diag_header:
-                    self.send_header("X-Tracker-Diag", diag_header)
-                if mode_header:
-                    self.send_header("X-Tracker-Mode", mode_header)
-                if action_header:
-                    self.send_header("X-Tracker-Action", action_header)
-                self.end_headers()
+                self._send_tracker_headers(304, common_headers)
                 return
 
-            self.send_response(200)
-            self.send_header("Content-Type", "image/png")
-            self.send_header("Content-Length", str(len(img_bytes)))
-            self.send_header("ETag", etag)
-            self.send_header("X-Kindle-Brightness", str(brightness))
-            self.send_header("X-Kindle-Warmth", str(warmth))
-            self.send_header("X-Kindle-Poll-Interval", str(poll_interval))
-            self.send_header("X-Tracker-Presentation", presentation)
-            self.send_header("X-Tracker-Server", f"http://{get_local_ip()}:{PORT}")
-            self.send_header("X-Tracker-Version", SERVER_VERSION)
-            self.send_header("X-Tracker-SHA256", bin_sha)
-            self.send_header("X-Tracker-View", view_param)
-            self.send_header("X-Resolved-View", resolve_view(view_param))
-            if diag_header:
-                self.send_header("X-Tracker-Diag", diag_header)
-            if mode_header:
-                self.send_header("X-Tracker-Mode", mode_header)
-            if action_header:
-                self.send_header("X-Tracker-Action", action_header)
-            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-            self.end_headers()
+            full_headers = [
+                ("Content-Type", "image/png"),
+                ("Content-Length", str(len(img_bytes))),
+            ] + common_headers + [
+                ("X-Kindle-Brightness", str(brightness)),
+                ("X-Kindle-Warmth", str(warmth)),
+                ("X-Tracker-View", view_param),
+                ("Cache-Control", "no-cache, no-store, must-revalidate"),
+            ]
+            self._send_tracker_headers(200, full_headers)
             self._write_body(img_bytes)
 
         elif parsed.path in ["/", "/index.html"]:

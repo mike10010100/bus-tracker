@@ -2,7 +2,7 @@
 # ==============================================================================
 # Script: deploy.sh
 # Purpose: Auto-extracts version, compiles static Kindle ARM client (if Go present),
-#          builds version-tagged & latest Docker images, and launches the bus-tracker stack.
+#          builds version-tagged & latest Docker images, and launches the transit-tracker stack.
 # ==============================================================================
 
 set -euo pipefail
@@ -12,30 +12,32 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${ROOT_DIR}"
 
 # Locate docker compose command
-COMPOSE_CMD=""
+COMPOSE_CMD=()
 if docker compose version >/dev/null 2>&1; then
-    COMPOSE_CMD="docker compose"
+    COMPOSE_CMD=(docker compose)
 elif command -v docker-compose >/dev/null 2>&1; then
-    COMPOSE_CMD="docker-compose"
+    COMPOSE_CMD=(docker-compose)
+elif [[ -x "/opt/homebrew/bin/docker-compose" ]]; then
+    COMPOSE_CMD=(/opt/homebrew/bin/docker-compose)
 elif [[ -x "/home/linuxbrew/.linuxbrew/bin/docker-compose" ]]; then
-    COMPOSE_CMD="/home/linuxbrew/.linuxbrew/bin/docker-compose"
+    COMPOSE_CMD=(/home/linuxbrew/.linuxbrew/bin/docker-compose)
 else
     echo "Error: Neither 'docker compose' nor 'docker-compose' found!" >&2
     exit 1
 fi
 
-# Extract SemVer version from VERSION file or server.py
+# Extract SemVer version from VERSION file or server package
 VERSION=""
 if [[ -f "VERSION" ]]; then
-    VERSION=$(cat VERSION | tr -d ' \n\r')
+    VERSION=$(tr -d '[:space:]' < VERSION)
+elif [[ -f "server/version.py" ]]; then
+    VERSION=$(python3 -c "import server.version; print(server.version.VERSION)" 2>/dev/null || true)
 elif [[ -f "server/server.py" ]]; then
-    VERSION=$(grep -m1 '^SERVER_VERSION\s*=' server/server.py | sed -E 's/SERVER_VERSION\s*=\s*"([^"]+)".*/\1/')
-elif [[ -f "server.py" ]]; then
-    VERSION=$(grep -m1 '^SERVER_VERSION\s*=' server.py | sed -E 's/SERVER_VERSION\s*=\s*"([^"]+)".*/\1/')
+    VERSION=$(python3 -c "import server.server; print(server.server.SERVER_VERSION)" 2>/dev/null || true)
 fi
 
 if [[ -z "${VERSION}" ]]; then
-    echo "Error: Could not parse version from VERSION or server/server.py!" >&2
+    echo "Error: Could not determine version from VERSION or server/version.py!" >&2
     exit 1
 fi
 
@@ -46,7 +48,7 @@ echo "======================================================================"
 
 # Build versioned image (Docker multi-stage compiles tracker-arm automatically)
 export IMAGE_TAG
-${COMPOSE_CMD} build transit-tracker
+"${COMPOSE_CMD[@]}" build transit-tracker
 
 # Maintain 'latest' tag pointing to the new versioned build
 if docker image inspect "transit-tracker:${IMAGE_TAG}" >/dev/null 2>&1; then
@@ -54,7 +56,7 @@ if docker image inspect "transit-tracker:${IMAGE_TAG}" >/dev/null 2>&1; then
 fi
 
 # Launch the stack
-${COMPOSE_CMD} up -d --force-recreate transit-tracker
+"${COMPOSE_CMD[@]}" up -d --force-recreate transit-tracker
 
 # Wait for transit-tracker to pass healthcheck
 echo "⏳ Waiting for Transit Tracker to pass healthcheck..."
@@ -63,22 +65,27 @@ MAX_WAIT_SECS=60
 ELAPSED=0
 HEALTH_STATUS="unknown"
 
-while [[ ${ELAPSED} -lt ${MAX_WAIT_SECS} ]]; do
+while (( ELAPSED < MAX_WAIT_SECS )); do
     HEALTH_STATUS=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null || echo "starting")
     if [[ "${HEALTH_STATUS}" == "healthy" ]]; then
         echo ""
         echo "✅ Transit Tracker is healthy and serving dashboard (took ${ELAPSED}s)."
         break
     fi
+    if [[ "${HEALTH_STATUS}" == "exited" || "${HEALTH_STATUS}" == "dead" ]]; then
+        echo ""
+        echo "❌ Error: Container '${CONTAINER_NAME}' stopped unexpectedly (status: ${HEALTH_STATUS})." >&2
+        docker logs --tail 50 "${CONTAINER_NAME}" >&2 || true
+        exit 1
+    fi
     sleep 2
-    ELAPSED=$((ELAPSED + 2))
-    echo -n "."
+    (( ELAPSED += 2 ))
+    printf "."
 done
 
 if [[ "${HEALTH_STATUS}" != "healthy" ]]; then
     FINAL_STATUS=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null || echo "unknown")
     if [[ "${FINAL_STATUS}" == "healthy" ]]; then
-        HEALTH_STATUS="healthy"
         echo ""
         echo "✅ Transit Tracker is healthy and serving dashboard."
     else

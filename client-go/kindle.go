@@ -13,46 +13,32 @@ import (
 // gesture handlers run on the input dispatcher goroutine, so a slow or
 // unresponsive daemon (notably powerd right after a power-button wake) must
 // never be able to block input forever. If a call exceeds the timeout the
-// caller moves on (the subprocess is abandoned).
+// child process is terminated.
 var lipcCallTimeout = 2 * time.Second
 
-// lipcSet executes a lipc-set-prop command, discarding output.
+// lipcSet executes a lipc-set-prop command with a timeout bound, discarding output.
+// The child process is terminated if the timeout expires.
 func lipcSet(prop, key, val string) {
-	fn := execCommand // capture now; the goroutine must not touch the seam var
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		cmd := fn("lipc-set-prop", "-i", prop, key, val)
-		cmd.Stdout = io.Discard
-		cmd.Stderr = io.Discard
-		_ = cmd.Run()
-	}()
-	select {
-	case <-done:
-	case <-time.After(lipcCallTimeout):
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), lipcCallTimeout)
+	defer cancel()
+	cmd := execCommandContext(ctx, "lipc-set-prop", "-i", prop, key, val)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	_ = cmd.Run()
 }
 
 // lipcGet reads a property using lipc-get-prop, bounded by lipcCallTimeout.
+// The child process is terminated if the timeout expires.
 func lipcGet(prop, key string) string {
-	fn := execCommand // capture now; the goroutine must not touch the seam var
-	ch := make(chan string, 1)
-	go func() {
-		cmd := fn("lipc-get-prop", prop, key)
-		cmd.Stderr = io.Discard
-		out, err := cmd.Output()
-		if err != nil {
-			ch <- ""
-			return
-		}
-		ch <- strings.TrimSpace(string(out))
-	}()
-	select {
-	case res := <-ch:
-		return res
-	case <-time.After(lipcCallTimeout):
+	ctx, cancel := context.WithTimeout(context.Background(), lipcCallTimeout)
+	defer cancel()
+	cmd := execCommandContext(ctx, "lipc-get-prop", prop, key)
+	cmd.Stderr = io.Discard
+	out, err := cmd.Output()
+	if err != nil {
 		return ""
 	}
+	return strings.TrimSpace(string(out))
 }
 
 // cleanup performs full cleanup, resets screensaver, clears screen, and restores Kindle UI

@@ -177,7 +177,7 @@ class GTFSBusTracker:
 
     def _load_cached_index(self) -> Optional[Dict[str, Any]]:
         try:
-            with open(self._index_path, "r") as f:
+            with open(self._index_path, "r", encoding="utf-8") as f:
                 index = json.load(f)
             if index.get("stops") == self.stops and self._index_is_fresh(index):
                 return index
@@ -189,7 +189,7 @@ class GTFSBusTracker:
         try:
             os.makedirs(self.cache_dir, exist_ok=True)
             tmp = self._index_path + ".tmp"
-            with open(tmp, "w") as f:
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(index, f)
             os.replace(tmp, self._index_path)
         except Exception:
@@ -215,64 +215,63 @@ class GTFSBusTracker:
 
     def build_index(self, zip_bytes: bytes) -> Dict[str, Any]:
         """Parses the static GTFS zip into a small index for this route/stops."""
-        z = zipfile.ZipFile(io.BytesIO(zip_bytes))
-
-        services: Dict[str, Any] = {}
-        with z.open("calendar.txt") as f:
-            for r in csv.DictReader(io.TextIOWrapper(f, "utf-8")):
-                services[r["service_id"]] = {
-                    "days": [r[k] for k in _DAY_KEYS],
-                    "start": r["start_date"],
-                    "end": r["end_date"],
-                }
-
-        exceptions: Dict[str, Dict[str, int]] = {}
-        try:
-            with z.open("calendar_dates.txt") as f:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+            services: Dict[str, Any] = {}
+            with z.open("calendar.txt") as f:
                 for r in csv.DictReader(io.TextIOWrapper(f, "utf-8")):
-                    exceptions.setdefault(r["date"], {})[r["service_id"]] = int(r["exception_type"])
-        except KeyError:
-            pass
-
-        route_ids = set()
-        with z.open("routes.txt") as f:
-            for r in csv.DictReader(io.TextIOWrapper(f, "utf-8")):
-                if r.get("route_short_name") == self.route:
-                    route_ids.add(r["route_id"])
-
-        trips: Dict[str, Any] = {}
-        with z.open("trips.txt") as f:
-            for r in csv.DictReader(io.TextIOWrapper(f, "utf-8")):
-                if r["route_id"] in route_ids:
-                    trips[r["trip_id"]] = {
-                        "headsign": (r.get("trip_headsign") or "").strip(),
-                        "service_id": r.get("service_id", ""),
-                        "direction": r.get("direction_id", ""),
+                    services[r["service_id"]] = {
+                        "days": [r[k] for k in _DAY_KEYS],
+                        "start": r["start_date"],
+                        "end": r["end_date"],
                     }
 
-        deps: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.stops}
-        with z.open("stop_times.txt") as f:
-            for r in csv.DictReader(io.TextIOWrapper(f, "utf-8")):
-                tid = r["trip_id"]
-                sid = r["stop_id"]
-                if tid in trips and sid in deps:
-                    secs = hms_to_secs(r.get("departure_time") or r.get("arrival_time") or "")
-                    if secs >= 0:
-                        deps[sid].append({"trip_id": tid, "secs": secs})
-        for sid in deps:
-            deps[sid].sort(key=lambda d: d["secs"])
+            exceptions: Dict[str, Dict[str, int]] = {}
+            try:
+                with z.open("calendar_dates.txt") as f:
+                    for r in csv.DictReader(io.TextIOWrapper(f, "utf-8")):
+                        exceptions.setdefault(r["date"], {})[r["service_id"]] = int(r["exception_type"])
+            except KeyError:
+                pass
 
-        valid_until = max((s["end"] for s in services.values()), default="")
-        return {
-            "route": self.route,
-            "stops": self.stops,
-            "built_at": time.time(),
-            "valid_until": valid_until,
-            "trips": trips,
-            "deps": deps,
-            "services": services,
-            "exceptions": exceptions,
-        }
+            route_ids = set()
+            with z.open("routes.txt") as f:
+                for r in csv.DictReader(io.TextIOWrapper(f, "utf-8")):
+                    if r.get("route_short_name") == self.route:
+                        route_ids.add(r["route_id"])
+
+            trips: Dict[str, Any] = {}
+            with z.open("trips.txt") as f:
+                for r in csv.DictReader(io.TextIOWrapper(f, "utf-8")):
+                    if r["route_id"] in route_ids:
+                        trips[r["trip_id"]] = {
+                            "headsign": (r.get("trip_headsign") or "").strip(),
+                            "service_id": r.get("service_id", ""),
+                            "direction": r.get("direction_id", ""),
+                        }
+
+            deps: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.stops}
+            with z.open("stop_times.txt") as f:
+                for r in csv.DictReader(io.TextIOWrapper(f, "utf-8")):
+                    tid = r["trip_id"]
+                    sid = r["stop_id"]
+                    if tid in trips and sid in deps:
+                        secs = hms_to_secs(r.get("departure_time") or r.get("arrival_time") or "")
+                        if secs >= 0:
+                            deps[sid].append({"trip_id": tid, "secs": secs})
+            for sid in deps:
+                deps[sid].sort(key=lambda d: d["secs"])
+
+            valid_until = max((s["end"] for s in services.values()), default="")
+            return {
+                "route": self.route,
+                "stops": self.stops,
+                "built_at": time.time(),
+                "valid_until": valid_until,
+                "trips": trips,
+                "deps": deps,
+                "services": services,
+                "exceptions": exceptions,
+            }
 
     def active_services(self, index: Dict[str, Any], date: datetime.date) -> set:
         ymd = date.strftime("%Y%m%d")

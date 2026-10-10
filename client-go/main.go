@@ -25,39 +25,44 @@ const (
 	ManualHoldDuration = 45 * time.Minute
 )
 
+// TrackerClient coordinates e-ink display updates, power states, inputs, and server communication.
 type TrackerClient struct {
-	serverURL           string
-	client              *http.Client
-	manualLightTime     time.Time
-	manualViewTime      time.Time
-	lastDataInteraction time.Time
-	mu                  sync.Mutex
-	refreshCh           chan struct{}
+	client    *http.Client
+	refreshCh chan struct{}
 	// touchCh fires on ANY recognised touch, so an interaction session stays
 	// alive while the user is poking at the screen (a frontlight tap must reset
 	// the idle timer too, not just data taps).
-	touchCh           chan struct{}
-	lastETag          string
-	consecutiveErrors int
-	viewMode          string
-	lastRenderedView  string
-	panelOnce         sync.Once
-	panelSize         PanelSize
-	logCh             chan string
-	logStarted        sync.Once
+	touchCh    chan struct{}
+	logCh      chan string
+	logStarted sync.Once
+	panelOnce  sync.Once
+	panelSize  PanelSize
 	// exitOnPowerKey, when true (resident mode), treats a hardware power-key
 	// press as a request to exit. In low-power dashboard mode it is false: the
 	// power key is a wake source, not an exit, so a press must not kill us.
 	exitOnPowerKey bool
+	wg             sync.WaitGroup
+
+	mu sync.Mutex
+	// Fields protected by mu:
+	// interacting is true while the client is in an awake power-button session,
+	// during which it requests the full tappable dashboard from the server.
+	interacting         bool
+	serverURL           string
+	manualLightTime     time.Time
+	manualViewTime      time.Time
+	lastDataInteraction time.Time
+	lastETag            string
+	consecutiveErrors   int
+	viewMode            string
+	lastRenderedView    string
 	// presentation is the server-advised visual/interaction state: "interactive"
 	// (tappable dashboard, awake), "idle" (suspended; press power to interact)
 	// or "dormant" (overnight). Logged for observability.
 	presentation string
-	// interacting is true while the client is in an awake power-button session,
-	// during which it requests the full tappable dashboard from the server.
-	interacting bool
 }
 
+// NewTrackerClient constructs an initialized TrackerClient with default channels and HTTP timeouts.
 func NewTrackerClient(server string, initialView string) *TrackerClient {
 	if initialView == "" {
 		initialView = "auto"
@@ -227,6 +232,11 @@ func (tc *TrackerClient) interactionAwake(ctx context.Context, cancel context.Ca
 	}
 }
 
+// Wait blocks until all background goroutines tracked by tc have finished.
+func (tc *TrackerClient) Wait() {
+	tc.wg.Wait()
+}
+
 func main() {
 	// Silence standard error on headless Kindle
 	if nullFile, err := osOpenFile(os.DevNull, os.O_WRONLY, 0); err == nil {
@@ -244,10 +254,26 @@ func run(parent context.Context) {
 
 	serverURL := GetServerURL()
 	initialView := ResolveViewMode(os.Args)
-	ctx, cancel := context.WithCancel(parent)
-	defer cancel()
-
+	ctx, cancel := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	tc := NewTrackerClient(serverURL, initialView)
+	defer func() {
+		cancel()
+		tc.Wait()
+	}()
+
+	tc.wg.Add(1)
+	go func() {
+		defer tc.wg.Done()
+		select {
+		case <-parent.Done():
+			return
+		case <-ctx.Done():
+			if parent.Err() == nil {
+				tc.logRemote("OS signal received. Exiting...")
+			}
+		}
+	}()
+
 	tc.startLogSender(ctx)
 	_ = osWriteFile("/tmp/tracker_server.txt", []byte(serverURL), 0644)
 	_ = osWriteFile("/mnt/us/documents/tracker_server.txt", []byte(serverURL), 0644)
@@ -293,16 +319,12 @@ func run(parent context.Context) {
 	// Resident mode: hold the device awake, listen for sleep/power, and poll.
 	lipcSet("com.lab126.powerd", "preventScreenSaver", "1")
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	go func() {
-		<-sigCh
-		tc.logRemote("OS signal received. Exiting...")
-		cancel()
-	}()
-
 	tc.startInputListeners(ctx, cancel)
-	go tc.startPowerListener(ctx, cancel)
+	tc.wg.Add(1)
+	go func() {
+		defer tc.wg.Done()
+		tc.startPowerListener(ctx, cancel)
+	}()
 
 	initialPollSec := tc.fetchAndDrawDashboard(ctx, cancel)
 	tc.runPollLoop(ctx, cancel, tc.getNextPollInterval(initialPollSec))

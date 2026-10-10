@@ -41,18 +41,41 @@ class TestCommuteSchedule(unittest.TestCase):
 
     def test_overnight_deep_eco(self):
         # Default overnight window is 22:00-06:00 -> 3600s.
-        self.assertEqual(get_target_poll_interval(datetime(2026, 10, 8, 23, 0)), 3600)
-        self.assertEqual(get_target_poll_interval(datetime(2026, 10, 8, 2, 0)), 3600)
-        self.assertEqual(get_target_poll_interval(datetime(2026, 10, 8, 5, 59)), 3600)
-        # Boundaries: 06:00 is no longer overnight (off-peak 600s).
-        self.assertEqual(get_target_poll_interval(datetime(2026, 10, 8, 6, 0)), 600)
-        self.assertEqual(get_target_poll_interval(datetime(2026, 10, 8, 21, 59)), 600)
+        cases = [
+            (datetime(2026, 10, 8, 23, 0), 3600),
+            (datetime(2026, 10, 8, 2, 0), 3600),
+            (datetime(2026, 10, 8, 5, 59), 3600),
+            # Boundaries: 06:00 is no longer overnight (off-peak 600s).
+            (datetime(2026, 10, 8, 6, 0), 600),
+            (datetime(2026, 10, 8, 21, 59), 600),
+        ]
+        for dt, expected in cases:
+            with self.subTest(dt=dt, expected=expected):
+                self.assertEqual(get_target_poll_interval(dt), expected)
 
     def test_is_overnight_hours_wraps_midnight(self):
         from server import is_overnight_hours
-        self.assertTrue(is_overnight_hours(datetime(2026, 10, 8, 23, 30)))
-        self.assertTrue(is_overnight_hours(datetime(2026, 10, 8, 0, 30)))
-        self.assertFalse(is_overnight_hours(datetime(2026, 10, 8, 12, 0)))
+        cases = [
+            (datetime(2026, 10, 8, 23, 30), True),
+            (datetime(2026, 10, 8, 0, 30), True),
+            (datetime(2026, 10, 8, 12, 0), False),
+        ]
+        for dt, expected in cases:
+            with self.subTest(dt=dt, expected=expected):
+                self.assertEqual(is_overnight_hours(dt), expected)
+
+    def test_commute_lighting_named_tuple(self):
+        rush = get_commute_lighting(datetime(2026, 10, 8, 8, 15))
+        self.assertEqual(rush.brightness, 8)
+        self.assertEqual(rush.warmth, 12)
+        self.assertEqual(rush[0], 8)
+        self.assertEqual(rush[1], 12)
+        b, w = rush
+        self.assertEqual((b, w), (8, 12))
+
+        off = get_commute_lighting(datetime(2026, 10, 8, 13, 30))
+        self.assertEqual(off.brightness, 0)
+        self.assertEqual(off.warmth, 0)
 
     def test_force_fast_poll_overrides_schedule(self):
         import server

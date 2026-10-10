@@ -46,14 +46,12 @@ func TestArmSysfsWake_WriteFailure(t *testing.T) {
 func TestSetWireless_TogglesValue(t *testing.T) {
 	patchRuntime(t)
 	var last string
-	orig := execCommand
-	execCommand = func(name string, arg ...string) *exec.Cmd {
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
 		if name == "lipc-set-prop" && len(arg) >= 4 && arg[2] == "wirelessEnable" {
 			last = arg[3]
 		}
-		return orig("true")
+		return exec.CommandContext(ctx, "true")
 	}
-	defer func() { execCommand = orig }()
 	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
 	tc.setWireless(false)
 	if last != "0" {
@@ -77,14 +75,12 @@ func TestEnterSuspend_ReportsElapsed(t *testing.T) {
 func TestReleaseScreenSaver(t *testing.T) {
 	patchRuntime(t)
 	var setKey, setVal string
-	orig := execCommand
-	execCommand = func(name string, arg ...string) *exec.Cmd {
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
 		if name == "lipc-set-prop" && len(arg) >= 4 {
 			setKey, setVal = arg[2], arg[3]
 		}
-		return orig("true")
+		return exec.CommandContext(ctx, "true")
 	}
-	defer func() { execCommand = orig }()
 	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
 	tc.releaseScreenSaver()
 	if setKey != "preventScreenSaver" || setVal != "0" {
@@ -113,14 +109,14 @@ func TestSleepModeHoldsScreensaverWhileRendering(t *testing.T) {
 	checkNetworkFn = func(context.Context) bool { return true }
 
 	var heldAwake bool
-	orig := execCommand
-	execCommand = func(name string, arg ...string) *exec.Cmd {
+	origCtx := execCommandContext
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
 		if name == "lipc-set-prop" && len(arg) >= 4 && arg[2] == "preventScreenSaver" && arg[3] == "1" {
 			heldAwake = true
 		}
-		return orig("true")
+		return exec.CommandContext(ctx, "true")
 	}
-	defer func() { execCommand = orig }()
+	defer func() { execCommandContext = origCtx }()
 
 	origArgs := os.Args
 	os.Args = []string{"/tmp/tracker", "-sleep", "-server", srv.URL}
@@ -220,16 +216,16 @@ func TestRunSleepLoop_SuspendArmsWifiAndSleeps(t *testing.T) {
 		}
 		return nil
 	}
-	orig := execCommand
-	execCommand = func(name string, arg ...string) *exec.Cmd {
+	origCtx := execCommandContext
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
 		if name == "lipc-set-prop" && len(arg) >= 4 && arg[2] == "wirelessEnable" {
 			wifiMu.Lock()
 			wifi = append(wifi, arg[3])
 			wifiMu.Unlock()
 		}
-		return orig("true")
+		return exec.CommandContext(ctx, "true")
 	}
-	defer func() { execCommand = orig }()
+	defer func() { execCommandContext = origCtx }()
 
 	origSettle := suspendSettleDelay
 	suspendSettleDelay = 0

@@ -1,7 +1,17 @@
 import os
 import time
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple, TypedDict
 import requests
+
+
+class ArrivalRecord(TypedDict, total=False):
+    route: Optional[str]
+    destination: Optional[str]
+    eta: Optional[str]
+    occupancy: Optional[str]
+    vehicle_id: Optional[str]
+    live: Optional[bool]
+
 
 def load_env_file(env_file: str) -> None:
     """
@@ -11,7 +21,7 @@ def load_env_file(env_file: str) -> None:
     """
     if not os.path.exists(env_file):
         return
-    with open(env_file, "r") as f:
+    with open(env_file, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
@@ -36,7 +46,7 @@ except ImportError:
     # Native fallback if python-dotenv is not installed
     load_env_file(_env_file)
 
-def normalize_arrival(t: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_arrival(t: Dict[str, Any]) -> ArrivalRecord:
     """
     Maps a raw NJ Transit trip (from either BUSDV2 or GraphQL) to the canonical
     Arrival record consumed by the renderer. Centralizing this mapping keeps the
@@ -162,7 +172,7 @@ class NJTransitBusTracker:
     STATUS_EMPTY = "empty"    # Upstream responded but there are genuinely no buses
     STATUS_ERROR = "error"    # Upstream could not be reached; data is unknown
 
-    def get_arrivals_with_status(self, stop_id: str, route: str = "126"):
+    def get_arrivals_with_status(self, stop_id: str, route: str = "126") -> Tuple[str, List[Dict[str, Any]]]:
         """
         Fetches upcoming bus arrivals and returns (status, trips).
 
@@ -214,16 +224,25 @@ class NJTransitBusTracker:
         _status, trips = self.get_arrivals_with_status(stop_id=stop_id, route=route)
         return trips
 
-    def get_summary(self, stops: Dict[str, str], route: str = "126") -> Dict[str, List[Dict[str, str]]]:
+    def get_summary(self, stops: Dict[str, str], route: str = "126") -> Dict[str, List[ArrivalRecord]]:
         """
         Fetches simplified arrival summaries for multiple stops.
         stops format: {"Stop Name": "5-digit-stop-id"}
         """
-        summary = {}
+        summary: Dict[str, List[ArrivalRecord]] = {}
         for stop_name, stop_id in stops.items():
             trips = self.get_arrivals(stop_id=stop_id, route=route)
             summary[stop_name] = [normalize_arrival(t) for t in trips]
         return summary
+
+    def close(self) -> None:
+        self.session.close()
+
+    def __enter__(self) -> "NJTransitBusTracker":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
 
 
 if __name__ == "__main__":

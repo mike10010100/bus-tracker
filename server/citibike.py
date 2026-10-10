@@ -7,13 +7,36 @@ with dynamic prioritization for stations that currently have e-bikes available.
 import json
 import time
 import urllib.request
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, TypedDict
 
 from version import VERSION
 
+
+class StationConfig(TypedDict, total=False):
+    id: str
+    name: str
+    full_name: str
+    walk_min: int
+    distance_m: int
+
+
+class StationStatus(TypedDict, total=False):
+    id: str
+    name: str
+    full_name: str
+    walk_min: int
+    distance_m: int
+    ebikes: int
+    classic: int
+    total_bikes: int
+    docks: int
+    is_offline: bool
+    is_returning: bool
+
+
 # Closest Citi Bike stations to 919 Park Ave, Hoboken, NJ (40.7484552, -74.0302997)
 # Pedestrian routing distances and walk times based on actual street routing via crosswalks
-DEFAULT_STATIONS = [
+DEFAULT_STATIONS: List[StationConfig] = [
     {
         "id": "fadf00cf-d84a-49e8-9607-c67154915412",
         "name": "Clinton & 9th",
@@ -61,7 +84,7 @@ DEFAULT_STATIONS = [
 GBFS_STATUS_URL = "https://gbfs.citibikenyc.com/gbfs/en/station_status.json"
 
 
-def sort_stations_by_ebike_priority(stations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def sort_stations_by_ebike_priority(stations: List[StationStatus]) -> List[StationStatus]:
     """
     Sorts Citi Bike stations to prioritize e-bike availability for commuters:
     1. Active stations with e-bikes (ebikes > 0) come first,
@@ -69,7 +92,7 @@ def sort_stations_by_ebike_priority(stations: List[Dict[str, Any]]) -> List[Dict
     2. Active stations with 0 e-bikes come next, ordered by walk_min (closest walk first).
     3. Offline stations are pushed to the end.
     """
-    def priority_key(s: Dict[str, Any]):
+    def priority_key(s: StationStatus):
         is_offline = 1 if s.get("is_offline") else 0
         has_ebikes = 0 if (s.get("ebikes", 0) > 0 and not is_offline) else 1
         walk_min = s.get("walk_min", 99)
@@ -80,13 +103,13 @@ def sort_stations_by_ebike_priority(stations: List[Dict[str, Any]]) -> List[Dict
 
 
 class CitiBikeTracker:
-    def __init__(self, stations: Optional[List[Dict[str, Any]]] = None, cache_ttl: int = 30):
+    def __init__(self, stations: Optional[List[StationConfig]] = None, cache_ttl: int = 30):
         self.stations = stations or DEFAULT_STATIONS
         self.cache_ttl = cache_ttl
         self._last_fetch_time = 0.0
-        self._cached_data: List[Dict[str, Any]] = []
+        self._cached_data: List[StationStatus] = []
 
-    def get_station_status(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+    def get_station_status(self, force_refresh: bool = False) -> List[StationStatus]:
         """
         Returns real-time status for the configured target stations,
         dynamically prioritized by e-bike availability and proximity.
@@ -146,7 +169,7 @@ class CitiBikeTracker:
             # Otherwise return mock fallback
             return self.get_mock_data()
 
-    def get_mock_data(self) -> List[Dict[str, Any]]:
+    def get_mock_data(self) -> List[StationStatus]:
         """Mock fallback data with realistic commute availability across all tracked stations."""
         mock = [
             {

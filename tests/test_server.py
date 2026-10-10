@@ -24,15 +24,36 @@ class TestVersionWiring(unittest.TestCase):
 
 class TestPrivateAddress(unittest.TestCase):
     def test_private_and_loopback(self):
-        self.assertTrue(is_private_address("127.0.0.1"))
-        self.assertTrue(is_private_address("192.168.1.5"))
-        self.assertTrue(is_private_address("10.0.0.9"))
-        self.assertTrue(is_private_address("172.16.0.1"))
-        self.assertTrue(is_private_address("169.254.1.1"))
+        addrs = ["127.0.0.1", "192.168.1.5", "10.0.0.9", "172.16.0.1", "169.254.1.1"]
+        for addr in addrs:
+            with self.subTest(addr=addr):
+                self.assertTrue(is_private_address(addr))
 
     def test_public_and_invalid(self):
-        self.assertFalse(is_private_address("8.8.8.8"))
-        self.assertFalse(is_private_address("not-an-ip"))
+        addrs = ["8.8.8.8", "not-an-ip"]
+        for addr in addrs:
+            with self.subTest(addr=addr):
+                self.assertFalse(is_private_address(addr))
+
+
+class TestOTAStructures(unittest.TestCase):
+    def test_binary_info_named_tuple(self):
+        from ota import BinaryInfo, get_binary_info
+        info = BinaryInfo(True, 12345.0, "deadbeef", 42)
+        self.assertTrue(info.exists)
+        self.assertEqual(info.mtime, 12345.0)
+        self.assertEqual(info.sha256, "deadbeef")
+        self.assertEqual(info.size, 42)
+        exists, mtime, sha, size = info
+        self.assertEqual((exists, mtime, sha, size), (True, 12345.0, "deadbeef", 42))
+        self.assertEqual(info[0], True)
+        self.assertEqual(info[2], "deadbeef")
+
+        from unittest.mock import patch
+        with patch("os.stat", side_effect=OSError("not found")):
+            non_info = get_binary_info("/nonexistent/file/path")
+            self.assertFalse(non_info.exists)
+            self.assertEqual(non_info.size, 0)
 
     def test_get_local_ip_falls_back_to_localhost_on_error(self):
         from unittest.mock import patch

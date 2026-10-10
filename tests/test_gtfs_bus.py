@@ -324,7 +324,7 @@ class TestIndexCachingAndLifecycle(unittest.TestCase):
             self.assertEqual(loaded, idx)
 
             # Test corrupt file
-            with open(t._index_path, "w") as f:
+            with open(t._index_path, "w", encoding="utf-8") as f:
                 f.write("not-json")
             self.assertIsNone(t._load_cached_index())
 

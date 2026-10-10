@@ -21,22 +21,24 @@ func (tc *TrackerClient) logRemote(msg string) {
 // startLogSender launches the one goroutine that serializes log delivery.
 func (tc *TrackerClient) startLogSender(ctx context.Context) {
 	tc.logStarted.Do(func() {
+		tc.wg.Add(1)
 		go func() {
+			defer tc.wg.Done()
 			for {
 				select {
 				case <-ctx.Done():
 					return
 				case msg := <-tc.logCh:
-					tc.postLog(msg)
+					tc.postLog(ctx, msg)
 				}
 			}
 		}()
 	})
 }
 
-// postLog performs a single synchronous diagnostic POST.
-func (tc *TrackerClient) postLog(msg string) {
-	tc.postText("/log", msg)
+// postLog performs a single synchronous diagnostic POST using the provided context.
+func (tc *TrackerClient) postLog(ctx context.Context, msg string) {
+	tc.postText(ctx, "/log", msg)
 }
 
 // postDiagnostics gathers a device report synchronously (so the probes run on
@@ -49,12 +51,12 @@ func (tc *TrackerClient) postDiagnostics(active bool) {
 	if active {
 		report += "\n\n" + RunActiveProbe().Format()
 	}
-	go tc.postText("/diag", report)
+	go tc.postText(context.Background(), "/diag", report)
 }
 
-func (tc *TrackerClient) postText(path, msg string) {
+func (tc *TrackerClient) postText(ctx context.Context, path, msg string) {
 	server := tc.getServerURL()
-	req, err := http.NewRequest("POST", server+path, strings.NewReader(msg))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server+path, strings.NewReader(msg))
 	if err != nil {
 		return
 	}

@@ -247,3 +247,25 @@ class TestEnvFileFallback(unittest.TestCase):
     def test_missing_file_is_noop(self):
         from bus_tracker import load_env_file
         load_env_file("/nonexistent/path/.env")
+
+    def test_arrival_record_typed_dict(self):
+        from bus_tracker import ArrivalRecord, normalize_arrival
+        raw = {
+            "public_route": "126",
+            "header": "New York",
+            "departurestatus": "in 5 min",
+            "departuretime": "8:30 AM",
+            "passload": "SEATS_AVAILABLE",
+            "vehicle_id": "5501",
+        }
+        rec: ArrivalRecord = normalize_arrival(raw)
+        self.assertEqual(rec["route"], "126")
+        self.assertEqual(rec["destination"], "New York")
+        self.assertEqual(rec["eta"], "in 5 min (8:30 AM)")
+        self.assertEqual(rec["occupancy"], "SEATS_AVAILABLE")
+        self.assertEqual(rec["vehicle_id"], "5501")
+
+    def test_tracker_context_manager(self):
+        from bus_tracker import NJTransitBusTracker
+        with NJTransitBusTracker(username="user", password="pwd") as t:
+            self.assertIsNotNone(t.session)

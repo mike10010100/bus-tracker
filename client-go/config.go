@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+// DefaultCandidateServers lists fallback server addresses probed in sequence.
 var DefaultCandidateServers = []string{
 	"http://192.168.86.193:8000",
 	"http://192.168.1.100:8000",
@@ -82,14 +83,24 @@ func ResolveServerURLWithDiscoverer(
 	}
 
 	// 5. Test candidate servers with short timeout to detect reachable host
+	client := &http.Client{}
 	for _, candidate := range DefaultCandidateServers {
-		client := &http.Client{Timeout: 400 * time.Millisecond}
-		resp, err := client.Head(candidate + "/tracker-arm")
+		ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+		req, err := http.NewRequestWithContext(ctx, http.MethodHead, candidate+"/tracker-arm", nil)
+		if err != nil {
+			cancel()
+			continue
+		}
+		resp, err := client.Do(req)
 		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
+			status := resp.StatusCode
+			_ = resp.Body.Close()
+			cancel()
+			if status == http.StatusOK {
 				return candidate
 			}
+		} else {
+			cancel()
 		}
 	}
 

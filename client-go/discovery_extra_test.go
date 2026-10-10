@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -317,4 +318,49 @@ func TestVerifyServer_InvalidURL(t *testing.T) {
 	if verifyServer(context.Background(), "http://[invalid-url]", 50*time.Millisecond) {
 		t.Fatal("expected verifyServer to return false for invalid URL")
 	}
+}
+
+func TestDiscoverySentinelErrors(t *testing.T) {
+	withDiscoverySeams(t)
+
+	t.Run("ErrEmptyServerURL", func(t *testing.T) {
+		err := PersistServerURL("   ", func(string, []byte, os.FileMode) error { return nil })
+		if !errors.Is(err, ErrEmptyServerURL) {
+			t.Errorf("got %v, want errors.Is ErrEmptyServerURL", err)
+		}
+	})
+
+	t.Run("ErrServerNotFound", func(t *testing.T) {
+		discoverViaUDP = func(context.Context, int, time.Duration) (string, error) { return "", context.DeadlineExceeded }
+		discoverViaSweep = func(context.Context, int) (string, error) { return "", context.DeadlineExceeded }
+		_, err := AutoDiscoverServer(context.Background())
+		if !errors.Is(err, ErrServerNotFound) {
+			t.Errorf("got %v, want errors.Is ErrServerNotFound", err)
+		}
+	})
+
+	t.Run("ErrNoServerFound", func(t *testing.T) {
+		verifyServerFn = func(context.Context, string, time.Duration) bool { return false }
+		netInterfaces = func() ([]net.Interface, error) {
+			return []net.Interface{{Name: "lo", Flags: net.FlagLoopback}}, nil
+		}
+		_, err := DiscoverViaSubnetSweep(context.Background(), 8000)
+		if !errors.Is(err, ErrNoServerFound) {
+			t.Errorf("got %v, want errors.Is ErrNoServerFound", err)
+		}
+	})
+
+	t.Run("ErrInvalidOfferHeader", func(t *testing.T) {
+		_, err := ParseDiscoveryOffer("UNKNOWN_HEADER http://192.168.1.1:8000 1.0.0")
+		if !errors.Is(err, ErrInvalidOfferHeader) {
+			t.Errorf("got %v, want errors.Is ErrInvalidOfferHeader", err)
+		}
+	})
+
+	t.Run("ErrMalformedOffer", func(t *testing.T) {
+		_, err := ParseDiscoveryOffer("TRANSIT_TRACKER_OFFER")
+		if !errors.Is(err, ErrMalformedOffer) {
+			t.Errorf("got %v, want errors.Is ErrMalformedOffer", err)
+		}
+	})
 }

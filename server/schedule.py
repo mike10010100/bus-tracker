@@ -1,9 +1,15 @@
 import os
 import sys
 from datetime import datetime
+from typing import NamedTuple, Optional
 
 
-def _parse_hour_env(name, default):
+class CommuteLighting(NamedTuple):
+    brightness: int
+    warmth: int
+
+
+def _parse_hour_env(name: str, default: float) -> float:
     """Parses a decimal-hour env var (e.g. '9.5' or '10'), falling back to
     default on any error."""
     raw = os.environ.get(name, "").strip()
@@ -23,7 +29,7 @@ PEAK_PM_START = _parse_hour_env("PEAK_PM_START", 16.5)
 PEAK_PM_END = _parse_hour_env("PEAK_PM_END", 19.0)
 
 
-def is_peak_commute_hours(dt=None):
+def is_peak_commute_hours(dt: Optional[datetime] = None) -> bool:
     """
     Returns True during peak commute windows in Hoboken, NJ. Defaults:
     - Morning commute: 7:30 AM - 9:30 AM
@@ -36,7 +42,7 @@ def is_peak_commute_hours(dt=None):
     return (PEAK_AM_START <= hour < PEAK_AM_END) or (PEAK_PM_START <= hour < PEAK_PM_END)
 
 
-def get_commute_lighting(dt=None):
+def get_commute_lighting(dt: Optional[datetime] = None) -> CommuteLighting:
     """
     Returns (brightness, warmth) for the Hoboken, NJ local time.
     A cozy ambient glow (8, 12) is used during the peak morning and evening
@@ -44,8 +50,8 @@ def get_commute_lighting(dt=None):
     save battery. This is a fixed schedule, not sunrise/sunset calculation.
     """
     if is_peak_commute_hours(dt=dt):
-        return 8, 12
-    return 0, 0
+        return CommuteLighting(8, 12)
+    return CommuteLighting(0, 0)
 
 
 # When set (any non-empty value), the server always advertises the fast poll
@@ -60,7 +66,7 @@ OVERNIGHT_INTERVAL = int(_parse_hour_env("OVERNIGHT_INTERVAL", 3600))
 OFFPEAK_INTERVAL = int(_parse_hour_env("OFFPEAK_INTERVAL", 600))
 
 
-def is_overnight_hours(dt=None):
+def is_overnight_hours(dt: Optional[datetime] = None) -> bool:
     """
     Returns True inside the overnight deep-eco window (default 22:00-06:00).
     Handles a window that wraps past midnight.
@@ -77,7 +83,7 @@ def is_overnight_hours(dt=None):
     return hour >= start or hour < end
 
 
-def is_force_fast_poll():
+def is_force_fast_poll() -> bool:
     """Checks whether FORCE_FAST_POLL is enabled in schedule or server module."""
     server_mod = sys.modules.get("server")
     if server_mod and getattr(server_mod, "FORCE_FAST_POLL", False):
@@ -85,7 +91,7 @@ def is_force_fast_poll():
     return bool(FORCE_FAST_POLL)
 
 
-def get_presentation(dt=None):
+def get_presentation(dt: Optional[datetime] = None) -> str:
     """
     Returns the client-facing presentation state:
     - "interactive" during peak commute: the client stays awake, so the panel is
@@ -109,7 +115,7 @@ def get_presentation(dt=None):
     return "idle"
 
 
-def get_dormant_note():
+def get_dormant_note() -> str:
     """
     Human-readable label for the dormant overnight strip, announcing when the
     dashboard wakes (the overnight window end).
@@ -123,7 +129,7 @@ def get_dormant_note():
     return f"SLEEPING — back at {hour12}:{minute:02d} {suffix} · press power to interact"
 
 
-def get_status_note(presentation):
+def get_status_note(presentation: str) -> str:
     """
     Bottom-strip label for a non-interactive presentation (idle/dormant).
     """
@@ -134,7 +140,7 @@ def get_status_note(presentation):
     return ""
 
 
-def get_target_poll_interval(dt=None):
+def get_target_poll_interval(dt: Optional[datetime] = None) -> int:
     """
     Returns target Kindle poll interval in seconds:
     - 60s during peak commute rush (the client aligns this to the top of each

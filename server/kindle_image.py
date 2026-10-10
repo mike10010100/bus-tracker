@@ -1,11 +1,12 @@
+from typing import Optional, Tuple, Any
 from PIL import Image
 
 # Kindle Paperwhite 5 native framebuffer (portrait). Landscape = 1648x1236.
-PW5_NATIVE = (1236, 1648)
-PW5_LANDSCAPE = (1648, 1236)
+PW5_NATIVE: Tuple[int, int] = (1236, 1648)
+PW5_LANDSCAPE: Tuple[int, int] = (1648, 1236)
 
 
-def native_render_scale(landscape_w=1648, landscape_h=1236, logical_w=800):
+def native_render_scale(landscape_w: int = 1648, landscape_h: int = 1236, logical_w: int = 800) -> float:
     """
     Computes the scale factor that maps the logical 800px design space onto a
     native landscape panel. We render at this scale so glyphs are rasterized
@@ -14,7 +15,7 @@ def native_render_scale(landscape_w=1648, landscape_h=1236, logical_w=800):
     return landscape_w / logical_w
 
 
-def sanitize_kindle_panel(w, h):
+def sanitize_kindle_panel(w: Any, h: Any) -> Tuple[int, int]:
     """
     Validates client-reported landscape panel dimensions, falling back to the
     PW5 default when they are implausible. Guards against a client that reports
@@ -35,7 +36,12 @@ def sanitize_kindle_panel(w, h):
     return (w, h)
 
 
-def format_for_kindle(base_img, orientation="landscape", rotation=90, target=None):
+def format_for_kindle(
+    base_img: Image.Image,
+    orientation: str = "landscape",
+    rotation: int = 90,
+    target: Optional[Tuple[int, int]] = None,
+) -> Image.Image:
     """
     Prepares an already-rendered dashboard for the Kindle Paperwhite 5.
 

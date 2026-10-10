@@ -210,29 +210,54 @@ class TestCitiBikeTracker(unittest.TestCase):
         cb_data = tracker.get_mock_data()
 
         for view_mode in ["morning", "evening"]:
-            out_file = f"/tmp/test_tall_view_{view_mode}.png"
-            render_dashboard(
-                stops_data,
-                citibike_data=cb_data,
-                output_path=out_file,
-                view=view_mode,
-                is_mock=True,
-                batt_level=90,
-                is_charging=False,
-                width=800,
-                height=600,
-            )
-            self.assertTrue(os.path.exists(out_file))
-            img = Image.open(out_file)
-            self.assertEqual(img.size, (800, 600))
+            with self.subTest(view_mode=view_mode):
+                out_file = f"/tmp/test_tall_view_{view_mode}.png"
+                render_dashboard(
+                    stops_data,
+                    citibike_data=cb_data,
+                    output_path=out_file,
+                    view=view_mode,
+                    is_mock=True,
+                    batt_level=90,
+                    is_charging=False,
+                    width=800,
+                    height=600,
+                )
+                self.assertTrue(os.path.exists(out_file))
+                img = Image.open(out_file)
+                self.assertEqual(img.size, (800, 600))
 
-            # Format for Kindle PW5 (rotate=90)
-            kindle_img = format_for_kindle(img, orientation="landscape", rotation=90)
-            self.assertEqual(kindle_img.size, (1236, 1648))
-            self.assertEqual(kindle_img.mode, "L")
+                # Format for Kindle PW5 (rotate=90)
+                kindle_img = format_for_kindle(img, orientation="landscape", rotation=90)
+                self.assertEqual(kindle_img.size, (1236, 1648))
+                self.assertEqual(kindle_img.mode, "L")
 
-            img.close()
-            os.remove(out_file)
+                img.close()
+                os.remove(out_file)
+
+    def test_station_typed_dicts(self):
+        from citibike import StationConfig, StationStatus
+        cfg: StationConfig = {
+            "id": "test-id",
+            "name": "Test St",
+            "full_name": "Test Street Station",
+            "walk_min": 4,
+            "distance_m": 300,
+        }
+        self.assertEqual(cfg["id"], "test-id")
+        self.assertEqual(cfg["walk_min"], 4)
+
+        status: StationStatus = {
+            "id": "test-id",
+            "name": "Test St",
+            "ebikes": 3,
+            "classic": 5,
+            "total_bikes": 8,
+            "docks": 10,
+            "is_offline": False,
+        }
+        self.assertEqual(status["ebikes"], 3)
+        self.assertEqual(status["total_bikes"], 8)
 
 
 if __name__ == "__main__":

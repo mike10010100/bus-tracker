@@ -295,16 +295,21 @@ func TestFetchAndDrawDashboard_AppliesLightingHeaders(t *testing.T) {
 	var setProps []string
 	orig := execCommand
 	execCommand = func(name string, arg ...string) *exec.Cmd {
+		return orig("true")
+	}
+	defer func() { execCommand = orig }()
+	origCtx := execCommandContext
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
 		if name == "lipc-get-prop" {
 			// Report a different current value so the set branches run.
-			return orig("echo", "0")
+			return exec.CommandContext(ctx, "echo", "0")
 		}
 		if name == "lipc-set-prop" && len(arg) >= 4 {
 			setProps = append(setProps, arg[2])
 		}
-		return orig("true")
+		return exec.CommandContext(ctx, "true")
 	}
-	defer func() { execCommand = orig }()
+	defer func() { execCommandContext = origCtx }()
 
 	tc := NewTrackerClient(srv.URL, "auto")
 	ctx, cancel := context.WithCancel(context.Background())
