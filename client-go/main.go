@@ -222,18 +222,16 @@ func (tc *TrackerClient) getPanelSize() PanelSize {
 // rawTouchToDesign maps a raw touch coordinate (in the panel's portrait
 // framebuffer space) into the renderer's design space (800px wide). The server
 // draws the landscape design at the panel's native landscape resolution and
-// then rotates it 90 degrees counter-clockwise into the portrait framebuffer.
-// On the Paperwhite 5 panel, the touch digitizer's long axis (py: 0..1647)
-// runs left-to-right across the landscape display, and its short axis (px: 0..1235)
-// runs top-to-bottom:
+// then rotates it 90 degrees counter-clockwise into the portrait framebuffer,
+// so we undo that rotation here:
 //
-//	dx = py * DesignWidth / Wl
+//	dx = (Wl - 1 - py) * DesignWidth / Wl
 //	dy = px * DesignWidth / Wl
 //
 // where (px,py) is the raw portrait coordinate and Wl is the landscape width
 // (equal to the portrait height). The bottom button bar lands at portrait
 // px ~= 1145..1215 (design y 556..590), and columns order left-to-right
-// from py ~= 40 (BUSES) to py ~= 1600 (REFRESH).
+// from py ~= 1448 (BUSES) to py ~= 130 (REFRESH).
 func (tc *TrackerClient) rawTouchToDesign(px, py int32) (int32, int32) {
 	p := tc.getPanelSize()
 	wl := float64(p.LandscapeW)
@@ -241,7 +239,7 @@ func (tc *TrackerClient) rawTouchToDesign(px, py int32) (int32, int32) {
 		return px, py
 	}
 	scale := wl / float64(DesignWidth)
-	dx := float64(py) / scale
+	dx := (wl - 1 - float64(py)) / scale
 	dy := float64(px) / scale
 	return int32(dx + 0.5), int32(dy + 0.5)
 }
