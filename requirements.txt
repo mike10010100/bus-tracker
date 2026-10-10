@@ -3,4 +3,4 @@ python-dotenv>=1.0.0
 pillow>=10.0.0
 zeroconf>=0.130.0
 gtfs-realtime-bindings>=1.0.0
-cryptography>=42.0.0
+cryptography>=50.0.2
