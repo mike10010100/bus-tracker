@@ -18,36 +18,63 @@ flowchart TD
         GBFS["Citi Bike GBFS Feed"]
     end
 
-    subgraph Host["Host Server (Mac / Linux / Raspberry Pi)"]
-        Tracker["bus_tracker.py & citibike.py"]
+    subgraph Host["Host Python Server (Mac / Linux / Raspberry Pi)"]
+        Tracker["bus_tracker.py & citibike.py (Live Telemetry Engine)"]
         Renderer["render_dashboard.py (8-bit Grayscale Pillow Canvas)"]
         Server["server.py (ThreadingHTTPServer on Port 8000)"]
         Tracker --> Renderer --> Server
     end
 
-    subgraph Kindle["Kindle Paperwhite (PW5)"]
-        Launcher["TransitTracker.sh (Bootstrap Launcher)"]
-        GoClient["tracker-arm (Native Go Client)"]
-        EIPS["eips (Native E-Ink Framebuffer)"]
+    subgraph Kindle["Kindle Paperwhite (PW5 Device)"]
+        Launcher["TransitTracker.sh (Bootstrap & Recovery Launcher)"]
+        
+        subgraph GoClient["tracker-arm (Native Go Client Subsystems)"]
+            Discovery["discovery.go (UDP Broadcast / mDNS / Subnet Sweep)"]
+            HttpEngine["client.go (Conditional HTTP Polling & ETag Cache)"]
+            Security["security.go (Ed25519 Verify & Constant-Time SHA-256)"]
+            Input["input.go (Evdev Touch Gestures & Power Key Events)"]
+            Display["display.go (E-Ink Framebuffer & eips Pipeline)"]
+            
+            Discovery --> HttpEngine
+            HttpEngine --> Security
+            Security --> Display
+            Input --> HttpEngine
+            Input --> Display
+        end
+
+        EIPS["Native E-Ink Framebuffer (/sys/class/graphics/fb0)"]
         Touch["pt_mt Multi-Touch Digitizer (/dev/input/event1)"]
         Power["bd71828-pwrkey Power Key (/dev/input/event0)"]
-        
-        Launcher -->|OTA Hot-Reload| GoClient
-        GoClient -->|Push Framebuffer| EIPS
-        Touch -->|Tap: Cycle Light / Switch View\nDouble Tap: Exit| GoClient
-        Power -->|Hardware Press: Exit| GoClient
+
+        Launcher -->|Launch / Restart| GoClient
+        Display -->|Push Pixels| EIPS
+        Touch -->|Touch Events| Input
+        Power -->|Hardware Press| Input
+        Security -->|Verified OTA Upgrade| Launcher
     end
 
     NJT --> Tracker
     GQL --> Tracker
     GBFS --> Tracker
-    Server -->|dashboard.png?kindle=pw5| GoClient
-    Server -->|tracker-arm (OTA Updates)| Launcher
+    Server -->|dashboard.png?kindle=pw5| HttpEngine
+    Server -->|tracker-arm (Signed Binary & Manifest)| HttpEngine
 ```
 
 The application version is defined once in [`VERSION`](VERSION). The Python
 server and Citi Bike user agent read it directly; the Go client receives it at
 build time via `-ldflags "-X main.Version=..."`.
+
+---
+
+## Detailed Documentation
+
+Comprehensive technical documentation is organized in the [`docs/`](docs/) directory:
+
+- **[Architecture & System Design](docs/architecture.md)**: Multi-tier topology, dual-redundancy arrival engine, native resolution rendering, schedule governor, and fleet management.
+- **[Security Specification & Cryptographic Model](docs/security.md)**: Ed25519 root trust chain, signed OTA manifests, server certificates, constant-time verification, and CSP.
+- **[HTTP API & Protocol Reference](docs/api.md)**: Complete endpoint reference, query parameters, request/response headers, and control plane commands.
+- **[Hardware & Kindle Paperwhite Guide](docs/hardware_kindle.md)**: PW5 hardware details, jailbreak prerequisites, evdev touch mapping, power key handling, and e-ink framebuffer pipeline.
+- **[Developer Guide & Quality Verification](docs/development.md)**: Makefile reference, static analysis linters, test suites, coverage gates, and signed release builds.
 
 ---
 
@@ -98,7 +125,7 @@ docker compose up -d
 
 ```bash
 pip install -r requirements.txt
-python server.py
+python server/server.py
 ```
 - **Web UI (Auto-reloading):** `http://localhost:8000`
 - **Kindle Image Endpoint:** `http://<SERVER_IP>:8000/dashboard.png?kindle=pw5`
@@ -166,27 +193,31 @@ Install the development dependencies:
 pip install -r requirements-dev.txt
 ```
 
-Run the full verification suite:
+Run the verification suite:
 ```bash
-make check       # Complete suite: fmt-check, vet, tests, coverage gates, shellcheck
-make test        # Run Go + Python unit tests (Go with -race detector)
-make vet         # Static analysis with go vet
-make fmt         # Format Go sources with gofmt -s
-make coverage    # Enforce coverage gates across both stacks
+make check       # Complete pipeline: fmt-check, lint, test, audit, coverage gates
+make test        # Run all test suites: Go (-race), Python (unittest), and Shell integration
+make lint        # Run all linters: Go (vet/golangci-lint), Python (mypy/ruff), Shell (shellcheck)
+make fmt         # Format all codebases: Go (gofmt -s) and Python (ruff format)
+make fmt-check   # Check formatting without modifying files
+make audit       # Run vulnerability scanning (govulncheck and pip-audit)
+make coverage    # Enforce coverage gates across Go and Python stacks
 ```
 
-### Test Coverage
+### Test Coverage & Standards
 
-Both stacks enforce strict coverage gates in CI and `make check`:
+Both stacks enforce strict coverage gates and static analysis in CI and `make check`:
 
-| Stack  | Tool                       | Gate | Current |
-|--------|----------------------------|------|---------|
-| Go     | `go test -coverprofile`    | 93%  | 93.4%   |
-| Python | `coverage.py` (`.coveragerc`) | 92% | 94%    |
+| Stack  | Static Analysis & Linters | Verification Tool / Framework | Gate | Current |
+|--------|---------------------------|-------------------------------|------|---------|
+| Go     | `go vet`, `golangci-lint` | `go test -v -race`            | 93%  | 93.5%   |
+| Python | `ruff`, `mypy` (strict)   | `coverage.py` (`pyproject.toml`) | 92% | 95.0%   |
+| Shell  | `shellcheck` (strict)     | `tests/test_launcher.sh` (8/8 integration) | 100% | 100% |
+| Docker | `hadolint`                | Container smoke test          | -    | Pass    |
 
 - **Go gate:** `scripts/check_coverage_go.sh 93` (covers `client-go`, `cmd/otasign`, and `internal/otasig`).
-- **Python gate:** `[report] fail_under = 92` in `.coveragerc`.
-- **Race Safety:** All Go unit tests run cleanly with `-race`.
+- **Python gate:** `--fail-under=92` in `pyproject.toml` (evaluates branch coverage across all 17 modules).
+- **Race Safety:** All Go unit tests run cleanly with `-race` with zero data races.
 - **Hermetic Testing:** Tests isolate runtime environments, filesystem access, and network interfaces using dedicated test seams.
 
 ---

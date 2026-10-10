@@ -6,26 +6,27 @@ independent action/diagnostic queue dispatch, broadcast controls, diagnostics
 and log persistence isolation, Web UI fleet rendering, and control plane API.
 """
 
-from concurrent.futures import ThreadPoolExecutor
-import html
 import json
 import os
 import shutil
 import tempfile
 import threading
-import time
 import unittest
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer
+
+from device_registry import get_device_registry, reset_device_registry
 
 import server
 from server import TransitTrackerHandler
-from device_registry import get_device_registry, reset_device_registry
 
 
 def _http_get(port: int, path: str, headers: dict = None):
-    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers or {})
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}", headers=headers or {}
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.status, dict(resp.headers), resp.read()
@@ -90,7 +91,12 @@ class TestE2EMultiDevice(unittest.TestCase):
             server._diag_requested = ""
             server._mode_requested = ""
             server._device_action = ""
-            server._last_diagnostics = {"text": "", "time": 0.0, "battery": None, "charging": None}
+            server._last_diagnostics = {
+                "text": "",
+                "time": 0.0,
+                "battery": None,
+                "charging": None,
+            }
         server.tracker_stopped = False
 
     def test_auto_registration_and_header_telemetry(self):
@@ -155,14 +161,18 @@ class TestE2EMultiDevice(unittest.TestCase):
         """
         # Register the devices
         for cid in ["kindle_alpha", "kindle_beta", "kindle_gamma"]:
-            _http_get(self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": cid})
+            _http_get(
+                self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": cid}
+            )
 
         # 1. Admin enqueues action 'restart' targeted to kindle_alpha
         status, _, body = _http_post(
             self.port,
             "/action",
             headers=_auth_headers({"Content-Type": "application/json"}),
-            body=json.dumps({"action": "restart", "client_id": "kindle_alpha"}).encode("utf-8"),
+            body=json.dumps({"action": "restart", "client_id": "kindle_alpha"}).encode(
+                "utf-8"
+            ),
         )
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body).get("pending"), "restart")
@@ -172,7 +182,9 @@ class TestE2EMultiDevice(unittest.TestCase):
             self.port,
             "/diag/request",
             headers=_auth_headers({"Content-Type": "application/json"}),
-            body=json.dumps({"mode": "quick", "client_id": "kindle_beta"}).encode("utf-8"),
+            body=json.dumps({"mode": "quick", "client_id": "kindle_beta"}).encode(
+                "utf-8"
+            ),
         )
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body).get("requested"), "quick")
@@ -230,7 +242,9 @@ class TestE2EMultiDevice(unittest.TestCase):
         """
         clients = ["kindle_alpha", "kindle_beta", "kindle_gamma"]
         for cid in clients:
-            _http_get(self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": cid})
+            _http_get(
+                self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": cid}
+            )
 
         # Admin enqueues action reboot for 'all'
         status, _, body = _http_post(
@@ -283,7 +297,10 @@ class TestE2EMultiDevice(unittest.TestCase):
         s_a, _, _ = _http_post(
             self.port,
             "/diag",
-            headers={"X-Tracker-Client-ID": "kindle_alpha", "Content-Type": "text/plain"},
+            headers={
+                "X-Tracker-Client-ID": "kindle_alpha",
+                "Content-Type": "text/plain",
+            },
             body=alpha_dump,
         )
         self.assertEqual(s_a, 200)
@@ -292,14 +309,21 @@ class TestE2EMultiDevice(unittest.TestCase):
         s_b, _, _ = _http_post(
             self.port,
             "/diag",
-            headers={"X-Tracker-Client-ID": "kindle_beta", "Content-Type": "text/plain"},
+            headers={
+                "X-Tracker-Client-ID": "kindle_beta",
+                "Content-Type": "text/plain",
+            },
             body=beta_dump,
         )
         self.assertEqual(s_b, 200)
 
         # Verify disk files exist and are isolated
-        alpha_file = os.path.join(self.temp_dir, "devices", "kindle_alpha", "diagnostics.txt")
-        beta_file = os.path.join(self.temp_dir, "devices", "kindle_beta", "diagnostics.txt")
+        alpha_file = os.path.join(
+            self.temp_dir, "devices", "kindle_alpha", "diagnostics.txt"
+        )
+        beta_file = os.path.join(
+            self.temp_dir, "devices", "kindle_beta", "diagnostics.txt"
+        )
         self.assertTrue(os.path.exists(alpha_file), f"Missing file {alpha_file}")
         self.assertTrue(os.path.exists(beta_file), f"Missing file {beta_file}")
 
@@ -337,7 +361,10 @@ class TestE2EMultiDevice(unittest.TestCase):
         s1, _, _ = _http_post(
             self.port,
             "/log",
-            headers={"X-Tracker-Client-ID": "kindle_alpha", "Content-Type": "text/plain"},
+            headers={
+                "X-Tracker-Client-ID": "kindle_alpha",
+                "Content-Type": "text/plain",
+            },
             body=b"alpha log line 1\n",
         )
         self.assertEqual(s1, 200)
@@ -345,7 +372,10 @@ class TestE2EMultiDevice(unittest.TestCase):
         s2, _, _ = _http_post(
             self.port,
             "/log",
-            headers={"X-Tracker-Client-ID": "kindle_alpha", "Content-Type": "text/plain"},
+            headers={
+                "X-Tracker-Client-ID": "kindle_alpha",
+                "Content-Type": "text/plain",
+            },
             body=b"alpha log line 2\n",
         )
         self.assertEqual(s2, 200)
@@ -353,7 +383,10 @@ class TestE2EMultiDevice(unittest.TestCase):
         s3, _, _ = _http_post(
             self.port,
             "/log",
-            headers={"X-Tracker-Client-ID": "kindle_beta", "Content-Type": "text/plain"},
+            headers={
+                "X-Tracker-Client-ID": "kindle_beta",
+                "Content-Type": "text/plain",
+            },
             body=b"beta log message single\n",
         )
         self.assertEqual(s3, 200)
@@ -366,9 +399,9 @@ class TestE2EMultiDevice(unittest.TestCase):
         self.assertTrue(os.path.exists(beta_log))
         self.assertFalse(os.path.exists(gamma_log))
 
-        with open(alpha_log, "r", encoding="utf-8") as f:
+        with open(alpha_log, encoding="utf-8") as f:
             lines_a = f.read()
-        with open(beta_log, "r", encoding="utf-8") as f:
+        with open(beta_log, encoding="utf-8") as f:
             lines_b = f.read()
 
         self.assertIn("alpha log line 1", lines_a)
@@ -451,7 +484,9 @@ class TestE2EMultiDevice(unittest.TestCase):
 
         # Verify XSS escaping
         self.assertNotIn("<script>alert('xss_ver')</script>", html_text)
-        self.assertIn("&lt;script&gt;alert(&#x27;xss_ver&#x27;)&lt;/script&gt;", html_text)
+        self.assertIn(
+            "&lt;script&gt;alert(&#x27;xss_ver&#x27;)&lt;/script&gt;", html_text
+        )
         self.assertNotIn("<b>inject</b>", html_text)
         self.assertIn("&lt;b&gt;inject&lt;/b&gt;", html_text)
 
@@ -491,7 +526,9 @@ class TestE2EMultiDevice(unittest.TestCase):
             self.port,
             "/action",
             headers=_auth_headers({"Content-Type": "application/json"}),
-            body=json.dumps({"action": "clear_backup", "client_id": "kindle_alpha"}).encode("utf-8"),
+            body=json.dumps(
+                {"action": "clear_backup", "client_id": "kindle_alpha"}
+            ).encode("utf-8"),
         )
         self.assertEqual(s_act, 200)
         self.assertEqual(json.loads(b_act)["pending"], "clear_backup")
@@ -501,7 +538,9 @@ class TestE2EMultiDevice(unittest.TestCase):
             self.port,
             "/diag/request",
             headers=_auth_headers({"Content-Type": "application/json"}),
-            body=json.dumps({"mode": "full", "client_id": "kindle_alpha"}).encode("utf-8"),
+            body=json.dumps({"mode": "full", "client_id": "kindle_alpha"}).encode(
+                "utf-8"
+            ),
         )
         self.assertEqual(s_diag, 200)
         self.assertEqual(json.loads(b_diag)["requested"], "full")
@@ -511,7 +550,9 @@ class TestE2EMultiDevice(unittest.TestCase):
             self.port,
             "/mode",
             headers=_auth_headers({"Content-Type": "application/json"}),
-            body=json.dumps({"mode": "sleep-suspend", "client_id": "kindle_alpha"}).encode("utf-8"),
+            body=json.dumps(
+                {"mode": "sleep-suspend", "client_id": "kindle_alpha"}
+            ).encode("utf-8"),
         )
         self.assertEqual(s_mode, 200)
         self.assertEqual(json.loads(b_mode)["pending"], "sleep-suspend")

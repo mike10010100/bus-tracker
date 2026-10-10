@@ -10,14 +10,14 @@ directory exists or can be created, else ``<repo>/cache``.
 """
 
 import os
-from typing import List, Optional
+from typing import Optional
 
 SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(SERVER_DIR)
 DOCKER_CACHE_DIR = "/app/cache"
 
 
-def artifact_candidates(name: str) -> List[str]:
+def artifact_candidates(name: str) -> list[str]:
     """Search order for a release artifact: server/ first, then the repo root."""
     return [os.path.join(SERVER_DIR, name), os.path.join(REPO_DIR, name)]
 

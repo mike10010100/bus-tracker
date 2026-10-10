@@ -2,7 +2,6 @@
 Unit and integration tests for DeviceRegistry, DeviceRecord, and multi-device state isolation.
 """
 
-from collections import deque
 import json
 import os
 import shutil
@@ -10,12 +9,10 @@ import tempfile
 import threading
 import time
 import unittest
-import urllib.request
 import urllib.error
+import urllib.request
 from http.server import ThreadingHTTPServer
 
-import server
-from server import DashboardHandler
 from device_registry import (
     DeviceRecord,
     DeviceRegistry,
@@ -24,9 +21,14 @@ from device_registry import (
     sanitize_client_id,
 )
 
+import server
+from server import DashboardHandler
+
 
 def _http_get(port: int, path: str, headers: dict = None):
-    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers or {})
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}", headers=headers or {}
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.status, dict(resp.headers), resp.read()
@@ -252,9 +254,11 @@ class TestDeviceRegistryUnit(unittest.TestCase):
         self.assertEqual(rec.last_diagnostics_text, diag_content)
         self.assertGreater(rec.last_diagnostics_time, 0.0)
 
-        diag_path = os.path.join(self.temp_dir, "devices", "kindle-alpha", "diagnostics.txt")
+        diag_path = os.path.join(
+            self.temp_dir, "devices", "kindle-alpha", "diagnostics.txt"
+        )
         self.assertTrue(os.path.exists(diag_path))
-        with open(diag_path, "r", encoding="utf-8") as f:
+        with open(diag_path, encoding="utf-8") as f:
             saved = f.read()
         self.assertEqual(saved, diag_content)
 
@@ -270,7 +274,7 @@ class TestDeviceRegistryUnit(unittest.TestCase):
 
         log_path = os.path.join(self.temp_dir, "devices", "kindle-beta", "client.log")
         self.assertTrue(os.path.exists(log_path))
-        with open(log_path, "r", encoding="utf-8") as f:
+        with open(log_path, encoding="utf-8") as f:
             lines = f.readlines()
         self.assertEqual(len(lines), 250)
 
@@ -293,7 +297,9 @@ class TestDeviceRegistryUnit(unittest.TestCase):
         def worker(w_id: int):
             for i in range(50):
                 cid = f"worker-{w_id % 5}"
-                self.registry.update_telemetry(cid, f"192.168.1.{w_id}", battery=float(i))
+                self.registry.update_telemetry(
+                    cid, f"192.168.1.{w_id}", battery=float(i)
+                )
                 self.registry.set_action(cid, f"act-{i}")
                 self.registry.pop_action(cid)
                 self.registry.append_log(cid, f"log-{i}", self.temp_dir)
@@ -323,7 +329,9 @@ class TestDeviceRegistryUnit(unittest.TestCase):
 
     def test_update_telemetry_edge_cases(self):
         # Battery not a valid float -> ignored without exception
-        rec = self.registry.update_telemetry("dev-edge", battery="not-a-number", charging="invalid-bool")
+        rec = self.registry.update_telemetry(
+            "dev-edge", battery="not-a-number", charging="invalid-bool"
+        )
         self.assertIsNone(rec.battery)
         self.assertFalse(rec.charging)
 
@@ -370,7 +378,12 @@ class TestDeviceRegistryHTTPIntegration(unittest.TestCase):
             server._device_action = ""
             server._diag_requested = ""
             server._mode_requested = ""
-            server._last_diagnostics = {"text": "", "time": 0.0, "battery": None, "charging": None}
+            server._last_diagnostics = {
+                "text": "",
+                "time": 0.0,
+                "battery": None,
+                "charging": None,
+            }
 
     def test_dashboard_poll_with_client_id_auto_registers(self):
         status, headers, _ = _http_get(
@@ -394,7 +407,9 @@ class TestDeviceRegistryHTTPIntegration(unittest.TestCase):
             self.port,
             "/action",
             headers=_auth_headers({"Content-Type": "application/json"}),
-            body=json.dumps({"action": "reboot", "client_id": "device-A"}).encode("utf-8"),
+            body=json.dumps({"action": "reboot", "client_id": "device-A"}).encode(
+                "utf-8"
+            ),
         )
         self.assertEqual(status_act, 200)
 
@@ -436,8 +451,12 @@ class TestDeviceRegistryHTTPIntegration(unittest.TestCase):
 
     def test_broadcast_action_http(self):
         # Pre-register two devices
-        _http_get(self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "dev-x"})
-        _http_get(self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "dev-y"})
+        _http_get(
+            self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "dev-x"}
+        )
+        _http_get(
+            self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "dev-y"}
+        )
 
         # Broadcast action to all devices
         status, _, _ = _http(
@@ -450,10 +469,18 @@ class TestDeviceRegistryHTTPIntegration(unittest.TestCase):
         self.assertEqual(status, 200)
 
         # Both devices receive the action
-        _s, hx, _ = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5", headers={"X-Tracker-Client-ID": "dev-x"})
+        _s, hx, _ = _http_get(
+            self.port,
+            "/dashboard.png?mock=1&kindle=pw5",
+            headers={"X-Tracker-Client-ID": "dev-x"},
+        )
         self.assertEqual(hx.get("X-Tracker-Action"), "update")
 
-        _s, hy, _ = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5", headers={"X-Tracker-Client-ID": "dev-y"})
+        _s, hy, _ = _http_get(
+            self.port,
+            "/dashboard.png?mock=1&kindle=pw5",
+            headers={"X-Tracker-Client-ID": "dev-y"},
+        )
         self.assertEqual(hy.get("X-Tracker-Action"), "update")
 
     def test_post_log_per_device(self):
@@ -474,9 +501,7 @@ class TestDeviceRegistryHTTPIntegration(unittest.TestCase):
 
     def test_post_diag_per_device(self):
         diag_body = (
-            "=== Diagnostics ===\n"
-            "battery_level=76 charging=true\n"
-            "System: kindle-pw5\n"
+            "=== Diagnostics ===\nbattery_level=76 charging=true\nSystem: kindle-pw5\n"
         )
         status, _, _ = _http(
             "POST",
@@ -543,7 +568,10 @@ class TestDeviceRegistryHTTPIntegration(unittest.TestCase):
         _s, headers, _ = _http_get(
             self.port,
             "/dashboard.png?mock=1&kindle=pw5",
-            headers={"X-Tracker-Client-ID": "mode-client", "X-Tracker-Mode": "resident"},
+            headers={
+                "X-Tracker-Client-ID": "mode-client",
+                "X-Tracker-Mode": "resident",
+            },
         )
         self.assertEqual(headers.get("X-Tracker-Mode"), "sleep")
 

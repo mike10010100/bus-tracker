@@ -1,0 +1,149 @@
+# Developer Guide & Quality Verification
+
+This guide outlines developer workflows, static analysis standards, testing procedures, release builds, and CI/CD pipelines for the Transit Tracker repository.
+
+---
+
+## 1. Prerequisites
+
+- **Go**: 1.22+ (tested up to 1.26 on Linux and macOS).
+- **Python**: 3.9+ (Python 3.11 recommended; required for Docker builds).
+- **Shell**: Bash 4+ and POSIX `/bin/sh`.
+- **System Tools**: `make`, `curl`, `openssl`, `shellcheck`.
+
+Install development Python dependencies:
+```bash
+pip install -r requirements-dev.txt
+```
+
+---
+
+## 2. Makefile Automation Reference
+
+The repository uses a unified [`Makefile`](file:///home/mike10010100/git/transit-tracker/Makefile) orchestrating tasks across all stacks.
+
+| Target | Description | Underlying Tools |
+|---|---|---|
+| `make check` | Full verification pipeline. Runs formatting checks, linters, test suites, vulnerability audits, and coverage gates. | All verification tools |
+| `make test` | Runs all test suites (Go, Python, Shell). | `go test`, `unittest`, `bash` |
+| `make test-go` | Runs Go unit tests with the data race detector enabled. | `go test -v -race ./...` |
+| `make test-py` | Runs Python unit tests. | `python -m unittest discover` |
+| `make test-sh` | Runs the 8-tier Shell launcher integration test suite. | `tests/test_launcher.sh` |
+| `make lint` | Runs all static analysis tools across Go, Python, and Shell. | `golangci-lint`, `ruff`, `mypy`, `shellcheck` |
+| `make lint-go` | Runs Go vet and golangci-lint. | `go vet`, `golangci-lint` |
+| `make lint-py` | Runs Python type checking (Mypy) and linting (Ruff). | `mypy`, `ruff check` |
+| `make check-sh` | Runs shell syntax checks and strict ShellCheck. | `bash -n`, `sh -n`, `shellcheck` |
+| `make fmt` | Formats all codebases in-place. | `gofmt -s -w`, `ruff format` |
+| `make fmt-check` | Verifies formatting without altering files. | `gofmt -s -d`, `ruff format --check` |
+| `make audit` | Runs dependency vulnerability auditing. | `govulncheck`, `pip-audit` |
+| `make coverage` | Enforces coverage gates across Go (93%) and Python (92%). | `scripts/check_coverage_go.sh`, `coverage.py` |
+| `make keygen` | Generates a new Ed25519 root release signing key. | `otasign keygen` |
+| `make build` | Cross-compiles static ARMv7 binary, signs release manifest, and mints server cert. | `go build`, `otasign` |
+| `make verify-release`| Validates manifest and binary signatures against public key. | `otasign verify` |
+| `make clean` | Removes build artifacts, cached test databases, and temporary files. | `rm` |
+
+---
+
+## 3. Code Standards & Linters
+
+### 3.1 Go Tooling
+- **Formatting**: `gofmt -s` simplifies composite literals and slice operations.
+- **Static Analysis**: Configured via [`.golangci.yml`](file:///home/mike10010100/git/transit-tracker/.golangci.yml):
+  - `govet`: Standard compiler sanity analysis.
+  - `errcheck`: Ensures checked error returns.
+  - `staticcheck`: Advanced Go code analysis.
+  - `revive`: Modern drop-in replacement for golint.
+  - `gocritic`: Idiomatic micro-optimizations and style checks.
+- **Race Safety**: Every test runs under `-race`. Zero data races are permitted.
+
+### 3.2 Python Tooling
+- **Configuration**: All settings consolidated in [`pyproject.toml`](file:///home/mike10010100/git/transit-tracker/pyproject.toml).
+- **Formatting**: `ruff format` enforces standard 88-character Black-compliant layout.
+- **Linting**: `ruff check` evaluates Pyflakes (`F`), Pycodestyle (`E`/`W`), isort (`I`), pep8-naming (`N`), and flake8-bugbear (`B`).
+- **Static Typing**: `mypy server` checks all 17 server modules with strict type analysis.
+
+### 3.3 Shell Tooling
+- **Strict POSIX Compliance**: Launcher script runs under `/bin/sh` using `set -eu` without non-portable bash extensions.
+- **ShellCheck**: Configured via [`.shellcheckrc`](file:///home/mike10010100/git/transit-tracker/.shellcheckrc).
+
+### 3.4 Docker Tooling
+- **Hadolint**: Validates [`Dockerfile`](file:///home/mike10010100/git/transit-tracker/Dockerfile) in CI to ensure secure multi-stage build patterns, unprivileged users, and build cache optimization.
+
+---
+
+## 4. Test Suites & Coverage Gates
+
+### 4.1 Go Coverage Gate (93%)
+- Evaluated via `scripts/check_coverage_go.sh 93`.
+- Generates a merged coverprofile across `client-go/`, `client-go/cmd/otasign`, and `client-go/internal/otasig`.
+- Statement coverage current status: **93.5%**.
+
+### 4.2 Python Branch Coverage Gate (92%)
+- Evaluated via `coverage.py` using `--fail-under=92`.
+- Tracks branch coverage across 317 unit tests.
+- Branch coverage current status: **95.0%**.
+
+### 4.3 Shell Launcher Integration Tests
+- Script: [`tests/test_launcher.sh`](file:///home/mike10010100/git/transit-tracker/tests/test_launcher.sh).
+- Exercises 8 realistic integration scenarios using mock servers, temporary directory sandboxes, and fake ELF binaries:
+  1. Tier 1 LAN discovery (mDNS hostname probe).
+  2. Tier 2 LAN discovery (Gateway IP probe from `/proc/net/route`).
+  3. Preconfigured URL bypass without discovery latency.
+  4. Tier 3 LAN discovery (parallel `/24` subnet sweep).
+  5. Corrupted / non-ELF payload rejection.
+  6. 4-byte pseudo-ELF header rejection and recovery.
+  7. Premature persistence rollback on download failure.
+  8. Strict service verification rejecting foreign IoT services.
+
+---
+
+## 5. Release Builds & Cryptographic Signing
+
+### 5.1 Generating a Production Key
+Run once to initialize your private signing key:
+```bash
+make keygen
+```
+This generates `secrets/ota_ed25519.key` with permissions `0600`. **Never commit this file to git.**
+
+### 5.2 Compiling a Signed Release
+```bash
+make build
+```
+This performs the complete release pipeline:
+1. Cross-compiles `client-go` for `linux/arm/v7` with embedded version and public key.
+2. Generates `tracker-arm.manifest.json` containing the SHA-256 and Ed25519 signature.
+3. Mints `server_identity.cert.json` and `server_identity.key`.
+4. Stages binaries atomically to ensure zero downtime.
+
+### 5.3 Verifying the Release
+```bash
+make verify-release
+```
+
+### 5.4 Development Builds (Unsigned)
+For local testing when no signing key is available:
+```bash
+ALLOW_UNSIGNED=1 make build
+```
+
+---
+
+## 6. Pre-Commit Hooks & Continuous Integration
+
+### 6.1 Pre-Commit Hooks
+Install pre-commit hooks locally to catch issues prior to committing:
+```bash
+pre-commit install
+```
+Configured in [`.pre-commit-config.yaml`](file:///home/mike10010100/git/transit-tracker/.pre-commit-config.yaml).
+
+### 6.2 GitHub Actions CI
+The CI workflow in [`.github/workflows/ci.yml`](file:///home/mike10010100/git/transit-tracker/.github/workflows/ci.yml):
+- Enforces workflow concurrency (`cancel-in-progress: true`).
+- Uses pinned immutable action SHAs.
+- Runs 4 concurrent validation jobs:
+  1. `go-client`: gofmt, go vet, golangci-lint, race tests, 93% coverage gate, signed build.
+  2. `shell`: check-sh, test-sh (8 integration tests).
+  3. `python-server`: ruff check, ruff format, mypy, pip-audit, unit tests, 92% coverage gate.
+  4. `docker`: hadolint, signed build with BuildKit secret, container smoke test.

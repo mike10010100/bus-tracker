@@ -8,7 +8,7 @@ import json
 import threading
 import time
 import urllib.request
-from typing import Dict, List, Any, NamedTuple, Optional, TypedDict
+from typing import Any, NamedTuple, Optional, TypedDict
 
 from version import VERSION
 
@@ -49,7 +49,7 @@ MAX_STALE_SECS = 15 * 60
 
 class CitiBikeSnapshot(NamedTuple):
     status: str
-    stations: List[StationStatus]
+    stations: list[StationStatus]
     as_of: Optional[float]  # unix time of the feed fetch, None when no data
 
 
@@ -59,7 +59,7 @@ class CitiBikeUnavailable(RuntimeError):
 
 # Closest Citi Bike stations to 919 Park Ave, Hoboken, NJ (40.7484552, -74.0302997)
 # Pedestrian routing distances and walk times based on actual street routing via crosswalks
-DEFAULT_STATIONS: List[StationConfig] = [
+DEFAULT_STATIONS: list[StationConfig] = [
     {
         "id": "fadf00cf-d84a-49e8-9607-c67154915412",
         "name": "Clinton & 9th",
@@ -107,7 +107,9 @@ DEFAULT_STATIONS: List[StationConfig] = [
 GBFS_STATUS_URL = "https://gbfs.citibikenyc.com/gbfs/en/station_status.json"
 
 
-def sort_stations_by_ebike_priority(stations: List[StationStatus]) -> List[StationStatus]:
+def sort_stations_by_ebike_priority(
+    stations: list[Any],
+) -> list[Any]:
     """
     Sorts Citi Bike stations to prioritize e-bike availability for commuters:
     1. Active stations with e-bikes (ebikes > 0) come first,
@@ -115,7 +117,8 @@ def sort_stations_by_ebike_priority(stations: List[StationStatus]) -> List[Stati
     2. Active stations with 0 e-bikes come next, ordered by walk_min (closest walk first).
     3. Offline stations are pushed to the end.
     """
-    def priority_key(s: StationStatus):
+
+    def priority_key(s: Any):
         is_offline = 1 if s.get("is_offline") else 0
         has_ebikes = 0 if (s.get("ebikes", 0) > 0 and not is_offline) else 1
         walk_min = s.get("walk_min", 99)
@@ -126,18 +129,22 @@ def sort_stations_by_ebike_priority(stations: List[StationStatus]) -> List[Stati
 
 
 class CitiBikeTracker:
-    def __init__(self, stations: Optional[List[StationConfig]] = None, cache_ttl: int = 30):
+    def __init__(
+        self, stations: Optional[list[StationConfig]] = None, cache_ttl: int = 30
+    ):
         self.stations = stations or DEFAULT_STATIONS
         self.cache_ttl = cache_ttl
         self._last_fetch_time = 0.0
-        self._cached_data: List[StationStatus] = []
+        self._cached_data: list[StationStatus] = []
         self._lock = threading.Lock()
 
-    def _fetch_live(self) -> List[StationStatus]:
+    def _fetch_live(self) -> list[StationStatus]:
         """Fetches the GBFS feed and maps it onto the configured stations."""
         req = urllib.request.Request(
             GBFS_STATUS_URL,
-            headers={"User-Agent": f"TransitTracker/{VERSION} (Kindle Transit Display)"},
+            headers={
+                "User-Agent": f"TransitTracker/{VERSION} (Kindle Transit Display)"
+            },
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
@@ -160,20 +167,22 @@ class CitiBikeTracker:
             is_returning = (not is_unknown) and raw_info.get("is_returning", 1) == 1
             is_offline = not is_renting
 
-            results.append({
-                "id": sid,
-                "name": target["name"],
-                "full_name": target.get("full_name", target["name"]),
-                "walk_min": target["walk_min"],
-                "distance_m": target.get("distance_m", 0),
-                "ebikes": ebikes,
-                "classic": classic,
-                "total_bikes": total_bikes,
-                "docks": docks,
-                "is_offline": is_offline,
-                "is_returning": is_returning,
-                "is_unknown": is_unknown,
-            })
+            results.append(
+                {
+                    "id": sid,
+                    "name": target["name"],
+                    "full_name": target.get("full_name", target["name"]),
+                    "walk_min": target["walk_min"],
+                    "distance_m": target.get("distance_m", 0),
+                    "ebikes": ebikes,
+                    "classic": classic,
+                    "total_bikes": total_bikes,
+                    "docks": docks,
+                    "is_offline": is_offline,
+                    "is_returning": is_returning,
+                    "is_unknown": is_unknown,
+                }
+            )
         return sort_stations_by_ebike_priority(results)
 
     def get_snapshot(self, force_refresh: bool = False) -> CitiBikeSnapshot:
@@ -186,22 +195,32 @@ class CitiBikeTracker:
         """
         with self._lock:
             now = time.time()
-            if not force_refresh and self._cached_data and (now - self._last_fetch_time < self.cache_ttl):
-                return CitiBikeSnapshot(CB_STATUS_OK, self._cached_data, self._last_fetch_time)
+            if (
+                not force_refresh
+                and self._cached_data
+                and (now - self._last_fetch_time < self.cache_ttl)
+            ):
+                return CitiBikeSnapshot(
+                    CB_STATUS_OK, self._cached_data, self._last_fetch_time
+                )
             try:
                 data = self._fetch_live()
             except Exception as e:
                 age = now - self._last_fetch_time
                 if self._cached_data and age <= MAX_STALE_SECS:
-                    print(f"[CitiBike] feed unavailable ({e}); serving data from {int(age)}s ago")
-                    return CitiBikeSnapshot(CB_STATUS_STALE, self._cached_data, self._last_fetch_time)
+                    print(
+                        f"[CitiBike] feed unavailable ({e}); serving data from {int(age)}s ago"
+                    )
+                    return CitiBikeSnapshot(
+                        CB_STATUS_STALE, self._cached_data, self._last_fetch_time
+                    )
                 print(f"[CitiBike] feed unavailable ({e}); no usable cached data")
                 return CitiBikeSnapshot(CB_STATUS_ERROR, [], None)
             self._cached_data = data
             self._last_fetch_time = now
             return CitiBikeSnapshot(CB_STATUS_OK, data, now)
 
-    def get_station_status(self, force_refresh: bool = False) -> List[StationStatus]:
+    def get_station_status(self, force_refresh: bool = False) -> list[StationStatus]:
         """
         Returns real-time status for the configured target stations,
         dynamically prioritized by e-bike availability and proximity.
@@ -213,7 +232,7 @@ class CitiBikeTracker:
             raise CitiBikeUnavailable("Citi Bike data unavailable")
         return snap.stations
 
-    def get_mock_data(self) -> List[StationStatus]:
+    def get_mock_data(self) -> list[StationStatus]:
         """Mock preview data (?mock=1 only) with realistic commute availability across all tracked stations."""
         mock = [
             {

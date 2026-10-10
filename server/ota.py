@@ -18,7 +18,7 @@ import json
 import os
 import re
 import threading
-from typing import Any, Dict, NamedTuple, Optional
+from typing import Any, NamedTuple, Optional
 
 from paths import artifact_candidates, find_artifact
 
@@ -42,6 +42,7 @@ class BinaryInfo(NamedTuple):
 
 class BinaryBlob(NamedTuple):
     """The exact bytes that are hashed and served."""
+
     path: str
     data: bytes
     mtime: float
@@ -50,7 +51,7 @@ class BinaryBlob(NamedTuple):
 
 
 class ManifestInfo(NamedTuple):
-    raw: bytes      # served verbatim, as stored on disk
+    raw: bytes  # served verbatim, as stored on disk
     version: str
     sha256: str
     size: int
@@ -66,8 +67,8 @@ BINARY_SEARCH_PATHS = artifact_candidates(BINARY_NAME)
 BINARY_PATH = find_artifact(BINARY_NAME) or BINARY_SEARCH_PATHS[-1]
 
 _cache_lock = threading.Lock()
-_blob_cache: Dict[str, Any] = {"key": None, "blob": None}
-_manifest_cache: Dict[str, Any] = {"key": None, "info": None}
+_blob_cache: dict[str, Any] = {"key": None, "blob": None}
+_manifest_cache: dict[str, Any] = {"key": None, "info": None}
 
 
 def sha256_file(path: str) -> str:
@@ -121,7 +122,9 @@ def load_binary(binary_path: Optional[str] = None) -> Optional[BinaryBlob]:
             with open(path, "rb") as f:
                 fst = os.fstat(f.fileno())
                 if fst.st_size > MAX_BINARY_SIZE:
-                    print(f"[OTA] {path} is larger than {MAX_BINARY_SIZE} bytes; not serving it")
+                    print(
+                        f"[OTA] {path} is larger than {MAX_BINARY_SIZE} bytes; not serving it"
+                    )
                     return None
                 data = f.read(fst.st_size + 1)
         except OSError:
@@ -130,7 +133,9 @@ def load_binary(binary_path: Optional[str] = None) -> Optional[BinaryBlob]:
             # The file is being rewritten in place; try again on the next request.
             print(f"[OTA] {path} changed while being read; not serving it this time")
             return None
-        blob = BinaryBlob(path, data, fst.st_mtime, hashlib.sha256(data).hexdigest(), len(data))
+        blob = BinaryBlob(
+            path, data, fst.st_mtime, hashlib.sha256(data).hexdigest(), len(data)
+        )
         _blob_cache.update({"key": (path,) + _stat_key(fst), "blob": blob})
         return blob
 
@@ -166,11 +171,18 @@ def parse_manifest(raw: bytes) -> ManifestInfo:
     if not isinstance(digest, str) or not _SHA256_RE.match(digest):
         raise ManifestError("manifest sha256 is not 64 lowercase hex characters")
     size = doc.get("size")
-    if not isinstance(size, int) or isinstance(size, bool) or not (0 < size <= MAX_BINARY_SIZE):
+    if (
+        not isinstance(size, int)
+        or isinstance(size, bool)
+        or not (0 < size <= MAX_BINARY_SIZE)
+    ):
         raise ManifestError("manifest size is not a positive integer within limits")
     sig = doc.get("signature")
     try:
-        if not isinstance(sig, str) or len(base64.b64decode(sig.encode("ascii"), validate=True)) != 64:
+        if (
+            not isinstance(sig, str)
+            or len(base64.b64decode(sig.encode("ascii"), validate=True)) != 64
+        ):
             raise ManifestError("manifest signature is not base64 of 64 bytes")
     except (binascii.Error, UnicodeEncodeError) as e:
         raise ManifestError(f"manifest signature is not valid base64 ({e})") from e

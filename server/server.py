@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import hmac
 import html
@@ -7,101 +6,93 @@ import json
 import os
 import re
 import secrets
-import socket
-import sys
 import threading
 import time
 import urllib.parse
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import Any, NamedTuple, Optional
+
 from PIL import Image
 
 try:
-    from zeroconf import Zeroconf, ServiceInfo
+    from zeroconf import ServiceInfo, Zeroconf
 except ImportError:
-    Zeroconf = None
-    ServiceInfo = None
+    Zeroconf = None  # type: ignore[assignment,misc]
+    ServiceInfo = None  # type: ignore[assignment,misc]
 
-from bus_tracker import NJTransitBusTracker, normalize_arrival, ArrivalRecord
+from bus_tracker import NJTransitBusTracker, normalize_arrival
 from citibike import (
-    CitiBikeTracker,
-    StationConfig,
-    StationStatus,
-    CitiBikeSnapshot,
-    CitiBikeUnavailable,
-    CB_STATUS_OK,
-    CB_STATUS_STALE,
     CB_STATUS_ERROR,
-)
-from gtfs_bus import GTFSBusTracker
-from render_dashboard import render_dashboard, STOPS, get_mock_data, resolve_view, WIDTH
-from version import VERSION
-
-from discovery import (
-    ZEROCONF_AVAILABLE,
-    DISCOVERY_PORT,
-    is_private_address,
-    get_local_ip,
-    start_discovery_responder,
-    start_mdns_advertiser,
-)
-from ota import (
-    BINARY_PATH,
-    BINARY_NAME,
-    MANIFEST_NAME,
-    sha256_file,
-    get_binary_info,
-    get_valid_manifest,
-    load_binary,
-    BinaryInfo,
-)
-from kindle_image import (
-    PW5_NATIVE,
-    PW5_LANDSCAPE,
-    native_render_scale,
-    sanitize_kindle_panel,
-    format_for_kindle,
-)
-from schedule import (
-    _parse_hour_env,
-    PEAK_AM_START,
-    PEAK_AM_END,
-    PEAK_PM_START,
-    PEAK_PM_END,
-    is_peak_commute_hours,
-    get_commute_lighting,
-    CommuteLighting,
-    FORCE_FAST_POLL,
-    OVERNIGHT_START,
-    OVERNIGHT_END,
-    OVERNIGHT_INTERVAL,
-    OFFPEAK_INTERVAL,
-    is_overnight_hours,
-    get_presentation,
-    get_status_note,
-    get_dormant_note,
-    get_target_poll_interval,
-)
-from paths import resolve_cache_dir
-from logsafe import redact, strip_controls, safe_log_lines
-from identity import (
-    load_identity,
-    NONCE_HEADER,
-    CERT_HEADER,
-    AUTH_HEADER,
-    is_valid_nonce,
+    CitiBikeTracker,
 )
 from device_registry import (
-    DeviceRecord,
-    DeviceRegistry,
     get_device_registry,
     sanitize_client_id,
 )
+from discovery import (
+    DISCOVERY_PORT,
+    get_local_ip,
+    is_private_address,
+    start_discovery_responder,
+    start_mdns_advertiser,
+)
+from gtfs_bus import GTFSBusTracker
+from identity import (
+    NONCE_HEADER,
+    is_valid_nonce,
+    load_identity,
+)
+from kindle_image import (
+    PW5_LANDSCAPE,
+    format_for_kindle,
+    native_render_scale,
+    sanitize_kindle_panel,
+)
+from logsafe import redact, safe_log_lines
+from ota import (
+    get_valid_manifest,
+    load_binary,
+    sha256_file,
+)
+from paths import resolve_cache_dir
+from render_dashboard import STOPS, WIDTH, get_mock_data, render_dashboard, resolve_view
+from schedule import (
+    FORCE_FAST_POLL,
+    OVERNIGHT_END,
+    OVERNIGHT_START,
+    _parse_hour_env,
+    get_commute_lighting,
+    get_presentation,
+    get_status_note,
+    get_target_poll_interval,
+    is_overnight_hours,
+    is_peak_commute_hours,
+)
+from version import VERSION
+
+__all__ = [
+    "FORCE_FAST_POLL",
+    "OVERNIGHT_END",
+    "OVERNIGHT_START",
+    "PORT",
+    "SERVER_VERSION",
+    "_parse_hour_env",
+    "format_for_kindle",
+    "get_commute_lighting",
+    "get_presentation",
+    "get_status_note",
+    "get_target_poll_interval",
+    "is_overnight_hours",
+    "is_peak_commute_hours",
+    "is_private_address",
+    "sha256_file",
+]
 
 PORT = int(os.environ.get("PORT", 8000))
 INTERACTIVE_TTL = 30
 SERVER_VERSION = VERSION
+
 
 # Control token management (security spec §9)
 def init_control_token() -> str:
@@ -116,7 +107,7 @@ def init_control_token() -> str:
     token_file = os.path.join(cache_dir, "control_token")
     if os.path.exists(token_file):
         try:
-            with open(token_file, "r", encoding="utf-8") as f:
+            with open(token_file, encoding="utf-8") as f:
                 tok = f.read().strip()
                 if tok:
                     return tok
@@ -130,6 +121,7 @@ def init_control_token() -> str:
     except OSError:
         pass
     return tok
+
 
 CONTROL_TOKEN = init_control_token()
 _identity, _identity_status = load_identity()
@@ -150,7 +142,12 @@ def check_control_auth(handler) -> bool:
 
 # Last device diagnostics report uploaded by a client
 _diag_lock = threading.Lock()
-_last_diagnostics = {"text": "", "time": 0.0, "battery": None, "charging": None}
+_last_diagnostics: dict[str, Any] = {
+    "text": "",
+    "time": 0.0,
+    "battery": None,
+    "charging": None,
+}
 _diag_requested = ""
 
 VALID_RUN_MODES = ("resident", "oneshot", "sleep", "sleep-suspend")
@@ -183,8 +180,8 @@ def parse_diag_battery(text: str) -> BatteryDiag:
 # Upstream data cache (bus arrivals + Citi Bike status), decoupled from render.
 _data_lock = threading.Lock()
 _data_fetch_lock = threading.Lock()
-_data_cache = {"time": 0.0, "stops": None, "status": {}, "cb": None}
-_render_cache: Dict[Any, bytes] = {}
+_data_cache: dict[str, Any] = {"time": 0.0, "stops": None, "status": {}, "cb": None}
+_render_cache: dict[Any, bytes] = {}
 _render_lock = threading.Lock()
 
 
@@ -194,7 +191,9 @@ def data_cache_ttl(interactive: bool = False) -> int:
     return get_target_poll_interval()
 
 
-def get_fresh_data(use_mock: bool = False, interactive: bool = False) -> Tuple[Dict[str, Any], Dict[str, str], Any]:
+def get_fresh_data(
+    use_mock: bool = False, interactive: bool = False
+) -> tuple[dict[str, Any], dict[str, str], Any]:
     """
     Returns (stops_data, stop_status, cb_data), refreshing upstream sources at
     most once per data_cache_ttl(). Shared by all render requests.
@@ -203,13 +202,15 @@ def get_fresh_data(use_mock: bool = False, interactive: bool = False) -> Tuple[D
     if use_mock:
         return (
             get_mock_data(),
-            {stop["id"]: NJTransitBusTracker.STATUS_OK for stop in STOPS},
+            {str(stop["id"]): NJTransitBusTracker.STATUS_OK for stop in STOPS},
             cb_tracker.get_mock_data(),
         )
 
     now = time.time()
     with _data_lock:
-        fresh = _data_cache["stops"] is not None and (now - _data_cache["time"] < data_cache_ttl(interactive))
+        fresh = _data_cache["stops"] is not None and (
+            now - float(_data_cache["time"]) < data_cache_ttl(interactive)
+        )
         if fresh:
             return _data_cache["stops"], _data_cache["status"], _data_cache["cb"]
 
@@ -217,32 +218,42 @@ def get_fresh_data(use_mock: bool = False, interactive: bool = False) -> Tuple[D
     with _data_fetch_lock:
         now = time.time()
         with _data_lock:
-            fresh = _data_cache["stops"] is not None and (now - _data_cache["time"] < data_cache_ttl(interactive))
+            fresh = _data_cache["stops"] is not None and (
+                now - float(_data_cache["time"]) < data_cache_ttl(interactive)
+            )
             if fresh:
                 return _data_cache["stops"], _data_cache["status"], _data_cache["cb"]
 
-        stops_data = {}
-        stop_status = {}
+        stops_data: dict[str, Any] = {}
+        stop_status: dict[str, str] = {}
         global tracker, gtfs_tracker
         if tracker is None:
             tracker = NJTransitBusTracker()
         if gtfs_tracker is None:
-            gtfs_tracker = GTFSBusTracker(route="126", stops=[stop["id"] for stop in STOPS])
+            gtfs_tracker = GTFSBusTracker(
+                route="126", stops=[str(stop["id"]) for stop in STOPS]
+            )
 
         allow_realtime = not is_overnight_hours()
         for stop in STOPS:
-            sid = stop["id"]
+            sid = str(stop["id"])
             arrivals = None
             try:
-                arrivals = gtfs_tracker.get_upcoming(sid, limit=3, allow_realtime=allow_realtime)
+                arrivals = gtfs_tracker.get_upcoming(
+                    sid, limit=3, allow_realtime=allow_realtime
+                )
             except Exception as e:
-                print(f"[Server] GTFS-BUS fetch error ({redact(e)}); falling back to public API.")
+                print(
+                    f"[Server] GTFS-BUS fetch error ({redact(e)}); falling back to public API."
+                )
             if arrivals:
                 stops_data[sid] = arrivals
                 stop_status[sid] = NJTransitBusTracker.STATUS_OK
             else:
-                status, trips = tracker.get_arrivals_with_status(stop_id=sid, route="126")
-                stops_data[sid] = [normalize_arrival(t) for t in trips]
+                status, trips = tracker.get_arrivals_with_status(
+                    stop_id=sid, route="126"
+                )
+                stops_data[sid] = [dict(normalize_arrival(t)) for t in trips]
                 stop_status[sid] = status
 
         try:
@@ -269,7 +280,9 @@ def warm_up_gtfs() -> None:
     global gtfs_tracker
     try:
         if gtfs_tracker is None:
-            gtfs_tracker = GTFSBusTracker(route="126", stops=[stop["id"] for stop in STOPS])
+            gtfs_tracker = GTFSBusTracker(
+                route="126", stops=[str(stop["id"]) for stop in STOPS]
+            )
         gtfs_tracker.ensure_index(wait=True)
     except Exception as e:
         print(f"[GTFS] warm-up failed ({redact(e)})")
@@ -287,7 +300,9 @@ def get_fresh_dashboard_image(
     status_note: str = "",
     interactive: bool = False,
 ) -> Image.Image:
-    stops_data, stop_status, cb_data = get_fresh_data(use_mock=use_mock, interactive=interactive)
+    stops_data, stop_status, cb_data = get_fresh_data(
+        use_mock=use_mock, interactive=interactive
+    )
 
     cache_key = (
         use_mock,
@@ -346,7 +361,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             str_val.encode("latin-1")
         except UnicodeEncodeError as e:
-            raise ValueError(f"Non-latin1 character in header {keyword}: {str_val!r}") from e
+            raise ValueError(
+                f"Non-latin1 character in header {keyword}: {str_val!r}"
+            ) from e
         super().send_header(keyword, str_val)
 
     def _send_forbidden(self) -> None:
@@ -363,7 +380,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def _send_tracker_headers(self, status: int, headers: List[Tuple[str, str]]) -> None:
+    def _send_tracker_headers(
+        self, status: int, headers: list[tuple[str, str]]
+    ) -> None:
         self.send_response(status)
         for name, value in headers:
             self.send_header(name, value)
@@ -394,7 +413,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_empty(400)
             return None
 
-    def _extract_client_id(self, params: Optional[Dict[str, List[str]]] = None) -> str:
+    def _extract_client_id(self, params: Optional[dict[str, list[str]]] = None) -> str:
         cid = self.headers.get("X-Tracker-Client-ID", "").strip()
         if not cid and params:
             cid = params.get("client_id", params.get("id", [""]))[0].strip()
@@ -467,21 +486,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 want = qs.get("set", qs.get("mode", [""]))[0].lower().strip()
                 target_id = qs.get("client_id", qs.get("id", [""]))[0].strip()
             if not target_id:
-                target_id = params.get("client_id", params.get("id", ["all"]))[0].strip() or "all"
+                target_id = (
+                    params.get("client_id", params.get("id", ["all"]))[0].strip()
+                    or "all"
+                )
             global _mode_requested
             if want in VALID_RUN_MODES:
                 registry.set_mode(target_id, want)
                 with _diag_lock:
                     if target_id.lower() == "all" or target_id == "default":
                         _mode_requested = want
-                print(f"[Mode] requested client mode '{want}' for {target_id} on the next poll")
+                print(
+                    f"[Mode] requested client mode '{want}' for {target_id} on the next poll"
+                )
             if target_id and target_id.lower() != "all":
                 rec = registry.get_device(target_id)
-                pending = rec.target_mode if rec else (want if want in VALID_RUN_MODES else "")
+                pending = (
+                    rec.target_mode
+                    if rec
+                    else (want if want in VALID_RUN_MODES else "")
+                )
             else:
                 with _diag_lock:
                     pending = _mode_requested
-            payload = json.dumps({"pending": pending, "valid": list(VALID_RUN_MODES)}).encode("utf-8")
+            payload = json.dumps(
+                {"pending": pending, "valid": list(VALID_RUN_MODES)}
+            ).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -508,14 +538,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 do = qs.get("do", qs.get("action", [""]))[0].strip().lower()
                 target_id = qs.get("client_id", qs.get("id", [""]))[0].strip()
             if not target_id:
-                target_id = params.get("client_id", params.get("id", ["all"]))[0].strip() or "all"
+                target_id = (
+                    params.get("client_id", params.get("id", ["all"]))[0].strip()
+                    or "all"
+                )
             global _device_action
             if do:
                 registry.set_action(target_id, do)
                 with _diag_lock:
                     if target_id.lower() == "all" or target_id == "default":
                         _device_action = do
-                print(f"[Action] queued device action '{do}' for {target_id} for the next poll")
+                print(
+                    f"[Action] queued device action '{do}' for {target_id} for the next poll"
+                )
             if target_id and target_id.lower() != "all":
                 rec = registry.get_device(target_id)
                 pending = rec.pending_action if rec else do
@@ -542,21 +577,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 data = json.loads(body.decode("utf-8"))
                 if isinstance(data, dict):
-                    level = str(data.get("level", data.get("mode", "1"))).strip().lower()
+                    level = (
+                        str(data.get("level", data.get("mode", "1"))).strip().lower()
+                    )
                     target_id = str(data.get("client_id", data.get("id", ""))).strip()
             except Exception:
                 qs = urllib.parse.parse_qs(body.decode("utf-8", errors="ignore"))
                 level = qs.get("level", qs.get("mode", ["1"]))[0].strip().lower()
                 target_id = qs.get("client_id", qs.get("id", [""]))[0].strip()
             if not target_id:
-                target_id = params.get("client_id", params.get("id", ["all"]))[0].strip() or "all"
+                target_id = (
+                    params.get("client_id", params.get("id", ["all"]))[0].strip()
+                    or "all"
+                )
             req = "full" if level == "full" else ("quick" if level == "quick" else "1")
             global _diag_requested
             registry.set_diag(target_id, req)
             with _diag_lock:
                 if target_id.lower() == "all" or target_id == "default":
                     _diag_requested = req
-            print(f"[Diagnostics] requested a '{req}' dump for {target_id} from the next poll")
+            print(
+                f"[Diagnostics] requested a '{req}' dump for {target_id} from the next poll"
+            )
             payload = json.dumps({"requested": req}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -581,12 +623,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if body is None:
                 return
             text = body.decode("utf-8", errors="replace")
-            level, charging = parse_diag_battery(text)
+            batt_lvl, charging = parse_diag_battery(text)
             registry.save_diagnostics(client_id, text, resolve_cache_dir())
             registry.update_telemetry(
                 client_id=client_id,
                 remote_ip=remote_ip,
-                battery=float(level) if level is not None else None,
+                battery=float(batt_lvl) if batt_lvl is not None else None,
                 charging=charging,
                 client_mode=self.headers.get("X-Tracker-Mode", ""),
                 client_version=self.headers.get("X-Tracker-Client-Version", ""),
@@ -595,11 +637,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             with _diag_lock:
                 _last_diagnostics["text"] = text
                 _last_diagnostics["time"] = time.time()
-                if level is not None:
-                    _last_diagnostics["battery"] = level
+                if batt_lvl is not None:
+                    _last_diagnostics["battery"] = batt_lvl
                     _last_diagnostics["charging"] = charging
-            extra = f" battery={level}%{'⚡' if charging else ''}" if level is not None else ""
-            print(f"[Diagnostics] received {len(body)} bytes from {self.address_string()}{extra}")
+            extra = (
+                f" battery={batt_lvl}%{'⚡' if charging else ''}"
+                if batt_lvl is not None
+                else ""
+            )
+            print(
+                f"[Diagnostics] received {len(body)} bytes from {self.address_string()}{extra}"
+            )
             self._send_empty(200)
             return
 
@@ -617,11 +665,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             registry.get_or_register(client_id, remote_ip)
 
         if parsed.path in ["/healthz", "/health"]:
-            payload = json.dumps({
-                "status": "ok",
-                "version": SERVER_VERSION,
-                "stopped": tracker_stopped,
-            }).encode("utf-8")
+            payload = json.dumps(
+                {
+                    "status": "ok",
+                    "version": SERVER_VERSION,
+                    "stopped": tracker_stopped,
+                }
+            ).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -631,10 +681,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/identity":
             nonce = self.headers.get(NONCE_HEADER, "").strip()
-            payload = json.dumps({
-                "service": "transit-tracker",
-                "version": SERVER_VERSION,
-            }).encode("utf-8")
+            payload = json.dumps(
+                {
+                    "service": "transit-tracker",
+                    "version": SERVER_VERSION,
+                }
+            ).encode("utf-8")
             headers = [
                 ("Content-Type", "application/json"),
                 ("Content-Length", str(len(payload))),
@@ -646,7 +698,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     path="/identity",
                     status=200,
                     body=payload,
-                    headers={"content-type": "application/json", "content-length": str(len(payload))},
+                    headers={
+                        "content-type": "application/json",
+                        "content-length": str(len(payload)),
+                    },
                 )
                 headers.extend(auth_hdrs)
             self._send_tracker_headers(200, headers)
@@ -654,8 +709,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/devices":
-            devices = [d.to_dict() for d in registry.list_devices()]
-            payload = json.dumps({"devices": devices}, indent=2).encode("utf-8")
+            device_dicts = [d.to_dict() for d in registry.list_devices()]
+            payload = json.dumps({"devices": device_dicts}, indent=2).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -681,18 +736,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not check_control_auth(self):
                 self._send_forbidden()
                 return
-            target_id = params.get("client_id", params.get("id", ["all"]))[0].strip() or "all"
-            req = params.get("request", params.get("level", params.get("mode", ["0"])))[0].lower()
+            target_id = (
+                params.get("client_id", params.get("id", ["all"]))[0].strip() or "all"
+            )
+            req = params.get("request", params.get("level", params.get("mode", ["0"])))[
+                0
+            ].lower()
             if req in ("1", "true", "yes", "full", "quick"):
-                diag_mode = "full" if req == "full" else ("quick" if req == "quick" else "1")
+                diag_mode = (
+                    "full" if req == "full" else ("quick" if req == "quick" else "1")
+                )
                 registry.set_diag(target_id, diag_mode)
                 with _diag_lock:
                     if target_id.lower() == "all" or target_id == "default":
                         _diag_requested = diag_mode
-                print(f"[Diagnostics] requested a '{diag_mode}' dump for {target_id} from the next poll")
+                print(
+                    f"[Diagnostics] requested a '{diag_mode}' dump for {target_id} from the next poll"
+                )
             with _diag_lock:
-                text = _last_diagnostics["text"]
-                ts = _last_diagnostics["time"]
+                text = str(_last_diagnostics.get("text", "") or "")
+                ts = float(_last_diagnostics.get("time", 0.0) or 0.0)
             dev_target = params.get("client_id", params.get("id", [""]))[0].strip()
             if dev_target and dev_target.lower() != "all":
                 dev_rec = registry.get_device(dev_target)
@@ -705,8 +768,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not text:
                 self._send_empty(404)
                 return
-            safe_text = "\n".join(safe_log_lines(text, max_lines=1000))
-            payload = f"# diagnostics captured {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))}\n{safe_text}".encode("utf-8")
+            safe_text = "\n".join(safe_log_lines(str(text), max_lines=1000))
+            payload = f"# diagnostics captured {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(float(ts)))}\n{safe_text}".encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
@@ -718,21 +781,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not check_control_auth(self):
                 self._send_forbidden()
                 return
-            target_id = params.get("client_id", params.get("id", ["all"]))[0].strip() or "all"
+            target_id = (
+                params.get("client_id", params.get("id", ["all"]))[0].strip() or "all"
+            )
             want = params.get("set", params.get("mode", [""]))[0].lower()
             if want in VALID_RUN_MODES:
                 registry.set_mode(target_id, want)
                 with _diag_lock:
                     if target_id.lower() == "all" or target_id == "default":
                         _mode_requested = want
-                print(f"[Mode] requested client mode '{want}' for {target_id} on the next poll")
+                print(
+                    f"[Mode] requested client mode '{want}' for {target_id} on the next poll"
+                )
             if target_id and target_id.lower() != "all":
                 rec = registry.get_device(target_id)
-                pending = rec.target_mode if rec else (want if want in VALID_RUN_MODES else "")
+                pending = (
+                    rec.target_mode
+                    if rec
+                    else (want if want in VALID_RUN_MODES else "")
+                )
             else:
                 with _diag_lock:
                     pending = _mode_requested
-            payload = json.dumps({"pending": pending, "valid": list(VALID_RUN_MODES)}).encode("utf-8")
+            payload = json.dumps(
+                {"pending": pending, "valid": list(VALID_RUN_MODES)}
+            ).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -744,14 +817,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not check_control_auth(self):
                 self._send_forbidden()
                 return
-            target_id = params.get("client_id", params.get("id", ["all"]))[0].strip() or "all"
+            target_id = (
+                params.get("client_id", params.get("id", ["all"]))[0].strip() or "all"
+            )
             do = params.get("do", params.get("action", [""]))[0].strip().lower()
             if do:
                 registry.set_action(target_id, do)
                 with _diag_lock:
                     if target_id.lower() == "all" or target_id == "default":
                         _device_action = do
-                print(f"[Action] queued device action '{do}' for {target_id} for the next poll")
+                print(
+                    f"[Action] queued device action '{do}' for {target_id} for the next poll"
+                )
             if target_id and target_id.lower() != "all":
                 rec = registry.get_device(target_id)
                 pending = rec.pending_action if rec else do
@@ -780,7 +857,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_empty(404)
                 return
 
-            last_mod = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime(blob.mtime))
+            last_mod = time.strftime(
+                "%a, %d %b %Y %H:%M:%S GMT", time.gmtime(blob.mtime)
+            )
             ims = self.headers.get("If-Modified-Since")
             if ims == last_mod:
                 self._send_empty(304)
@@ -837,7 +916,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_empty(400)
                 return
 
-            raw_view = params.get("view", [self.headers.get("X-Tracker-View", "auto")])[0].lower().strip()
+            raw_view = (
+                params.get("view", [self.headers.get("X-Tracker-View", "auto")])[0]
+                .lower()
+                .strip()
+            )
             if raw_view in ("morning", "citi", "citibike", "am"):
                 view_param = "morning"
             elif raw_view in ("evening", "bus", "pm", "afternoon", "night"):
@@ -845,8 +928,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             else:
                 view_param = "auto"
 
-            batt_param = params.get("batt", [None])[0] or params.get("battery", [None])[0] or self.headers.get("X-Kindle-Battery")
-            charging_param = params.get("charging", [None])[0] or self.headers.get("X-Kindle-Charging")
+            batt_param = (
+                params.get("batt", [None])[0]
+                or params.get("battery", [None])[0]
+                or self.headers.get("X-Kindle-Battery")
+            )
+            charging_param = params.get("charging", [None])[0] or self.headers.get(
+                "X-Kindle-Charging"
+            )
 
             batt_level = None
             if batt_param and str(batt_param).strip().lstrip("-").isdigit():
@@ -857,7 +946,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             is_charging = str(charging_param).lower() in ["1", "true", "yes"]
             is_kindle = kindle_mode == "pw5" or "kindle" in params
             interactive_override = params.get("present", [""])[0] == "interactive"
-            presentation = "interactive" if (interactive_override or not is_kindle) else get_presentation()
+            presentation = (
+                "interactive"
+                if (interactive_override or not is_kindle)
+                else get_presentation()
+            )
             status_note = get_status_note(presentation)
             render_w = 800
             render_h = 480
@@ -865,7 +958,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if is_kindle:
                 land_w, land_h = PW5_LANDSCAPE
                 if "w" in params and "h" in params:
-                    land_w, land_h = sanitize_kindle_panel(params["w"][0], params["h"][0])
+                    land_w, land_h = sanitize_kindle_panel(
+                        params["w"][0], params["h"][0]
+                    )
 
                 logical_w = WIDTH
                 logical_h = max(1, int(round(logical_w * land_h / land_w)))
@@ -884,7 +979,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     status_note=status_note,
                     interactive=interactive_override,
                 )
-                img = format_for_kindle(img, orientation="landscape", rotation=rot_val, target=(land_w, land_h))
+                img = format_for_kindle(
+                    img,
+                    orientation="landscape",
+                    rotation=rot_val,
+                    target=(land_w, land_h),
+                )
             else:
                 img = get_fresh_dashboard_image(
                     use_mock=use_mock,
@@ -901,7 +1001,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             img.save(buf, format="PNG")
             img_bytes = buf.getvalue()
 
-            etag = '"%s"' % hashlib.sha256(img_bytes).hexdigest()[:16]
+            etag = f'"{hashlib.sha256(img_bytes).hexdigest()[:16]}"'
             brightness, warmth = get_commute_lighting()
             poll_interval = get_target_poll_interval()
 
@@ -937,7 +1037,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         _diag_requested = ""
 
                     rec = registry.get_device(client_id)
-                    tgt_mode = rec.target_mode if (rec and rec.target_mode) else _mode_requested
+                    tgt_mode = (
+                        rec.target_mode
+                        if (rec and rec.target_mode)
+                        else _mode_requested
+                    )
                     if tgt_mode and client_mode != tgt_mode:
                         mode_header = tgt_mode
 
@@ -946,7 +1050,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception:
                 local_ip = get_local_ip()
 
-            common_headers: List[Tuple[str, str]] = [
+            common_headers: list[tuple[str, str]] = [
                 ("ETag", etag),
                 ("X-Kindle-Poll-Interval", str(poll_interval)),
                 ("X-Tracker-Presentation", presentation),
@@ -984,14 +1088,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_tracker_headers(304, resp_304_headers)
                 return
 
-            full_headers = [
-                ("Content-Type", "image/png"),
-                ("Content-Length", str(len(img_bytes))),
-            ] + common_headers + [
-                ("X-Kindle-Brightness", str(brightness)),
-                ("X-Kindle-Warmth", str(warmth)),
-                ("Cache-Control", "no-cache, no-store, must-revalidate"),
-            ]
+            full_headers = (
+                [
+                    ("Content-Type", "image/png"),
+                    ("Content-Length", str(len(img_bytes))),
+                ]
+                + common_headers
+                + [
+                    ("X-Kindle-Brightness", str(brightness)),
+                    ("X-Kindle-Warmth", str(warmth)),
+                    ("Cache-Control", "no-cache, no-store, must-revalidate"),
+                ]
+            )
 
             if is_valid_nonce(nonce) and _identity is not None:
                 hdr_map = {k.lower(): v for k, v in full_headers}
@@ -1009,33 +1117,40 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif parsed.path in ["/", "/index.html"]:
             current_view = html.escape(params.get("view", ["auto"])[0])
-            status_badge = '<span style="color:#ff6b6b;">STOPPED</span>' if tracker_stopped else '<span style="color:#51cf66;">ACTIVE</span>'
+            status_badge = (
+                '<span style="color:#ff6b6b;">STOPPED</span>'
+                if tracker_stopped
+                else '<span style="color:#51cf66;">ACTIVE</span>'
+            )
 
             with _diag_lock:
-                batt_level = _last_diagnostics["battery"]
-                batt_charging = _last_diagnostics["charging"]
+                batt_val = _last_diagnostics.get("battery")
+                batt_level = int(batt_val) if batt_val is not None else None
+                batt_charging = _last_diagnostics.get("charging")
             if batt_level is not None:
                 bolt = "⚡ " if batt_charging else ""
-                batt_html = f' | Kindle: {bolt}<strong>{int(batt_level)}%</strong>'
+                batt_html = f" | Kindle: {bolt}<strong>{int(batt_level)}%</strong>"
             else:
                 batt_html = " | Kindle: <em>no report</em>"
 
             poll_interval = get_target_poll_interval()
-            devices = registry.list_devices()
-            total_count = len(devices)
-            online_count = sum(1 for d in devices if d.is_online(poll_interval))
+            registered_devices = registry.list_devices()
+            total_count = len(registered_devices)
+            online_count = sum(
+                1 for d in registered_devices if d.is_online(poll_interval)
+            )
             offline_count = total_count - online_count
 
             now_ts = time.time()
             rows_html = []
-            for d in devices:
+            for d in registered_devices:
                 is_on = d.is_online(poll_interval)
                 status_color = "#2b8a3e" if is_on else "#c92a2a"
                 status_label = "ONLINE" if is_on else "OFFLINE"
                 dev_status = (
                     f'<span class="badge" style="background:{status_color};color:#fff;'
                     f'padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;">'
-                    f'{status_label}</span>'
+                    f"{status_label}</span>"
                 )
                 safe_id = html.escape(d.client_id)
                 safe_ip = html.escape(d.remote_ip) if d.remote_ip else "-"
@@ -1048,7 +1163,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 safe_batt = html.escape(batt_str)
 
                 if d.last_seen > 0:
-                    dt_str = datetime.fromtimestamp(d.last_seen).strftime("%Y-%m-%d %H:%M:%S")
+                    dt_str = datetime.fromtimestamp(d.last_seen).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
                     elapsed = max(0, int(now_ts - d.last_seen))
                     if elapsed < 60:
                         rel = f"{elapsed}s ago"
@@ -1061,8 +1178,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     seen_str = "never"
                 safe_seen = html.escape(seen_str)
 
-                safe_client_ver = html.escape(d.client_version) if d.client_version else "-"
-                safe_fw_ver = html.escape(d.firmware_version) if d.firmware_version else "-"
+                safe_client_ver = (
+                    html.escape(d.client_version) if d.client_version else "-"
+                )
+                safe_fw_ver = (
+                    html.escape(d.firmware_version) if d.firmware_version else "-"
+                )
                 ver_display = f"{safe_client_ver} / {safe_fw_ver}"
 
                 safe_mode = html.escape(d.client_mode) if d.client_mode else "-"
@@ -1338,7 +1459,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         }};
         document.getElementById("toggleBtn").onclick = async () => {{
             const tok = tokenInput.value.trim();
-            const action = "{'resume' if tracker_stopped else 'stop'}";
+            const action = "{"resume" if tracker_stopped else "stop"}";
             const res = await fetch("/" + action, {{
                 method: "POST",
                 headers: {{ "X-Tracker-Token": tok }}
@@ -1519,7 +1640,9 @@ if __name__ == "__main__":
     print(f"  Hoboken Transit Tracker Server v{SERVER_VERSION} on Port {PORT}")
     print(f"  Local View:      http://localhost:{PORT}")
     print(f"  Kindle Endpoint: http://{local_ip}:{PORT}/dashboard.png?kindle=pw5")
-    print(f"  Auto-Discovery:  UDP Port {DISCOVERY_PORT} & mDNS (_transittracker._tcp.local)")
+    print(
+        f"  Auto-Discovery:  UDP Port {DISCOVERY_PORT} & mDNS (_transittracker._tcp.local)"
+    )
     print(f"  Identity status: {_identity_status}")
     print(f"  Control token:   {CONTROL_TOKEN}")
     print("==================================================")

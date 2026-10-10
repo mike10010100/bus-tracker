@@ -19,6 +19,7 @@ PROC_ROUTE="${PROC_NET_ROUTE:-/proc/net/route}"
 PROC_ARP="${PROC_NET_ARP:-/proc/net/arp}"
 MDNS_HOST="${MDNS_HOST:-transittracker.local}"
 
+# shellcheck disable=SC2329
 cleanup() {
     rm -f "$DL_TMP" /tmp/.sweep_found_$$* 2>/dev/null || true
 }

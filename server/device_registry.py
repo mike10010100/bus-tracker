@@ -5,13 +5,13 @@ Maintains per-device telemetry, isolated action/diagnostic queues,
 and disk persistence for client logs and diagnostics dumps.
 """
 
-from collections import deque
 import logging
 import os
 import re
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from collections import deque
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ class DeviceRecord:
         cutoff = max(120.0, 2.5 * float(poll_interval))
         return (time.time() - self.last_seen) < cutoff
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serializes device record to dictionary for API and Web UI."""
         return {
             "client_id": self.client_id,
@@ -105,7 +105,7 @@ class DeviceRegistry:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._devices: Dict[str, DeviceRecord] = {}
+        self._devices: dict[str, DeviceRecord] = {}
 
     def get_or_register(self, client_id: str, remote_ip: str = "") -> DeviceRecord:
         """
@@ -297,12 +297,14 @@ class DeviceRegistry:
             except OSError as e:
                 logger.warning("Failed to append log file for %s: %s", safe_id, e)
 
-    def list_devices(self) -> List[DeviceRecord]:
+    def list_devices(self) -> list[DeviceRecord]:
         """
         Returns list of registered devices sorted by last_seen descending.
         """
         with self._lock:
-            return sorted(self._devices.values(), key=lambda d: d.last_seen, reverse=True)
+            return sorted(
+                self._devices.values(), key=lambda d: d.last_seen, reverse=True
+            )
 
     def clear(self) -> None:
         """Clears all registered devices."""

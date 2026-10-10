@@ -1,7 +1,7 @@
 """Helpers that keep secrets and attacker-controlled bytes out of the logs."""
 
 import re
-from typing import Any, List
+from typing import Any
 
 # `token=<value>` in URLs, form bodies and requests' exception messages.
 _TOKEN_RE = re.compile(r"(?i)(token=)[^&\s'\"<>]+")
@@ -19,7 +19,7 @@ def strip_controls(text: str) -> str:
     return _CONTROL_RE.sub("", text)
 
 
-def safe_log_lines(text: str, max_lines: int = 200) -> List[str]:
+def safe_log_lines(text: str, max_lines: int = 200) -> list[str]:
     """
     Splits untrusted text into lines and strips control characters from each,
     so a device-supplied body cannot forge log lines or inject ANSI escapes.

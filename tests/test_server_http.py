@@ -6,27 +6,26 @@ mock data so no external network calls are made.
 
 import copy
 import datetime
-import io
 import json
 import os
 import re
 import socket
-import tempfile
 import threading
 import time
 import unittest
-import urllib.request
 import urllib.error
+import urllib.request
 from http.server import ThreadingHTTPServer
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import server
-from server import DashboardHandler, format_for_kindle, sha256_file
-from PIL import Image
+from server import DashboardHandler
 
 
 def _http_get(port, path, headers=None):
-    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers or {})
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}", headers=headers or {}
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.status, dict(resp.headers), resp.read()
@@ -35,7 +34,12 @@ def _http_get(port, path, headers=None):
 
 
 def _http(method, port, path, headers=None, body=None):
-    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=body, headers=headers or {}, method=method)
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        data=body,
+        headers=headers or {},
+        method=method,
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.status, dict(resp.headers), resp.read()
@@ -144,8 +148,12 @@ class TestDiagnosticsEndpoints(ServerHTTPTestBase):
                 self.assertEqual(res.charging, exp_charging)
 
     def test_post_diag_extracts_and_exposes_battery(self):
-        body = b"--- Kindle Diagnostics ---\nbattery_level=87 charging=true\nfw=5.16.21\n"
-        status, _headers, _body = _http(method="POST", port=self.port, path="/diag", body=body)
+        body = (
+            b"--- Kindle Diagnostics ---\nbattery_level=87 charging=true\nfw=5.16.21\n"
+        )
+        status, _headers, _body = _http(
+            method="POST", port=self.port, path="/diag", body=body
+        )
         self.assertEqual(status, 200)
         self.assertEqual(server._last_diagnostics["battery"], 87)
         self.assertEqual(server._last_diagnostics["charging"], True)
@@ -169,12 +177,16 @@ class TestDiagnosticsEndpoints(ServerHTTPTestBase):
         self.assertEqual(status, 200)
         self.assertEqual(server._diag_requested, "1")
 
-        status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
+        status, headers, _body = _http_get(
+            self.port, "/dashboard.png?mock=1&kindle=pw5"
+        )
         self.assertEqual(status, 200)
         self.assertEqual(headers.get("X-Tracker-Diag"), "1")
         self.assertEqual(server._diag_requested, "")
 
-        status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
+        status, headers, _body = _http_get(
+            self.port, "/dashboard.png?mock=1&kindle=pw5"
+        )
         self.assertNotIn("X-Tracker-Diag", headers)
 
     def test_web_request_does_not_consume_diag_flag(self):
@@ -201,12 +213,16 @@ class TestDiagnosticsEndpoints(ServerHTTPTestBase):
             body=b'{"level": "full"}',
         )
         self.assertEqual(server._diag_requested, "full")
-        _status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
+        _status, headers, _body = _http_get(
+            self.port, "/dashboard.png?mock=1&kindle=pw5"
+        )
         self.assertEqual(headers.get("X-Tracker-Diag"), "full")
         self.assertEqual(server._diag_requested, "")
 
     def test_diag_flag_also_sent_on_304(self):
-        _status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
+        _status, headers, _body = _http_get(
+            self.port, "/dashboard.png?mock=1&kindle=pw5"
+        )
         etag = headers.get("ETag")
         self.assertTrue(etag)
 
@@ -220,7 +236,9 @@ class TestDiagnosticsEndpoints(ServerHTTPTestBase):
         self.assertEqual(server._diag_requested, "1")
 
         status, headers, _body = _http_get(
-            self.port, "/dashboard.png?mock=1&kindle=pw5", headers={"If-None-Match": etag}
+            self.port,
+            "/dashboard.png?mock=1&kindle=pw5",
+            headers={"If-None-Match": etag},
         )
         self.assertEqual(status, 304)
         self.assertEqual(headers.get("X-Tracker-Diag"), "1")
@@ -415,7 +433,9 @@ class TestKeepAlive(ServerHTTPTestBase):
             self.assertEqual(rest, b"")
             self.assertIn(b"200 OK", header_part)
 
-            req2 = b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            req2 = (
+                b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            )
             s.sendall(req2)
             buf2 = b""
             while True:
@@ -431,11 +451,15 @@ class TestKeepAlive(ServerHTTPTestBase):
 
 class TestLogEndpoint(ServerHTTPTestBase):
     def test_post_log_returns_200(self):
-        status, _headers, _body = _http(method="POST", port=self.port, path="/log", body=b"hello from kindle\n")
+        status, _headers, _body = _http(
+            method="POST", port=self.port, path="/log", body=b"hello from kindle\n"
+        )
         self.assertEqual(status, 200)
 
     def test_post_unknown_path_404(self):
-        status, _headers, _body = _http(method="POST", port=self.port, path="/nonexistent", body=b"xyz")
+        status, _headers, _body = _http(
+            method="POST", port=self.port, path="/nonexistent", body=b"xyz"
+        )
         self.assertEqual(status, 404)
 
     def test_get_log_with_query(self):
@@ -457,7 +481,9 @@ class TestControlEndpoints(ServerHTTPTestBase):
     def test_stop_then_resume_from_loopback(self):
         tok = "control123"
         server.CONTROL_TOKEN = tok
-        status, _headers, body = _http("POST", self.port, "/stop", headers={"X-Tracker-Token": tok})
+        status, _headers, body = _http(
+            "POST", self.port, "/stop", headers={"X-Tracker-Token": tok}
+        )
         self.assertEqual(status, 200)
         self.assertTrue(server.tracker_stopped)
         self.assertIn(b"stopped", body)
@@ -465,7 +491,9 @@ class TestControlEndpoints(ServerHTTPTestBase):
         status, _headers, _body = _http_get(self.port, "/dashboard.png?mock=1")
         self.assertEqual(status, 205)
 
-        status, _headers, _body = _http("POST", self.port, "/resume", headers={"X-Tracker-Token": tok})
+        status, _headers, _body = _http(
+            "POST", self.port, "/resume", headers={"X-Tracker-Token": tok}
+        )
         self.assertEqual(status, 200)
         self.assertFalse(server.tracker_stopped)
 
@@ -473,25 +501,33 @@ class TestControlEndpoints(ServerHTTPTestBase):
         server.tracker_stopped = True
         tok = "control123"
         server.CONTROL_TOKEN = tok
-        status, _headers, _body = _http("POST", self.port, "/start", headers={"X-Tracker-Token": tok})
+        status, _headers, _body = _http(
+            "POST", self.port, "/start", headers={"X-Tracker-Token": tok}
+        )
         self.assertEqual(status, 200)
         self.assertFalse(server.tracker_stopped)
 
     def test_stop_denied_with_token_configured_and_wrong_token(self):
         server.CONTROL_TOKEN = "topsecret"
-        status, _headers, body = _http("POST", self.port, "/stop", headers={"X-Tracker-Token": "wrong"})
+        status, _headers, body = _http(
+            "POST", self.port, "/stop", headers={"X-Tracker-Token": "wrong"}
+        )
         self.assertEqual(status, 403)
         self.assertFalse(server.tracker_stopped)
         self.assertIn(b"Forbidden", body)
 
     def test_stop_denied_via_get(self):
         server.CONTROL_TOKEN = "topsecret"
-        status, _headers, _body = _http_get(self.port, "/stop", headers={"X-Tracker-Token": "topsecret"})
+        status, _headers, _body = _http_get(
+            self.port, "/stop", headers={"X-Tracker-Token": "topsecret"}
+        )
         self.assertEqual(status, 405)
 
     def test_stop_allowed_with_correct_header_token(self):
         server.CONTROL_TOKEN = "topsecret"
-        status, _headers, _body = _http("POST", self.port, "/stop", headers={"X-Tracker-Token": "topsecret"})
+        status, _headers, _body = _http(
+            "POST", self.port, "/stop", headers={"X-Tracker-Token": "topsecret"}
+        )
         self.assertEqual(status, 200)
         self.assertTrue(server.tracker_stopped)
 
@@ -583,6 +619,7 @@ class TestServerCoverageAdditions(ServerHTTPTestBase):
 
     def test_get_presentation_force_fast_poll(self):
         import schedule
+
         orig_srv = getattr(server, "FORCE_FAST_POLL", False)
         orig_sch = schedule.FORCE_FAST_POLL
         try:
@@ -594,7 +631,9 @@ class TestServerCoverageAdditions(ServerHTTPTestBase):
             server.FORCE_FAST_POLL = orig_srv
 
     def test_action_endpoint_without_do(self):
-        status, _headers, body = _http_get(self.port, "/action", headers=_auth_headers())
+        status, _headers, body = _http_get(
+            self.port, "/action", headers=_auth_headers()
+        )
         self.assertEqual(status, 200)
         data = json.loads(body)
         self.assertIn("pending", data)
@@ -602,7 +641,11 @@ class TestServerCoverageAdditions(ServerHTTPTestBase):
     def test_tracker_arm_head_request(self):
         cand1 = os.path.join(os.path.dirname(server.__file__), "tracker-arm")
         cand2 = os.path.join(os.path.dirname(server.__file__), "..", "tracker-arm")
-        binary = cand1 if os.path.exists(cand1) else (cand2 if os.path.exists(cand2) else cand1)
+        binary = (
+            cand1
+            if os.path.exists(cand1)
+            else (cand2 if os.path.exists(cand2) else cand1)
+        )
         created = False
         if not os.path.exists(binary):
             with open(binary, "wb") as f:
@@ -627,7 +670,9 @@ class TestServerCoverageAdditions(ServerHTTPTestBase):
             server._device_action = "disable-ads"
         try:
             status_304, headers_304, _ = _http_get(
-                self.port, "/dashboard.png?mock=1&kindle=pw5", headers={"If-None-Match": etag}
+                self.port,
+                "/dashboard.png?mock=1&kindle=pw5",
+                headers={"If-None-Match": etag},
             )
             self.assertEqual(status_304, 304)
             self.assertEqual(headers_304.get("X-Tracker-Action"), "disable-ads")
@@ -647,7 +692,7 @@ class TestServerCoverageAdditions(ServerHTTPTestBase):
         handler.path = "/log"
         handler.headers = {"Content-Length": "10"}
         mock_rfile = MagicMock()
-        mock_rfile.read.side_effect = IOError("socket closed")
+        mock_rfile.read.side_effect = OSError("socket closed")
         handler.rfile = mock_rfile
         handler._send_empty = MagicMock()
 
@@ -667,7 +712,14 @@ class TestServerCoverageAdditions(ServerHTTPTestBase):
         mock_snap = MagicMock()
         mock_snap.status = "ok"
         mock_snap.stations = [
-            {"name": "Mock Station", "ebikes": 2, "classic": 1, "docks": 5, "walk_min": 2, "is_offline": False}
+            {
+                "name": "Mock Station",
+                "ebikes": 2,
+                "classic": 1,
+                "docks": 5,
+                "walk_min": 2,
+                "is_offline": False,
+            }
         ]
         mock_cb = MagicMock()
         mock_cb.get_snapshot.return_value = mock_snap
@@ -682,8 +734,14 @@ class TestServerCoverageAdditions(ServerHTTPTestBase):
         orig_connect = socket.socket.connect
 
         def hermetic_connect(sock, address):
-            if sock.type == socket.SOCK_STREAM and address[0] not in ("127.0.0.1", "localhost", "::1"):
-                raise AssertionError(f"Hermetic isolation violation: outbound WAN connection attempted to {address}")
+            if sock.type == socket.SOCK_STREAM and address[0] not in (
+                "127.0.0.1",
+                "localhost",
+                "::1",
+            ):
+                raise AssertionError(
+                    f"Hermetic isolation violation: outbound WAN connection attempted to {address}"
+                )
             return orig_connect(sock, address)
 
         try:
@@ -714,7 +772,12 @@ class TestMultiDeviceWebInterface(ServerHTTPTestBase):
             server._device_action = ""
             server._diag_requested = ""
             server._mode_requested = ""
-            server._last_diagnostics = {"text": "", "time": 0.0, "battery": None, "charging": None}
+            server._last_diagnostics = {
+                "text": "",
+                "time": 0.0,
+                "battery": None,
+                "charging": None,
+            }
 
     def test_fleet_overview_empty_registry(self):
         status, headers, body = _http_get(self.port, "/")
@@ -731,7 +794,7 @@ class TestMultiDeviceWebInterface(ServerHTTPTestBase):
     def test_fleet_overview_multi_device_rendering(self):
         registry = server.get_device_registry()
         # Device 1: online, 85% battery, charging, v1.2 / 5.14, resident mode
-        d1 = registry.update_telemetry(
+        registry.update_telemetry(
             client_id="kindle-dev-001",
             remote_ip="192.168.1.101",
             battery=85.0,
@@ -768,7 +831,7 @@ class TestMultiDeviceWebInterface(ServerHTTPTestBase):
         self.assertIn("192.168.1.101", body_text)
         self.assertIn("⚡ 85%", body_text)
         self.assertIn("v1.2 / 5.14.2", body_text)
-        self.assertIn("data-client-id=\"kindle-dev-001\"", body_text)
+        self.assertIn('data-client-id="kindle-dev-001"', body_text)
 
         # Device 2 fields
         self.assertIn("OFFLINE", body_text)
@@ -778,7 +841,7 @@ class TestMultiDeviceWebInterface(ServerHTTPTestBase):
         self.assertNotIn("⚡ 15%", body_text)
         self.assertIn("v1.0 / 5.12.1", body_text)
         self.assertIn("target: oneshot", body_text)
-        self.assertIn("data-client-id=\"kindle-dev-002\"", body_text)
+        self.assertIn('data-client-id="kindle-dev-002"', body_text)
 
         # Controls
         self.assertIn("broadcastActionBtn", body_text)
@@ -811,7 +874,9 @@ class TestMultiDeviceWebInterface(ServerHTTPTestBase):
         self.assertNotIn("<i>italic</i>", body_text)
 
         # Escaped versions MUST be present
-        self.assertIn("&lt;script&gt;alert(&#x27;ip-xss&#x27;)&lt;/script&gt;", body_text)
+        self.assertIn(
+            "&lt;script&gt;alert(&#x27;ip-xss&#x27;)&lt;/script&gt;", body_text
+        )
         self.assertIn("&lt;img src=x onerror=alert(&#x27;fw-xss&#x27;)&gt;", body_text)
 
     def test_existing_dashboard_functionality_operational(self):
@@ -819,7 +884,7 @@ class TestMultiDeviceWebInterface(ServerHTTPTestBase):
         status, _, body = _http_get(self.port, "/")
         self.assertEqual(status, 200)
         self.assertIn(b'<img src="/dashboard.png?view=auto&amp;t=', body)
-        self.assertIn(b"Status: <span style=\"color:#51cf66;\">ACTIVE</span>", body)
+        self.assertIn(b'Status: <span style="color:#51cf66;">ACTIVE</span>', body)
         self.assertIn(b"Auto (AM Citi / PM Bus)", body)
         self.assertIn(b"Morning (Citi Bike Hero)", body)
         self.assertIn(b"Evening (Bus Hero)", body)
@@ -857,8 +922,8 @@ class TestMultiDeviceWebInterface(ServerHTTPTestBase):
 
     def test_per_device_action_and_broadcast_controls_end_to_end(self):
         registry = server.get_device_registry()
-        dev1 = registry.get_or_register("device-alpha")
-        dev2 = registry.get_or_register("device-beta")
+        registry.get_or_register("device-alpha")
+        registry.get_or_register("device-beta")
 
         # 1. Targeted Action to device-alpha
         status, _, body = _http(
@@ -866,7 +931,9 @@ class TestMultiDeviceWebInterface(ServerHTTPTestBase):
             self.port,
             "/action",
             headers=_auth_headers({"Content-Type": "application/json"}),
-            body=json.dumps({"action": "restart", "client_id": "device-alpha"}).encode("utf-8"),
+            body=json.dumps({"action": "restart", "client_id": "device-alpha"}).encode(
+                "utf-8"
+            ),
         )
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["pending"], "restart")
@@ -926,7 +993,9 @@ class TestMultiDeviceWebInterface(ServerHTTPTestBase):
             self.port,
             "/diag/request",
             headers=_auth_headers({"Content-Type": "application/json"}),
-            body=json.dumps({"level": "full", "client_id": "device-beta"}).encode("utf-8"),
+            body=json.dumps({"level": "full", "client_id": "device-beta"}).encode(
+                "utf-8"
+            ),
         )
         self.assertEqual(status, 200)
 
@@ -974,21 +1043,29 @@ class TestMultiDeviceWebInterface(ServerHTTPTestBase):
             self.port,
             "/mode",
             headers=_auth_headers({"Content-Type": "application/json"}),
-            body=json.dumps({"mode": "sleep-suspend", "client_id": "device-alpha"}).encode("utf-8"),
+            body=json.dumps(
+                {"mode": "sleep-suspend", "client_id": "device-alpha"}
+            ).encode("utf-8"),
         )
         self.assertEqual(status, 200)
 
         _s, h_alpha_mode, _ = _http_get(
             self.port,
             "/dashboard.png?mock=1&kindle=pw5",
-            headers={"X-Tracker-Client-ID": "device-alpha", "X-Tracker-Mode": "resident"},
+            headers={
+                "X-Tracker-Client-ID": "device-alpha",
+                "X-Tracker-Mode": "resident",
+            },
         )
         self.assertEqual(h_alpha_mode.get("X-Tracker-Mode"), "sleep-suspend")
 
         _s, h_beta_mode, _ = _http_get(
             self.port,
             "/dashboard.png?mock=1&kindle=pw5",
-            headers={"X-Tracker-Client-ID": "device-beta", "X-Tracker-Mode": "resident"},
+            headers={
+                "X-Tracker-Client-ID": "device-beta",
+                "X-Tracker-Mode": "resident",
+            },
         )
         self.assertNotIn("X-Tracker-Mode", h_beta_mode)
 
@@ -1005,14 +1082,20 @@ class TestMultiDeviceWebInterface(ServerHTTPTestBase):
         _s, h_alpha_mode_bc, _ = _http_get(
             self.port,
             "/dashboard.png?mock=1&kindle=pw5",
-            headers={"X-Tracker-Client-ID": "device-alpha", "X-Tracker-Mode": "resident"},
+            headers={
+                "X-Tracker-Client-ID": "device-alpha",
+                "X-Tracker-Mode": "resident",
+            },
         )
         self.assertEqual(h_alpha_mode_bc.get("X-Tracker-Mode"), "oneshot")
 
         _s, h_beta_mode_bc, _ = _http_get(
             self.port,
             "/dashboard.png?mock=1&kindle=pw5",
-            headers={"X-Tracker-Client-ID": "device-beta", "X-Tracker-Mode": "resident"},
+            headers={
+                "X-Tracker-Client-ID": "device-beta",
+                "X-Tracker-Mode": "resident",
+            },
         )
         self.assertEqual(h_beta_mode_bc.get("X-Tracker-Mode"), "oneshot")
 

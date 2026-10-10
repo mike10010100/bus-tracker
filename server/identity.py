@@ -20,7 +20,8 @@ import json
 import os
 import re
 import stat
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from collections.abc import Mapping
+from typing import Any, Optional
 
 from paths import find_artifact
 
@@ -95,7 +96,7 @@ def build_response_message(
     `<name>=<value>` line per signed header (empty when the header is absent),
     joined by LF with no trailing newline.
     """
-    lower: Dict[str, str] = {}
+    lower: dict[str, str] = {}
     for name, value in headers.items():
         lower[name.lower()] = value
     lines = [
@@ -112,14 +113,16 @@ def build_response_message(
 
 def cert_message(public_key_b64: str, issued_at: int) -> bytes:
     """The §2 certificate message signed by the release key."""
-    return "\n".join([
-        CERT_FORMAT,
-        f"public_key={public_key_b64}",
-        f"issued_at={int(issued_at)}",
-    ]).encode("utf-8")
+    return "\n".join(
+        [
+            CERT_FORMAT,
+            f"public_key={public_key_b64}",
+            f"issued_at={int(issued_at)}",
+        ]
+    ).encode("utf-8")
 
 
-def parse_cert(cert_bytes: bytes) -> Dict[str, Any]:
+def parse_cert(cert_bytes: bytes) -> dict[str, Any]:
     """Parses and structurally validates a server identity certificate."""
     try:
         cert = json.loads(cert_bytes.decode("utf-8"))
@@ -139,10 +142,12 @@ def parse_cert(cert_bytes: bytes) -> Dict[str, Any]:
     return cert
 
 
-def verify_cert(cert: Dict[str, Any], release_public_key_b64: str) -> bool:
+def verify_cert(cert: dict[str, Any], release_public_key_b64: str) -> bool:
     """Verifies a parsed certificate against a release public key."""
     try:
-        pub = Ed25519PublicKey.from_public_bytes(b64decode_strict(release_public_key_b64))
+        pub = Ed25519PublicKey.from_public_bytes(
+            b64decode_strict(release_public_key_b64)
+        )
         pub.verify(
             b64decode_strict(cert["signature"]),
             cert_message(cert["public_key"], cert["issued_at"]),
@@ -177,7 +182,7 @@ class ServerIdentity:
         status: int,
         body: bytes,
         headers: Mapping[str, str],
-    ) -> List[Tuple[str, str]]:
+    ) -> list[tuple[str, str]]:
         """Returns the X-Tracker-Cert / X-Tracker-Auth headers for a response."""
         msg = build_response_message(nonce, path, status, body, headers)
         return [(CERT_HEADER, self.cert_header), (AUTH_HEADER, self.sign(msg))]
@@ -193,7 +198,7 @@ def _resolve(env_name: str, artifact: str) -> Optional[str]:
 def load_identity(
     key_path: Optional[str] = None,
     cert_path: Optional[str] = None,
-) -> Tuple[Optional[ServerIdentity], str]:
+) -> tuple[Optional[ServerIdentity], str]:
     """
     Loads the server identity. Returns (identity, human-readable status).
     identity is None when signing is unavailable; the status explains why.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"net"
 	"net/url"
 	"strings"
@@ -76,10 +77,11 @@ func AdoptableServerURL(raw string) bool {
 }
 
 // VerifySHA256 reports whether dataHasher's digest matches the expected
-// lowercase/uppercase hex string. An empty expected value fails closed.
+// lowercase/uppercase hex string using constant-time comparison to prevent timing attacks.
+// An empty or length-mismatched expected value fails closed.
 func VerifySHA256(actualHex, expectedHex string) bool {
-	if expectedHex == "" {
+	if expectedHex == "" || actualHex == "" || len(actualHex) != len(expectedHex) {
 		return false
 	}
-	return strings.EqualFold(actualHex, expectedHex)
+	return subtle.ConstantTimeCompare([]byte(strings.ToLower(actualHex)), []byte(strings.ToLower(expectedHex))) == 1
 }

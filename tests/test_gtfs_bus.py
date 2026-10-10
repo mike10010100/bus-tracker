@@ -9,7 +9,15 @@ import unittest
 import zipfile
 from unittest.mock import MagicMock, patch
 
-from gtfs_bus import GTFSBusTracker, hms_to_secs, format_eta, format_clock, LIVE_MARK, SCHED_MARK, STATIC_TTL
+from gtfs_bus import (
+    LIVE_MARK,
+    SCHED_MARK,
+    STATIC_TTL,
+    GTFSBusTracker,
+    format_clock,
+    format_eta,
+    hms_to_secs,
+)
 
 
 def make_zip():
@@ -31,9 +39,9 @@ def make_zip():
             "trips.txt",
             "trip_id,route_id,service_id,trip_headsign,direction_id,block_id,shape_id\n"
             "A,126,WEEKDAY,126 NEW YORK,0,,\n"
-            "B,126,WEEKDAY,126 NEW YORK,0,,\n"   # duplicate departure (other service variant)
+            "B,126,WEEKDAY,126 NEW YORK,0,,\n"  # duplicate departure (other service variant)
             "C,126,WEEKEND,126 NEW YORK,0,,\n"
-            "D,999,WEEKDAY,OTHER ROUTE,0,,\n",   # different route, must be ignored
+            "D,999,WEEKDAY,OTHER ROUTE,0,,\n",  # different route, must be ignored
         )
         z.writestr(
             "stop_times.txt",
@@ -82,11 +90,12 @@ class TestParsingHelpers(unittest.TestCase):
         self.assertEqual(eta_minutes(past), 0)
 
 
-
 class TestBuildIndex(unittest.TestCase):
     def test_index_contents(self):
         t = build_tracker()
-        self.assertEqual(set(t._index["trips"].keys()), {"A", "B", "C"})  # route 126 only
+        self.assertEqual(
+            set(t._index["trips"].keys()), {"A", "B", "C"}
+        )  # route 126 only
         self.assertEqual(len(t._index["deps"]["20512"]), 3)  # A, B, C (not D)
         self.assertGreater(len(t._index["services"]), 0)
         self.assertEqual(t._index["valid_until"], "20301231")
@@ -140,7 +149,6 @@ class TestBuildIndex(unittest.TestCase):
         self.assertIn("A", idx["trips"])
 
 
-
 class TestGetUpcoming(unittest.TestCase):
     def test_static_only_with_dedup_and_window(self):
         t = build_tracker()
@@ -157,19 +165,25 @@ class TestGetUpcoming(unittest.TestCase):
         now = datetime.datetime(2026, 10, 12, 6, 0)  # 08:00 is 2h away -> in window
         self.assertEqual(len(t.get_upcoming("20512", allow_realtime=False, now=now)), 1)
         now2 = datetime.datetime(2026, 10, 12, 4, 0)  # 08:00 is 4h away -> out
-        self.assertEqual(len(t.get_upcoming("20512", allow_realtime=False, now=now2)), 0)
+        self.assertEqual(
+            len(t.get_upcoming("20512", allow_realtime=False, now=now2)), 0
+        )
 
     def test_realtime_overrides_schedule_and_marks_live(self):
         t = build_tracker()
         now = datetime.datetime(2026, 10, 12, 7, 30)
         base = datetime.datetime(2026, 10, 12, 8, 0).timestamp()
         # A predicts 10 minutes late; B has no realtime, but A should win the dedup.
-        t.fetch_realtime = MagicMock(return_value={
-            "A": {"20512": {"time": base + 600, "delay": 600, "vehicle_id": "v9"}},
-        })
-        t.fetch_occupancy = MagicMock(return_value={
-            "A": {"occupancy": "FEW_SEATS_AVAILABLE", "vehicle_id": "v9"},
-        })
+        t.fetch_realtime = MagicMock(
+            return_value={
+                "A": {"20512": {"time": base + 600, "delay": 600, "vehicle_id": "v9"}},
+            }
+        )
+        t.fetch_occupancy = MagicMock(
+            return_value={
+                "A": {"occupancy": "FEW_SEATS_AVAILABLE", "vehicle_id": "v9"},
+            }
+        )
         out = t.get_upcoming("20512", limit=5, allow_realtime=True, now=now)
         self.assertEqual(len(out), 1)
         self.assertTrue(out[0]["live"])
@@ -220,8 +234,11 @@ class TestFetchOccupancy(unittest.TestCase):
         e2.vehicle.vehicle.id = "v2"
         e2.vehicle.occupancy_status = 1
         t.get_token = MagicMock(return_value="tok")
-        t.session.get = MagicMock(return_value=MagicMock(
-            raise_for_status=MagicMock(), content=fm.SerializeToString()))
+        t.session.get = MagicMock(
+            return_value=MagicMock(
+                raise_for_status=MagicMock(), content=fm.SerializeToString()
+            )
+        )
 
         out = t.fetch_occupancy()
         self.assertEqual(out["A"]["occupancy"], "FEW_SEATS_AVAILABLE")
@@ -244,36 +261,50 @@ class TestFetchOccupancy(unittest.TestCase):
         e.vehicle.trip.trip_id = "A"
         e.vehicle.occupancy_status = 7  # NO_DATA_AVAILABLE
         t.get_token = MagicMock(return_value="tok")
-        t.session.get = MagicMock(return_value=MagicMock(
-            raise_for_status=MagicMock(), content=fm.SerializeToString()))
+        t.session.get = MagicMock(
+            return_value=MagicMock(
+                raise_for_status=MagicMock(), content=fm.SerializeToString()
+            )
+        )
         self.assertIsNone(t.fetch_occupancy()["A"]["occupancy"])
 
 
 class TestAuth(unittest.TestCase):
     def test_missing_credentials_raises(self):
-        with patch.dict("os.environ", {
-            "NJT_USERNAME": "", "NJT_PASSWORD": "",
-            "NJT_API_USERNAME": "", "NJT_API_PASSWORD": "",
-        }):
+        with patch.dict(
+            "os.environ",
+            {
+                "NJT_USERNAME": "",
+                "NJT_PASSWORD": "",
+                "NJT_API_USERNAME": "",
+                "NJT_API_PASSWORD": "",
+            },
+        ):
             t = GTFSBusTracker(username="", password="", route="126", stops=["20512"])
             with self.assertRaises(ValueError):
                 t.get_token()
 
     def test_auth_mints_token(self):
         t = GTFSBusTracker(username="u", password="p", route="126", stops=["20512"])
-        t.session.post = MagicMock(return_value=MagicMock(
-            raise_for_status=MagicMock(),
-            json=MagicMock(return_value={"Authenticated": "True", "UserToken": "tok"}),
-        ))
+        t.session.post = MagicMock(
+            return_value=MagicMock(
+                raise_for_status=MagicMock(),
+                json=MagicMock(
+                    return_value={"Authenticated": "True", "UserToken": "tok"}
+                ),
+            )
+        )
         self.assertEqual(t.get_token(), "tok")
         self.assertGreater(t.token_expiry, 0)
 
     def test_failed_auth_raises(self):
         t = GTFSBusTracker(username="u", password="p", route="126", stops=["20512"])
-        t.session.post = MagicMock(return_value=MagicMock(
-            raise_for_status=MagicMock(),
-            json=MagicMock(return_value={"Authenticated": "False"}),
-        ))
+        t.session.post = MagicMock(
+            return_value=MagicMock(
+                raise_for_status=MagicMock(),
+                json=MagicMock(return_value={"Authenticated": "False"}),
+            )
+        )
         with self.assertRaises(RuntimeError):
             t.get_token()
 
@@ -284,11 +315,19 @@ class TestAuth(unittest.TestCase):
         self.assertEqual(t.get_token(), "cached_token_xyz")
 
     def test_url_and_path_properties(self):
-        t = GTFSBusTracker(base_url="https://api.example.com", cache_dir="/var/cache/gtfs")
-        self.assertEqual(t.auth_url, "https://api.example.com/api/GTFSG2/authenticateUser")
+        t = GTFSBusTracker(
+            base_url="https://api.example.com", cache_dir="/var/cache/gtfs"
+        )
+        self.assertEqual(
+            t.auth_url, "https://api.example.com/api/GTFSG2/authenticateUser"
+        )
         self.assertEqual(t.static_url, "https://api.example.com/api/GTFSG2/getGTFS")
-        self.assertEqual(t.trips_url, "https://api.example.com/api/GTFSG2/getTripUpdates")
-        self.assertEqual(t.vehicles_url, "https://api.example.com/api/GTFSG2/getVehiclePositions")
+        self.assertEqual(
+            t.trips_url, "https://api.example.com/api/GTFSG2/getTripUpdates"
+        )
+        self.assertEqual(
+            t.vehicles_url, "https://api.example.com/api/GTFSG2/getVehiclePositions"
+        )
         self.assertEqual(t._index_path, "/var/cache/gtfs/gtfs_index.json")
 
 
@@ -297,17 +336,29 @@ class TestIndexCachingAndLifecycle(unittest.TestCase):
         t = GTFSBusTracker(route="126", stops=["20512"])
         self.assertFalse(t._index_is_fresh({}))
         self.assertFalse(t._index_is_fresh({"route": "other"}))
-        self.assertFalse(t._index_is_fresh({"route": "126", "built_at": time.time() - STATIC_TTL - 10}))
-        self.assertFalse(t._index_is_fresh({
-            "route": "126",
-            "built_at": time.time(),
-            "valid_until": "20200101",
-        }))
-        self.assertTrue(t._index_is_fresh({
-            "route": "126",
-            "built_at": time.time(),
-            "valid_until": "20351231",
-        }))
+        self.assertFalse(
+            t._index_is_fresh(
+                {"route": "126", "built_at": time.time() - STATIC_TTL - 10}
+            )
+        )
+        self.assertFalse(
+            t._index_is_fresh(
+                {
+                    "route": "126",
+                    "built_at": time.time(),
+                    "valid_until": "20200101",
+                }
+            )
+        )
+        self.assertTrue(
+            t._index_is_fresh(
+                {
+                    "route": "126",
+                    "built_at": time.time(),
+                    "valid_until": "20351231",
+                }
+            )
+        )
 
     def test_load_and_save_cached_index(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -327,7 +378,9 @@ class TestIndexCachingAndLifecycle(unittest.TestCase):
                 f.write("not-json")
             self.assertIsNone(t._load_cached_index())
 
-            bad_tracker = GTFSBusTracker(route="126", stops=["20512"], cache_dir="/dev/null/notdir")
+            bad_tracker = GTFSBusTracker(
+                route="126", stops=["20512"], cache_dir="/dev/null/notdir"
+            )
             bad_tracker._save_index(idx)
 
     def test_ensure_index_branches(self):
@@ -348,19 +401,29 @@ class TestIndexCachingAndLifecycle(unittest.TestCase):
             self.assertEqual(t.ensure_index(), idx)
             self.assertEqual(t._index, idx)
 
-            t2 = GTFSBusTracker(route="126", stops=["20512"], cache_dir=os.path.join(tmpdir, "new_cache"))
+            t2 = GTFSBusTracker(
+                route="126",
+                stops=["20512"],
+                cache_dir=os.path.join(tmpdir, "new_cache"),
+            )
             t2.get_token = MagicMock(return_value="tok")
             zip_bytes = make_zip()
-            t2.session.get = MagicMock(return_value=MagicMock(
-                raise_for_status=MagicMock(),
-                content=zip_bytes,
-            ))
+            t2.session.get = MagicMock(
+                return_value=MagicMock(
+                    raise_for_status=MagicMock(),
+                    content=zip_bytes,
+                )
+            )
             res = t2.ensure_index()
             self.assertIsNotNone(res)
             self.assertEqual(res["route"], "126")
             self.assertIn("A", res["trips"])
 
-            t3 = GTFSBusTracker(route="126", stops=["20512"], cache_dir=os.path.join(tmpdir, "err_cache"))
+            t3 = GTFSBusTracker(
+                route="126",
+                stops=["20512"],
+                cache_dir=os.path.join(tmpdir, "err_cache"),
+            )
             t3.get_token = MagicMock(side_effect=Exception("network error"))
             self.assertIsNone(t3.ensure_index())
 
@@ -368,6 +431,7 @@ class TestIndexCachingAndLifecycle(unittest.TestCase):
 class TestRealtimeFetching(unittest.TestCase):
     def test_fetch_realtime_full_protobuf(self):
         from google.transit import gtfs_realtime_pb2
+
         t = build_tracker()  # known trips A, B, C; stops 20512
         fm = gtfs_realtime_pb2.FeedMessage()
         fm.header.gtfs_realtime_version = "2.0"
@@ -405,16 +469,22 @@ class TestRealtimeFetching(unittest.TestCase):
         stu_arr.arrival.delay = 60
 
         t.get_token = MagicMock(return_value="tok")
-        t.session.get = MagicMock(return_value=MagicMock(
-            raise_for_status=MagicMock(),
-            content=fm.SerializeToString(),
-        ))
+        t.session.get = MagicMock(
+            return_value=MagicMock(
+                raise_for_status=MagicMock(),
+                content=fm.SerializeToString(),
+            )
+        )
 
         res = t.fetch_realtime()
         self.assertIn("A", res)
-        self.assertEqual(res["A"]["20512"], {"time": 1700000000, "delay": 120, "vehicle_id": "v1"})
+        self.assertEqual(
+            res["A"]["20512"], {"time": 1700000000, "delay": 120, "vehicle_id": "v1"}
+        )
         self.assertIn("B", res)
-        self.assertEqual(res["B"]["20512"], {"time": 1700000500, "delay": 60, "vehicle_id": None})
+        self.assertEqual(
+            res["B"]["20512"], {"time": 1700000500, "delay": 60, "vehicle_id": None}
+        )
         self.assertNotIn("UNKNOWN_TRIP", res)
 
     def test_fetch_realtime_disabled_and_error(self):
@@ -427,6 +497,7 @@ class TestRealtimeFetching(unittest.TestCase):
 
     def test_fetch_occupancy_disabled_and_no_vehicle(self):
         from google.transit import gtfs_realtime_pb2
+
         t = build_tracker()
         with patch("gtfs_bus._REALTIME_AVAILABLE", False):
             self.assertEqual(t.fetch_occupancy(), {})
@@ -437,10 +508,12 @@ class TestRealtimeFetching(unittest.TestCase):
         e.id = "e0"
         # No vehicle field
         t.get_token = MagicMock(return_value="tok")
-        t.session.get = MagicMock(return_value=MagicMock(
-            raise_for_status=MagicMock(),
-            content=fm.SerializeToString(),
-        ))
+        t.session.get = MagicMock(
+            return_value=MagicMock(
+                raise_for_status=MagicMock(),
+                content=fm.SerializeToString(),
+            )
+        )
         self.assertEqual(t.fetch_occupancy(), {})
 
     def test_get_upcoming_in_memory_realtime_cache(self):
@@ -449,14 +522,13 @@ class TestRealtimeFetching(unittest.TestCase):
         t.fetch_realtime = MagicMock(return_value={})
         t.fetch_occupancy = MagicMock(return_value={})
 
-        out1 = t.get_upcoming("20512", allow_realtime=True, now=now)
+        t.get_upcoming("20512", allow_realtime=True, now=now)
         self.assertEqual(t.fetch_realtime.call_count, 1)
 
-        out2 = t.get_upcoming("20512", allow_realtime=True, now=now)
+        t.get_upcoming("20512", allow_realtime=True, now=now)
         # Second call within 15s must reuse cache
         self.assertEqual(t.fetch_realtime.call_count, 1)
 
 
 if __name__ == "__main__":
     unittest.main()
-

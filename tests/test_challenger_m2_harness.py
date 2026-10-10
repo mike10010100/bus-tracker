@@ -4,32 +4,30 @@ Tests auto-registration, state isolation, broadcast, diagnostics/log persistence
 304 Not Modified delivery, concurrent multi-device safety, and edge-case sanitization.
 """
 
-from collections import deque
 import concurrent.futures
 import json
 import os
 import shutil
 import tempfile
 import threading
-import time
 import unittest
-import urllib.request
 import urllib.error
+import urllib.request
 from http.server import ThreadingHTTPServer
 
-import server
-from server import DashboardHandler
-import device_registry
 from device_registry import (
-    DeviceRecord,
-    DeviceRegistry,
     get_device_registry,
     reset_device_registry,
     sanitize_client_id,
 )
 
+import server
+from server import DashboardHandler
 
-def _http_req(method: str, port: int, path: str, headers: dict = None, body: bytes = None):
+
+def _http_req(
+    method: str, port: int, path: str, headers: dict = None, body: bytes = None
+):
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}",
         data=body,
@@ -44,7 +42,10 @@ def _http_req(method: str, port: int, path: str, headers: dict = None, body: byt
 
 
 def _auth_headers(extra: dict = None):
-    tok = getattr(server, "CONTROL_TOKEN", "test-token-challenger") or "test-token-challenger"
+    tok = (
+        getattr(server, "CONTROL_TOKEN", "test-token-challenger")
+        or "test-token-challenger"
+    )
     hdrs = {"X-Tracker-Token": tok}
     if extra:
         hdrs.update(extra)
@@ -62,7 +63,9 @@ class ChallengerM2StressHarness(unittest.TestCase):
 
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), DashboardHandler)
         cls.port = cls.httpd.server_address[1]
-        cls.server_thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.server_thread = threading.Thread(
+            target=cls.httpd.serve_forever, daemon=True
+        )
         cls.server_thread.start()
 
     @classmethod
@@ -85,7 +88,12 @@ class ChallengerM2StressHarness(unittest.TestCase):
             server._device_action = ""
             server._diag_requested = ""
             server._mode_requested = ""
-            server._last_diagnostics = {"text": "", "time": 0.0, "battery": None, "charging": None}
+            server._last_diagnostics = {
+                "text": "",
+                "time": 0.0,
+                "battery": None,
+                "charging": None,
+            }
 
     # --------------------------------------------------------------------------
     # 1. AUTO-REGISTRATION EMPIRICAL VERIFICATION
@@ -219,8 +227,18 @@ class ChallengerM2StressHarness(unittest.TestCase):
     def test_per_device_action_queue_isolation(self):
         """Action queued for devA must NOT be popped by devB, and devA pop must not affect devB."""
         # Register devA and devB
-        _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "devA"})
-        _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "devB"})
+        _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "devA"},
+        )
+        _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "devB"},
+        )
 
         # Queue action specifically for devA
         _http_req(
@@ -232,24 +250,49 @@ class ChallengerM2StressHarness(unittest.TestCase):
         )
 
         # Poll devB -> must NOT receive reboot
-        s_b, h_b, _ = _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "devB"})
+        s_b, h_b, _ = _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "devB"},
+        )
         self.assertEqual(s_b, 200)
         self.assertNotIn("X-Tracker-Action", h_b)
 
         # Poll devA -> must receive reboot
-        s_a, h_a, _ = _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "devA"})
+        s_a, h_a, _ = _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "devA"},
+        )
         self.assertEqual(s_a, 200)
         self.assertEqual(h_a.get("X-Tracker-Action"), "reboot")
 
         # Second poll devA -> queue must be empty
-        s_a2, h_a2, _ = _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "devA"})
+        s_a2, h_a2, _ = _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "devA"},
+        )
         self.assertEqual(s_a2, 200)
         self.assertNotIn("X-Tracker-Action", h_a2)
 
     def test_per_device_diag_request_isolation(self):
         """Diag request queued for devB must NOT be popped by devA."""
-        _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "devA"})
-        _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "devB"})
+        _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "devA"},
+        )
+        _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "devB"},
+        )
 
         _http_req(
             "POST",
@@ -260,21 +303,46 @@ class ChallengerM2StressHarness(unittest.TestCase):
         )
 
         # devA polls: must NOT receive diag request
-        _, h_a, _ = _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "devA"})
+        _, h_a, _ = _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "devA"},
+        )
         self.assertNotIn("X-Tracker-Diag", h_a)
 
         # devB polls: must receive diag request
-        _, h_b, _ = _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "devB"})
+        _, h_b, _ = _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "devB"},
+        )
         self.assertEqual(h_b.get("X-Tracker-Diag"), "full")
 
         # devB second poll: must be cleared
-        _, h_b2, _ = _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "devB"})
+        _, h_b2, _ = _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "devB"},
+        )
         self.assertNotIn("X-Tracker-Diag", h_b2)
 
     def test_per_device_mode_isolation(self):
         """Mode set for devC must NOT be sent to devA or devB."""
-        _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "devA", "X-Tracker-Mode": "resident"})
-        _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "devC", "X-Tracker-Mode": "resident"})
+        _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "devA", "X-Tracker-Mode": "resident"},
+        )
+        _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "devC", "X-Tracker-Mode": "resident"},
+        )
 
         _http_req(
             "POST",
@@ -285,11 +353,21 @@ class ChallengerM2StressHarness(unittest.TestCase):
         )
 
         # devA polls with resident: must NOT receive sleep mode header
-        _, h_a, _ = _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "devA", "X-Tracker-Mode": "resident"})
+        _, h_a, _ = _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "devA", "X-Tracker-Mode": "resident"},
+        )
         self.assertNotIn("X-Tracker-Mode", h_a)
 
         # devC polls with resident: must receive sleep mode header
-        _, h_c, _ = _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "devC", "X-Tracker-Mode": "resident"})
+        _, h_c, _ = _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "devC", "X-Tracker-Mode": "resident"},
+        )
         self.assertEqual(h_c.get("X-Tracker-Mode"), "sleep")
 
     # --------------------------------------------------------------------------
@@ -297,9 +375,24 @@ class ChallengerM2StressHarness(unittest.TestCase):
     # --------------------------------------------------------------------------
     def test_broadcast_action_independent_consumption(self):
         """Broadcast action enqueues to all registered devices; one popping does not starve another."""
-        _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "bc-dev1"})
-        _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "bc-dev2"})
-        _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "bc-dev3"})
+        _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "bc-dev1"},
+        )
+        _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "bc-dev2"},
+        )
+        _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "bc-dev3"},
+        )
 
         _http_req(
             "POST",
@@ -310,25 +403,55 @@ class ChallengerM2StressHarness(unittest.TestCase):
         )
 
         # dev1 pops
-        _, h1, _ = _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "bc-dev1"})
+        _, h1, _ = _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "bc-dev1"},
+        )
         self.assertEqual(h1.get("X-Tracker-Action"), "update")
 
         # dev1 second poll is cleared
-        _, h1_2, _ = _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "bc-dev1"})
+        _, h1_2, _ = _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "bc-dev1"},
+        )
         self.assertNotIn("X-Tracker-Action", h1_2)
 
         # dev2 still has its action!
-        _, h2, _ = _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "bc-dev2"})
+        _, h2, _ = _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "bc-dev2"},
+        )
         self.assertEqual(h2.get("X-Tracker-Action"), "update")
 
         # dev3 still has its action!
-        _, h3, _ = _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "bc-dev3"})
+        _, h3, _ = _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "bc-dev3"},
+        )
         self.assertEqual(h3.get("X-Tracker-Action"), "update")
 
     def test_broadcast_diag_independent_consumption(self):
         """Broadcast diag request enqueues to all registered devices independently."""
-        _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "bc-d1"})
-        _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "bc-d2"})
+        _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "bc-d1"},
+        )
+        _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "bc-d2"},
+        )
 
         _http_req(
             "POST",
@@ -338,10 +461,20 @@ class ChallengerM2StressHarness(unittest.TestCase):
             body=b'{"mode": "full", "client_id": "all"}',
         )
 
-        _, hd1, _ = _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "bc-d1"})
+        _, hd1, _ = _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "bc-d1"},
+        )
         self.assertEqual(hd1.get("X-Tracker-Diag"), "full")
 
-        _, hd2, _ = _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "bc-d2"})
+        _, hd2, _ = _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "bc-d2"},
+        )
         self.assertEqual(hd2.get("X-Tracker-Diag"), "full")
 
     # --------------------------------------------------------------------------
@@ -376,9 +509,9 @@ class ChallengerM2StressHarness(unittest.TestCase):
         self.assertTrue(os.path.isfile(p1), f"Expected diagnostics file at {p1}")
         self.assertTrue(os.path.isfile(p2), f"Expected diagnostics file at {p2}")
 
-        with open(p1, "r", encoding="utf-8") as f:
+        with open(p1, encoding="utf-8") as f:
             c1 = f.read()
-        with open(p2, "r", encoding="utf-8") as f:
+        with open(p2, encoding="utf-8") as f:
             c2 = f.read()
 
         self.assertEqual(c1, diag_content_1)
@@ -438,9 +571,9 @@ class ChallengerM2StressHarness(unittest.TestCase):
         pA = os.path.join(cache_dir, "devices", "log-dev-A", "client.log")
         pB = os.path.join(cache_dir, "devices", "log-dev-B", "client.log")
 
-        with open(pA, "r", encoding="utf-8") as f:
+        with open(pA, encoding="utf-8") as f:
             contentA = f.read()
-        with open(pB, "r", encoding="utf-8") as f:
+        with open(pB, encoding="utf-8") as f:
             contentB = f.read()
 
         self.assertEqual(contentA, "line A1\nline A2\n")
@@ -452,7 +585,12 @@ class ChallengerM2StressHarness(unittest.TestCase):
     def test_304_delivers_and_pops_headers_for_specific_device(self):
         """When a device polls with matching ETag (304), action and diag headers are delivered and popped."""
         # 1. First poll to obtain ETag
-        s1, h1, _ = _http_req("GET", self.port, "/dashboard.png?mock=1", headers={"X-Tracker-Client-ID": "etag-dev"})
+        s1, h1, _ = _http_req(
+            "GET",
+            self.port,
+            "/dashboard.png?mock=1",
+            headers={"X-Tracker-Client-ID": "etag-dev"},
+        )
         self.assertEqual(s1, 200)
         etag = h1.get("ETag")
         self.assertTrue(etag, "ETag must be present in response")
@@ -512,7 +650,9 @@ class ChallengerM2StressHarness(unittest.TestCase):
         self.assertIn("tmpmalicious_escape", reg._devices)
 
         # File must be inside cache_dir/devices/tmpmalicious_escape, NOT in /tmp/malicious_escape
-        expected_path = os.path.join(cache_dir, "devices", "tmpmalicious_escape", "client.log")
+        expected_path = os.path.join(
+            cache_dir, "devices", "tmpmalicious_escape", "client.log"
+        )
         self.assertTrue(os.path.isfile(expected_path))
         self.assertFalse(os.path.exists("/tmp/malicious_escape"))
 
@@ -579,7 +719,7 @@ class ChallengerM2StressHarness(unittest.TestCase):
                     self.port,
                     "/log",
                     headers={"X-Tracker-Client-ID": cid},
-                    body=f"log message 1 from {cid}\nlog message 2 from {cid}\n".encode("utf-8"),
+                    body=f"log message 1 from {cid}\nlog message 2 from {cid}\n".encode(),
                 )
                 if s_log != 200:
                     errors.append(f"Client {cid} log post failed with {s_log}")
@@ -590,7 +730,7 @@ class ChallengerM2StressHarness(unittest.TestCase):
                     self.port,
                     "/diag",
                     headers={"X-Tracker-Client-ID": cid},
-                    body=f"battery_level={50 + device_idx} charging={device_idx % 2}\ndiag dump for {cid}\n".encode("utf-8"),
+                    body=f"battery_level={50 + device_idx} charging={device_idx % 2}\ndiag dump for {cid}\n".encode(),
                 )
                 if s_diag != 200:
                     errors.append(f"Client {cid} diag post failed with {s_diag}")
@@ -601,7 +741,9 @@ class ChallengerM2StressHarness(unittest.TestCase):
                     self.port,
                     "/action",
                     headers=_auth_headers({"Content-Type": "application/json"}),
-                    body=json.dumps({"action": f"act-{cid}", "client_id": cid}).encode("utf-8"),
+                    body=json.dumps({"action": f"act-{cid}", "client_id": cid}).encode(
+                        "utf-8"
+                    ),
                 )
                 if s_act != 200:
                     errors.append(f"Client {cid} action post failed with {s_act}")
@@ -616,7 +758,9 @@ class ChallengerM2StressHarness(unittest.TestCase):
                 if s_poll2 != 200:
                     errors.append(f"Client {cid} poll 2 failed with {s_poll2}")
                 if h_poll2.get("X-Tracker-Action") != f"act-{cid}":
-                    errors.append(f"Client {cid} expected act-{cid}, got {h_poll2.get('X-Tracker-Action')}")
+                    errors.append(
+                        f"Client {cid} expected act-{cid}, got {h_poll2.get('X-Tracker-Action')}"
+                    )
 
             except Exception as e:
                 errors.append(f"Client {cid} exception: {e}")

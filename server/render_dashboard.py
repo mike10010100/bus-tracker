@@ -1,35 +1,57 @@
 import os
-import re
 import sys
-import time
 from datetime import datetime
-from typing import Dict, List, Any, Optional
-from PIL import Image, ImageDraw, ImageFont
+from typing import Any, Optional
 
 from bus_tracker import NJTransitBusTracker, normalize_arrival
-from citibike import CitiBikeTracker
-
 from canvas import (
-    WIDTH,
     HEIGHT,
-    ScaledDraw,
-    STOPS,
-    get_font,
-    STATUS_OK,
     STATUS_EMPTY,
     STATUS_ERROR,
-    empty_state_message,
-    parse_minutes,
-    draw_header_badge,
-    ellipsize_to_width,
-    mock_badge_width,
-    draw_mock_badge,
+    STATUS_OK,
+    STOPS,
+    WIDTH,
+    ScaledDraw,
     draw_battery_indicator,
     draw_bottom_button_bar,
+    draw_header_badge,
+    draw_mock_badge,
     draw_status_strip,
+    ellipsize_to_width,
+    empty_state_message,
+    get_font,
+    mock_badge_width,
+    parse_minutes,
 )
-from morning_view import render_morning_view
+from citibike import CitiBikeTracker
 from evening_view import render_evening_view
+from morning_view import render_morning_view
+from PIL import Image, ImageDraw, ImageFont
+
+__all__ = [
+    "HEIGHT",
+    "ImageFont",
+    "STATUS_EMPTY",
+    "STATUS_ERROR",
+    "STATUS_OK",
+    "STOPS",
+    "WIDTH",
+    "ScaledDraw",
+    "os",
+    "draw_battery_indicator",
+    "draw_bottom_button_bar",
+    "draw_header_badge",
+    "draw_mock_badge",
+    "draw_status_strip",
+    "ellipsize_to_width",
+    "empty_state_message",
+    "get_font",
+    "get_mock_data",
+    "mock_badge_width",
+    "parse_minutes",
+    "render_dashboard",
+    "resolve_view",
+]
 
 
 def resolve_view(view: str = "auto", hour: Optional[int] = None) -> str:
@@ -53,14 +75,14 @@ def resolve_view(view: str = "auto", hour: Optional[int] = None) -> str:
 
 
 def render_dashboard(
-    stops_data: Dict[str, List[Dict[str, Any]]],
-    citibike_data: Optional[List[Dict[str, Any]]] = None,
-    output_path: str = "dashboard.png",
+    stops_data: dict[str, list[dict[str, Any]]],
+    citibike_data: Any = None,
+    output_path: Any = "dashboard.png",
     view: str = "auto",
     is_mock: bool = False,
     batt_level: Optional[int] = None,
     is_charging: bool = False,
-    stop_status: Optional[Dict[str, str]] = None,
+    stop_status: Optional[dict[str, str]] = None,
     width: int = WIDTH,
     height: int = HEIGHT,
     scale: float = 1.0,
@@ -88,7 +110,9 @@ def render_dashboard(
     if citibike_data is None:
         try:
             tracker = CitiBikeTracker()
-            citibike_data = tracker.get_mock_data() if is_mock else tracker.get_station_status()
+            citibike_data = (
+                tracker.get_mock_data() if is_mock else tracker.get_station_status()
+            )
         except Exception:
             citibike_data = []
 
@@ -134,7 +158,9 @@ def render_dashboard(
         draw_status_strip(draw, width, height, note=status_note)
 
     img.save(output_path, "PNG")
-    print(f"✓ Dashboard image successfully rendered [{active_view.upper()} VIEW]: {output_path} ({native_w}x{native_h}, scale={scale:g})")
+    print(
+        f"✓ Dashboard image successfully rendered [{active_view.upper()} VIEW]: {output_path} ({native_w}x{native_h}, scale={scale:g})"
+    )
     return output_path
 
 
@@ -204,4 +230,10 @@ if __name__ == "__main__":
             stops_data[sid] = [normalize_arrival(t) for t in trips]
             stop_status[sid] = status
 
-    render_dashboard(stops_data, output_path="dashboard.png", view=view_arg, is_mock=use_mock, stop_status=stop_status)
+    render_dashboard(
+        stops_data,
+        output_path="dashboard.png",
+        view=view_arg,
+        is_mock=use_mock,
+        stop_status=stop_status,
+    )

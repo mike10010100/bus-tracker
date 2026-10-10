@@ -4,7 +4,7 @@ canonical Arrival normalization, and the status-aware fetch API.
 """
 
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from bus_tracker import NJTransitBusTracker, normalize_arrival
 
@@ -27,14 +27,16 @@ class FakeResponse:
 
 class TestNormalizeArrival(unittest.TestCase):
     def test_status_and_time(self):
-        rec = normalize_arrival({
-            "departurestatus": "  in 5 mins ",
-            "departuretime": " 8:35 AM ",
-            "public_route": "126",
-            "header": " 126 NEW YORK ",
-            "passload": "SEATS_AVAILABLE",
-            "vehicle_id": "25248",
-        })
+        rec = normalize_arrival(
+            {
+                "departurestatus": "  in 5 mins ",
+                "departuretime": " 8:35 AM ",
+                "public_route": "126",
+                "header": " 126 NEW YORK ",
+                "passload": "SEATS_AVAILABLE",
+                "vehicle_id": "25248",
+            }
+        )
         self.assertEqual(rec["eta"], "in 5 mins (8:35 AM)")
         self.assertEqual(rec["route"], "126")
         self.assertEqual(rec["destination"], "126 NEW YORK")
@@ -42,10 +44,14 @@ class TestNormalizeArrival(unittest.TestCase):
         self.assertEqual(rec["vehicle_id"], "25248")
 
     def test_status_only(self):
-        self.assertEqual(normalize_arrival({"departurestatus": "APPROACHING"})["eta"], "APPROACHING")
+        self.assertEqual(
+            normalize_arrival({"departurestatus": "APPROACHING"})["eta"], "APPROACHING"
+        )
 
     def test_time_only(self):
-        self.assertEqual(normalize_arrival({"departuretime": "8:35 AM"})["eta"], "8:35 AM")
+        self.assertEqual(
+            normalize_arrival({"departuretime": "8:35 AM"})["eta"], "8:35 AM"
+        )
 
     def test_neither_defaults_to_scheduled(self):
         rec = normalize_arrival({})
@@ -65,7 +71,9 @@ class TestInitAndURLs(unittest.TestCase):
         self.assertEqual(t.username, "jdoe")
 
     def test_env_fallback(self):
-        with patch.dict("os.environ", {"NJT_USERNAME": "envuser", "NJT_PASSWORD": "envpw"}):
+        with patch.dict(
+            "os.environ", {"NJT_USERNAME": "envuser", "NJT_PASSWORD": "envpw"}
+        ):
             t = NJTransitBusTracker()
             self.assertEqual(t.username, "envuser")
             self.assertEqual(t.password, "envpw")
@@ -82,23 +90,32 @@ class TestInitAndURLs(unittest.TestCase):
 
 class TestGetToken(unittest.TestCase):
     def test_missing_credentials_raises_value_error(self):
-        with patch.dict("os.environ", {
-            "NJT_USERNAME": "", "NJT_PASSWORD": "",
-            "NJT_API_USERNAME": "", "NJT_API_PASSWORD": "",
-        }):
+        with patch.dict(
+            "os.environ",
+            {
+                "NJT_USERNAME": "",
+                "NJT_PASSWORD": "",
+                "NJT_API_USERNAME": "",
+                "NJT_API_PASSWORD": "",
+            },
+        ):
             t = NJTransitBusTracker(username="", password="")
             with self.assertRaises(ValueError):
                 t.get_token()
 
     def test_successful_auth_mints_token(self):
         t = NJTransitBusTracker(username="u", password="p")
-        t.session.post = MagicMock(return_value=FakeResponse({"Authenticated": "true", "UserToken": "tok123"}))
+        t.session.post = MagicMock(
+            return_value=FakeResponse({"Authenticated": "true", "UserToken": "tok123"})
+        )
         self.assertEqual(t.get_token(), "tok123")
         self.assertGreater(t.token_expiry, 0)
 
     def test_failed_auth_raises_runtime_error(self):
         t = NJTransitBusTracker(username="u", password="p")
-        t.session.post = MagicMock(return_value=FakeResponse({"Authenticated": "false"}))
+        t.session.post = MagicMock(
+            return_value=FakeResponse({"Authenticated": "false"})
+        )
         with self.assertRaises(RuntimeError):
             t.get_token()
 
@@ -113,11 +130,21 @@ class TestGetToken(unittest.TestCase):
 class TestGraphQL(unittest.TestCase):
     def test_parses_and_filters_by_route(self):
         t = NJTransitBusTracker(base_url="http://example.com")
-        payload = {"data": {"getBusArrivalsByStopID": [
-            {"publicRoute": "126", "header": "126 NEW YORK", "vehicleId": "111", "passload": "EMPTY",
-             "departuretime": "8:35 AM", "departurestatus": "in 5 mins"},
-            {"publicRoute": "22", "header": "22 OTHER", "vehicleId": "222"},
-        ]}}
+        payload = {
+            "data": {
+                "getBusArrivalsByStopID": [
+                    {
+                        "publicRoute": "126",
+                        "header": "126 NEW YORK",
+                        "vehicleId": "111",
+                        "passload": "EMPTY",
+                        "departuretime": "8:35 AM",
+                        "departurestatus": "in 5 mins",
+                    },
+                    {"publicRoute": "22", "header": "22 OTHER", "vehicleId": "222"},
+                ]
+            }
+        }
         t.session.post = MagicMock(return_value=FakeResponse(payload))
         trips = t.get_arrivals_graphql(stop_id="20512", route="126")
         self.assertEqual(len(trips), 1)
@@ -135,7 +162,9 @@ class TestGetArrivalsWithStatus(unittest.TestCase):
         t = NJTransitBusTracker(username="u", password="p")
         t.token = "tok"
         t.token_expiry = 9_999_999_999
-        t.session.post = MagicMock(return_value=FakeResponse({"DVTrip": [{"public_route": "126"}]}))
+        t.session.post = MagicMock(
+            return_value=FakeResponse({"DVTrip": [{"public_route": "126"}]})
+        )
         status, trips = t.get_arrivals_with_status("20512")
         self.assertEqual(status, NJTransitBusTracker.STATUS_OK)
         self.assertEqual(len(trips), 1)
@@ -155,8 +184,11 @@ class TestGetArrivalsWithStatus(unittest.TestCase):
         t = NJTransitBusTracker(username="u", password="p")
         t.token = "tok"
         t.token_expiry = 9_999_999_999
-        t.session.post = MagicMock(return_value=FakeResponse(
-            {"message": {"message": "unknown user"}, "DVTrip": None}))
+        t.session.post = MagicMock(
+            return_value=FakeResponse(
+                {"message": {"message": "unknown user"}, "DVTrip": None}
+            )
+        )
         t.get_arrivals_graphql = MagicMock(return_value=[{"public_route": "126"}])
         status, trips = t.get_arrivals_with_status("20512")
         self.assertEqual(status, NJTransitBusTracker.STATUS_OK)
@@ -186,17 +218,27 @@ class TestGetArrivalsWithStatus(unittest.TestCase):
         t = NJTransitBusTracker(username="u", password="p")
         t.token = "tok"
         t.token_expiry = 9_999_999_999
-        t.session.post = MagicMock(return_value=FakeResponse({"DVTrip": [{"public_route": "126"}]}))
+        t.session.post = MagicMock(
+            return_value=FakeResponse({"DVTrip": [{"public_route": "126"}]})
+        )
         self.assertEqual(len(t.get_arrivals("20512")), 1)
 
 
 class TestGetSummary(unittest.TestCase):
     def test_summary_normalizes_each_stop(self):
         t = NJTransitBusTracker(username="u", password="p")
-        t.get_arrivals = MagicMock(return_value=[{
-            "departurestatus": "in 3 mins", "departuretime": "8:33 AM",
-            "public_route": "126", "header": "126 NYC", "passload": "EMPTY", "vehicle_id": "9",
-        }])
+        t.get_arrivals = MagicMock(
+            return_value=[
+                {
+                    "departurestatus": "in 3 mins",
+                    "departuretime": "8:33 AM",
+                    "public_route": "126",
+                    "header": "126 NYC",
+                    "passload": "EMPTY",
+                    "vehicle_id": "9",
+                }
+            ]
+        )
         summary = t.get_summary({"Stop A": "20512", "Stop B": "20494"})
         self.assertEqual(set(summary.keys()), {"Stop A", "Stop B"})
         self.assertEqual(summary["Stop A"][0]["eta"], "in 3 mins (8:33 AM)")
@@ -210,10 +252,13 @@ class TestEnvFileFallback(unittest.TestCase):
     def test_parses_keys_ignoring_comments_and_blanks(self):
         import os as _os
         import tempfile
+
         from bus_tracker import load_env_file
 
         with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as f:
-            f.write("# a comment\n\nNJT_TEST_KEY=somevalue\nQUOTED='quotedvalue'\nSPACED = padded value \n")
+            f.write(
+                "# a comment\n\nNJT_TEST_KEY=somevalue\nQUOTED='quotedvalue'\nSPACED = padded value \n"
+            )
             path = f.name
         try:
             _os.environ.pop("NJT_TEST_KEY", None)
@@ -231,6 +276,7 @@ class TestEnvFileFallback(unittest.TestCase):
     def test_existing_env_is_not_overwritten(self):
         import os as _os
         import tempfile
+
         from bus_tracker import load_env_file
 
         with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as f:
@@ -246,10 +292,12 @@ class TestEnvFileFallback(unittest.TestCase):
 
     def test_missing_file_is_noop(self):
         from bus_tracker import load_env_file
+
         load_env_file("/nonexistent/path/.env")
 
     def test_arrival_record_typed_dict(self):
         from bus_tracker import ArrivalRecord, normalize_arrival
+
         raw = {
             "public_route": "126",
             "header": "New York",
@@ -267,5 +315,6 @@ class TestEnvFileFallback(unittest.TestCase):
 
     def test_tracker_context_manager(self):
         from bus_tracker import NJTransitBusTracker
+
         with NJTransitBusTracker(username="user", password="pwd") as t:
             self.assertIsNotNone(t.session)

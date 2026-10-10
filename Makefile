@@ -1,4 +1,4 @@
-.PHONY: all check test test-go test-py vet fmt fmt-check coverage coverage-go coverage-py check-sh build keygen pubkey verify-release clean
+.PHONY: all check test test-go test-py test-sh lint lint-go lint-py vet fmt fmt-go fmt-py fmt-check fmt-go-check fmt-py-check audit audit-go audit-py coverage coverage-go coverage-py check-sh build keygen pubkey verify-release clean
 
 SHELL := /bin/bash
 
@@ -10,9 +10,9 @@ LAUNCHER := client-go/launcher/TransitTracker.sh
 
 all: check build
 
-check: fmt-check vet test-go test-py coverage check-sh
+check: fmt-check lint test audit coverage
 
-test: test-go test-py
+test: test-go test-py test-sh
 
 test-go:
 	@echo "==> Running Go unit tests with data race detector..."
@@ -22,15 +22,41 @@ test-py:
 	@echo "==> Running Python unit tests..."
 	@PYTHONPATH=server $(PYTHON) -m unittest discover -s tests -p "test_*.py" -v
 
+test-sh:
+	@echo "==> Running Shell test suite..."
+	@bash tests/test_launcher.sh
+
 vet:
 	@echo "==> Running go vet static analysis..."
 	@cd client-go && go vet ./...
 
-fmt:
+lint: lint-go lint-py check-sh
+
+lint-go: vet
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+		echo "==> Running golangci-lint..."; \
+		(cd client-go && golangci-lint run ./...); \
+	fi
+
+lint-py:
+	@echo "==> Running Python static type checker (mypy)..."
+	@$(PYTHON) -m mypy server
+	@echo "==> Running Python linter (ruff)..."
+	@$(PYTHON) -m ruff check server tests
+
+fmt: fmt-go fmt-py
+
+fmt-go:
 	@echo "==> Formatting Go files with gofmt -s..."
 	@gofmt -s -w client-go
 
-fmt-check:
+fmt-py:
+	@echo "==> Formatting Python files with ruff..."
+	@$(PYTHON) -m ruff format server tests
+
+fmt-check: fmt-go-check fmt-py-check
+
+fmt-go-check:
 	@echo "==> Checking Go formatting..."
 	@DIFF=$$(gofmt -s -d client-go); \
 	if [ -n "$$DIFF" ]; then \
@@ -38,6 +64,10 @@ fmt-check:
 		echo "ERROR: Go files are not formatted. Run 'make fmt' to fix."; \
 		exit 1; \
 	fi
+
+fmt-py-check:
+	@echo "==> Checking Python formatting (ruff)..."
+	@$(PYTHON) -m ruff format --check server tests
 
 check-sh:
 	@echo "==> Checking shell scripts syntax..."
@@ -47,8 +77,25 @@ check-sh:
 	@sh -n $(LAUNCHER)
 	@if command -v shellcheck >/dev/null 2>&1; then \
 		echo "==> Running shellcheck..."; \
-		shellcheck --severity=warning -s bash scripts/check_coverage_go.sh scripts/deploy.sh tests/test_launcher.sh; \
-		shellcheck --severity=warning -s sh $(LAUNCHER); \
+		shellcheck -s bash scripts/check_coverage_go.sh scripts/deploy.sh tests/test_launcher.sh; \
+		shellcheck -s sh $(LAUNCHER); \
+	fi
+
+audit: audit-go audit-py
+
+audit-go:
+	@if command -v govulncheck >/dev/null 2>&1; then \
+		echo "==> Auditing Go dependencies with govulncheck..."; \
+		(cd client-go && govulncheck ./...); \
+	fi
+
+audit-py:
+	@if command -v pip-audit >/dev/null 2>&1; then \
+		echo "==> Auditing Python dependencies with pip-audit..."; \
+		pip-audit -r requirements.txt || true; \
+	elif $(PYTHON) -m pip_audit --version >/dev/null 2>&1; then \
+		echo "==> Auditing Python dependencies with pip_audit..."; \
+		$(PYTHON) -m pip_audit -r requirements.txt || true; \
 	fi
 
 coverage: coverage-go coverage-py
@@ -134,7 +181,7 @@ verify-release:
 		-manifest "$(CURDIR)/tracker-arm.manifest.json" -in "$(CURDIR)/tracker-arm" && echo "OK: release signature valid"
 
 clean:
-	@rm -f tracker-arm tracker-arm.new tracker-arm.manifest.json tracker-arm.manifest.json.new server/tracker-arm client-go/client-go client-go/cover.out
+	@rm -f tracker-arm tracker-arm.new tracker-arm.manifest.json tracker-arm.manifest.json.new server/tracker-arm client-go/client-go client-go/cover.out server_identity.key server_identity.cert.json
 	@rm -rf htmlcov .coverage
 	@find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	@find . -name "*.pyc" -delete 2>/dev/null || true

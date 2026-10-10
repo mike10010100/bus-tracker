@@ -3,9 +3,9 @@ import os
 import re
 import threading
 import time
-from typing import List, Dict, Any, Optional, Tuple, TypedDict
-import requests
+from typing import Any, Optional, TypedDict
 
+import requests
 from logsafe import redact
 
 
@@ -29,7 +29,7 @@ def load_env_file(env_file: str) -> None:
     """
     if not os.path.exists(env_file):
         return
-    with open(env_file, "r", encoding="utf-8") as f:
+    with open(env_file, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
@@ -46,6 +46,7 @@ _env_file = _local_env if os.path.exists(_local_env) else _parent_env
 
 try:
     from dotenv import load_dotenv
+
     if os.path.exists(_env_file):
         load_dotenv(_env_file)
     else:
@@ -54,12 +55,16 @@ except ImportError:
     # Native fallback if python-dotenv is not installed
     load_env_file(_env_file)
 
-_DUE_RE = re.compile(r"\b(approach\w*|due|now|arriving|boarding|board|all aboard)\b", re.IGNORECASE)
+_DUE_RE = re.compile(
+    r"\b(approach\w*|due|now|arriving|boarding|board|all aboard)\b", re.IGNORECASE
+)
 _MINS_RE = re.compile(r"\b(\d+)\s*min", re.IGNORECASE)
 _CLOCK_RE = re.compile(r"\b(\d{1,2}):(\d{2})(?:\s*([AaPp])\.?[Mm]\.?)?\b")
 
 
-def estimate_departure_epoch(status: str, dep_time: str, now: Optional[float] = None) -> Optional[float]:
+def estimate_departure_epoch(
+    status: str, dep_time: str, now: Optional[float] = None
+) -> Optional[float]:
     """
     Estimates the departure's unix time at fetch time from the upstream status
     ("in 5 mins", "APPROACHING") or, failing that, its clock time ("8:35 AM",
@@ -76,7 +81,11 @@ def estimate_departure_epoch(status: str, dep_time: str, now: Optional[float] = 
         m = _CLOCK_RE.search(text or "")
         if not m:
             continue
-        hour, minute, ampm = int(m.group(1)), int(m.group(2)), (m.group(3) or "").lower()
+        hour, minute, ampm = (
+            int(m.group(1)),
+            int(m.group(2)),
+            (m.group(3) or "").lower(),
+        )
         if ampm:
             if not 1 <= hour <= 12:
                 continue
@@ -92,7 +101,7 @@ def estimate_departure_epoch(status: str, dep_time: str, now: Optional[float] = 
     return None
 
 
-def normalize_arrival(t: Dict[str, Any], now: Optional[float] = None) -> ArrivalRecord:
+def normalize_arrival(t: dict[str, Any], now: Optional[float] = None) -> ArrivalRecord:
     """
     Maps a raw NJ Transit trip (from either BUSDV2 or GraphQL) to the canonical
     Arrival record consumed by the renderer. Centralizing this mapping keeps the
@@ -100,7 +109,11 @@ def normalize_arrival(t: Dict[str, Any], now: Optional[float] = None) -> Arrival
     """
     status = (t.get("departurestatus") or "").strip()
     dep_time = (t.get("departuretime") or "").strip()
-    eta_str = f"{status} ({dep_time})" if status and dep_time else (status or dep_time or "Scheduled")
+    eta_str = (
+        f"{status} ({dep_time})"
+        if status and dep_time
+        else (status or dep_time or "Scheduled")
+    )
     record: ArrivalRecord = {
         "route": t.get("public_route"),
         "destination": (t.get("header") or "").strip(),
@@ -124,9 +137,11 @@ def describe_base_url(base_url: Optional[str] = None) -> str:
     """
     url = (base_url or NJTransitBusTracker.DEFAULT_BASE_URL).rstrip("/")
     if TEST_HOST_MARKER in url.lower():
-        return (f"[Tracker] WARNING: BUSDV2 base URL is the NJ Transit TEST host ({url}); "
-                f"production credentials are being sent to the test environment. "
-                f"Set NJT_BASE_URL=https://pcsdata.njtransit.com to use production.")
+        return (
+            f"[Tracker] WARNING: BUSDV2 base URL is the NJ Transit TEST host ({url}); "
+            f"production credentials are being sent to the test environment. "
+            f"Set NJT_BASE_URL=https://pcsdata.njtransit.com to use production."
+        )
     return f"[Tracker] BUSDV2 base URL: {url}"
 
 
@@ -135,13 +150,30 @@ class NJTransitBusTracker:
     Client for NJ Transit Bus DepartureVision (BUSDV2) API.
     Handles automated 24-hour token minting and renewal.
     """
-    DEFAULT_BASE_URL = os.environ.get("NJT_BASE_URL", "https://testpcsdata.njtransit.com")
 
-    def __init__(self, username: Optional[str] = None, password: Optional[str] = None, base_url: Optional[str] = None):
-        raw_user = username or os.environ.get("NJT_USERNAME") or os.environ.get("NJT_API_USERNAME") or ""
+    DEFAULT_BASE_URL = os.environ.get(
+        "NJT_BASE_URL", "https://testpcsdata.njtransit.com"
+    )
+
+    def __init__(
+        self,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
+        raw_user = (
+            username
+            or os.environ.get("NJT_USERNAME")
+            or os.environ.get("NJT_API_USERNAME")
+            or ""
+        )
         # NJ Transit API requires username handle, not email
         self.username = raw_user.split("@")[0] if "@" in raw_user else raw_user
-        self.password = password or os.environ.get("NJT_PASSWORD") or os.environ.get("NJT_API_PASSWORD")
+        self.password = (
+            password
+            or os.environ.get("NJT_PASSWORD")
+            or os.environ.get("NJT_API_PASSWORD")
+        )
         self.base_url = (base_url or self.DEFAULT_BASE_URL).rstrip("/")
         self.token: Optional[str] = None
         self.token_expiry: float = 0
@@ -181,7 +213,9 @@ class NJTransitBusTracker:
             resp.raise_for_status()
             data = resp.json()
 
-            if str(data.get("Authenticated")).lower() == "true" and data.get("UserToken"):
+            if str(data.get("Authenticated")).lower() == "true" and data.get(
+                "UserToken"
+            ):
                 self.token = data["UserToken"]
                 self.token_expiry = time.time() + 82800
             else:
@@ -205,7 +239,9 @@ class NJTransitBusTracker:
     }
     """
 
-    def get_arrivals_graphql(self, stop_id: str, route: str = "126") -> List[Dict[str, Any]]:
+    def get_arrivals_graphql(
+        self, stop_id: str, route: str = "126"
+    ) -> list[dict[str, Any]]:
         """
         Fetches live arrivals via NJ Transit's public web GraphQL API.
         No token or authentication required; highly reliable fallback.
@@ -229,23 +265,27 @@ class NJTransitBusTracker:
             pub_route = item.get("publicRoute") or ""
             if route and pub_route.strip() != route.strip():
                 continue
-            results.append({
-                "public_route": pub_route,
-                "header": item.get("header"),
-                "lanegate": item.get("lanegate"),
-                "departuretime": item.get("departuretime"),
-                "departurestatus": item.get("departurestatus"),
-                "vehicle_id": item.get("vehicleId"),
-                "passload": item.get("passload"),
-            })
+            results.append(
+                {
+                    "public_route": pub_route,
+                    "header": item.get("header"),
+                    "lanegate": item.get("lanegate"),
+                    "departuretime": item.get("departuretime"),
+                    "departurestatus": item.get("departurestatus"),
+                    "vehicle_id": item.get("vehicleId"),
+                    "passload": item.get("passload"),
+                }
+            )
         return results
 
     # Arrival fetch statuses
-    STATUS_OK = "ok"          # Upstream responded and returned upcoming buses
-    STATUS_EMPTY = "empty"    # Upstream responded but there are genuinely no buses
-    STATUS_ERROR = "error"    # Upstream could not be reached; data is unknown
+    STATUS_OK = "ok"  # Upstream responded and returned upcoming buses
+    STATUS_EMPTY = "empty"  # Upstream responded but there are genuinely no buses
+    STATUS_ERROR = "error"  # Upstream could not be reached; data is unknown
 
-    def get_arrivals_with_status(self, stop_id: str, route: str = "126") -> Tuple[str, List[Dict[str, Any]]]:
+    def get_arrivals_with_status(
+        self, stop_id: str, route: str = "126"
+    ) -> tuple[str, list[dict[str, Any]]]:
         """
         Fetches upcoming bus arrivals and returns (status, trips).
 
@@ -284,12 +324,14 @@ class NJTransitBusTracker:
             try:
                 trips = self.get_arrivals_graphql(stop_id=stop_id, route=route)
             except Exception as e2:
-                print(f"[Tracker] Both BUSDV2 ({redact(e)}) and GraphQL ({redact(e2)}) failed.")
+                print(
+                    f"[Tracker] Both BUSDV2 ({redact(e)}) and GraphQL ({redact(e2)}) failed."
+                )
                 return self.STATUS_ERROR, []
 
         return (self.STATUS_OK if trips else self.STATUS_EMPTY), trips
 
-    def get_arrivals(self, stop_id: str, route: str = "126") -> List[Dict[str, Any]]:
+    def get_arrivals(self, stop_id: str, route: str = "126") -> list[dict[str, Any]]:
         """
         Fetches upcoming bus arrivals for a specific stop number and route.
         Returns an empty list on both success-with-no-buses and upstream
@@ -298,12 +340,14 @@ class NJTransitBusTracker:
         _status, trips = self.get_arrivals_with_status(stop_id=stop_id, route=route)
         return trips
 
-    def get_summary(self, stops: Dict[str, str], route: str = "126") -> Dict[str, List[ArrivalRecord]]:
+    def get_summary(
+        self, stops: dict[str, str], route: str = "126"
+    ) -> dict[str, list[ArrivalRecord]]:
         """
         Fetches simplified arrival summaries for multiple stops.
         stops format: {"Stop Name": "5-digit-stop-id"}
         """
-        summary: Dict[str, List[ArrivalRecord]] = {}
+        summary: dict[str, list[ArrivalRecord]] = {}
         for stop_name, stop_id in stops.items():
             trips = self.get_arrivals(stop_id=stop_id, route=route)
             summary[stop_name] = [normalize_arrival(t) for t in trips]
@@ -333,9 +377,15 @@ if __name__ == "__main__":
             if not arrivals:
                 print("  No buses reported in the next hour.")
             for a in arrivals:
-                load = f" [Occupancy: {a['occupancy']}]" if a['occupancy'] and a['occupancy'] != "EMPTY" else ""
-                bus_num = f" (Bus #{a['vehicle_id']})" if a['vehicle_id'] else ""
-                print(f"  [{a['route']}] {a['destination']} -> {a['eta']}{bus_num}{load}")
+                load = (
+                    f" [Occupancy: {a['occupancy']}]"
+                    if a["occupancy"] and a["occupancy"] != "EMPTY"
+                    else ""
+                )
+                bus_num = f" (Bus #{a['vehicle_id']})" if a["vehicle_id"] else ""
+                print(
+                    f"  [{a['route']}] {a['destination']} -> {a['eta']}{bus_num}{load}"
+                )
     except ValueError as e:
         print(f"Setup error: {e}")
     except Exception as e:

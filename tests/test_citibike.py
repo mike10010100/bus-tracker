@@ -5,11 +5,11 @@ Unit tests for Citi Bike live dock tracker module and dashboard rendering integr
 import os
 import time
 import unittest
-from unittest.mock import patch, MagicMock
-from PIL import Image
+from unittest.mock import MagicMock, patch
 
-from citibike import CitiBikeTracker, DEFAULT_STATIONS
-from render_dashboard import render_dashboard, get_mock_data
+from citibike import DEFAULT_STATIONS, CitiBikeTracker
+from PIL import Image
+from render_dashboard import get_mock_data, render_dashboard
 
 
 class TestCitiBikeTracker(unittest.TestCase):
@@ -51,18 +51,23 @@ class TestCitiBikeTracker(unittest.TestCase):
             {"name": "Clinton & 9th", "walk_min": 3, "ebikes": 0, "is_offline": False},
             {"name": "Willow & 12th", "walk_min": 6, "ebikes": 2, "is_offline": False},
             {"name": "Clinton & 7th", "walk_min": 7, "ebikes": 4, "is_offline": False},
-            {"name": "Washington & 11th", "walk_min": 6, "ebikes": 0, "is_offline": False},
+            {
+                "name": "Washington & 11th",
+                "walk_min": 6,
+                "ebikes": 0,
+                "is_offline": False,
+            },
             {"name": "Broken Dock", "walk_min": 1, "ebikes": 5, "is_offline": True},
         ]
         sorted_pool = sort_stations_by_ebike_priority(test_pool)
 
         # Stations with e-bikes come first, ordered by walk_min
         self.assertEqual(sorted_pool[0]["name"], "Willow & 12th")  # 2 ebikes, 6 min
-        self.assertEqual(sorted_pool[1]["name"], "Clinton & 7th")   # 4 ebikes, 7 min
+        self.assertEqual(sorted_pool[1]["name"], "Clinton & 7th")  # 4 ebikes, 7 min
 
         # Stations with 0 ebikes come next, ordered by walk_min
-        self.assertEqual(sorted_pool[2]["name"], "Clinton & 9th")   # 0 ebikes, 3 min
-        self.assertEqual(sorted_pool[3]["name"], "Washington & 11th") # 0 ebikes, 6 min
+        self.assertEqual(sorted_pool[2]["name"], "Clinton & 9th")  # 0 ebikes, 3 min
+        self.assertEqual(sorted_pool[3]["name"], "Washington & 11th")  # 0 ebikes, 6 min
 
         # Offline stations go to the back
         self.assertEqual(sorted_pool[4]["name"], "Broken Dock")
@@ -77,9 +82,12 @@ class TestCitiBikeTracker(unittest.TestCase):
             self.assertEqual(res, tracker._cached_data)
 
     def test_network_failure_raises_unavailable(self):
-        from citibike import CitiBikeUnavailable, CB_STATUS_ERROR
+        from citibike import CB_STATUS_ERROR, CitiBikeUnavailable
+
         tracker = CitiBikeTracker()
-        with patch("urllib.request.urlopen", side_effect=Exception("Connection refused")):
+        with patch(
+            "urllib.request.urlopen", side_effect=Exception("Connection refused")
+        ):
             with self.assertRaises(CitiBikeUnavailable):
                 tracker.get_station_status(force_refresh=True)
             snap = tracker.get_snapshot(force_refresh=True)
@@ -88,15 +96,17 @@ class TestCitiBikeTracker(unittest.TestCase):
 
     def test_network_failure_falls_back_to_cached(self):
         from citibike import CB_STATUS_STALE
+
         tracker = CitiBikeTracker()
         tracker._last_fetch_time = time.time()
         tracker._cached_data = [{"id": "cached_1", "name": "Cached Station"}]
-        with patch("urllib.request.urlopen", side_effect=Exception("Connection refused")):
+        with patch(
+            "urllib.request.urlopen", side_effect=Exception("Connection refused")
+        ):
             res = tracker.get_station_status(force_refresh=True)
             self.assertEqual(res, tracker._cached_data)
             snap = tracker.get_snapshot(force_refresh=True)
             self.assertEqual(snap.status, CB_STATUS_STALE)
-
 
     def test_successful_gbfs_parsing(self):
         fake_payload = {
@@ -131,7 +141,7 @@ class TestCitiBikeTracker(unittest.TestCase):
         }
 
         mock_resp = MagicMock()
-        mock_resp.read.return_value = json_str = (
+        mock_resp.read.return_value = (
             __import__("json").dumps(fake_payload).encode("utf-8")
         )
         mock_resp.__enter__.return_value = mock_resp
@@ -235,7 +245,9 @@ class TestCitiBikeTracker(unittest.TestCase):
                 img = Image.open(out_file)
                 self.assertEqual(img.size, (800, 600))
 
-                kindle_img = format_for_kindle(img, orientation="landscape", rotation=90)
+                kindle_img = format_for_kindle(
+                    img, orientation="landscape", rotation=90
+                )
                 self.assertEqual(kindle_img.size, (1236, 1648))
                 self.assertEqual(kindle_img.mode, "L")
 
@@ -244,6 +256,7 @@ class TestCitiBikeTracker(unittest.TestCase):
 
     def test_station_typed_dicts(self):
         from citibike import StationConfig, StationStatus
+
         cfg: StationConfig = {
             "id": "test-id",
             "name": "Test St",
@@ -269,4 +282,3 @@ class TestCitiBikeTracker(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

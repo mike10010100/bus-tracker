@@ -1,4 +1,5 @@
 import os
+import sys
 from datetime import datetime
 from typing import NamedTuple, Optional
 
@@ -28,7 +29,12 @@ PEAK_PM_START = _parse_hour_env("PEAK_PM_START", 16.5)
 PEAK_PM_END = _parse_hour_env("PEAK_PM_END", 19.0)
 # Weekends are off-peak (no commute: light off, slow polling) unless
 # PEAK_WEEKENDS=1.
-PEAK_WEEKENDS = os.environ.get("PEAK_WEEKENDS", "").strip().lower() in ("1", "true", "yes", "on")
+PEAK_WEEKENDS = os.environ.get("PEAK_WEEKENDS", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 
 def is_peak_commute_hours(dt: Optional[datetime] = None) -> bool:
@@ -44,7 +50,9 @@ def is_peak_commute_hours(dt: Optional[datetime] = None) -> bool:
     if dt.weekday() >= 5 and not PEAK_WEEKENDS:
         return False
     hour = dt.hour + dt.minute / 60.0
-    return (PEAK_AM_START <= hour < PEAK_AM_END) or (PEAK_PM_START <= hour < PEAK_PM_END)
+    return (PEAK_AM_START <= hour < PEAK_AM_END) or (
+        PEAK_PM_START <= hour < PEAK_PM_END
+    )
 
 
 def get_commute_lighting(dt: Optional[datetime] = None) -> CommuteLighting:
@@ -61,7 +69,12 @@ def get_commute_lighting(dt: Optional[datetime] = None) -> CommuteLighting:
 
 # When set (any non-empty value), the server always advertises the fast poll
 # interval regardless of the time of day. For testing only.
-FORCE_FAST_POLL = os.environ.get("FORCE_FAST_POLL", "").strip().lower() in ("1", "true", "yes", "on")
+FORCE_FAST_POLL = os.environ.get("FORCE_FAST_POLL", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 # Overnight "deep eco" window: a long poll interval while nobody is commuting.
 # The window may wrap past midnight (start > end).
@@ -88,8 +101,17 @@ def is_overnight_hours(dt: Optional[datetime] = None) -> bool:
     Returns True inside the overnight deep-eco window (default 22:00-06:00).
     Handles a window that wraps past midnight.
     """
-    start = OVERNIGHT_START
-    end = OVERNIGHT_END
+    server_mod = sys.modules.get("server")
+    start = (
+        getattr(server_mod, "OVERNIGHT_START", OVERNIGHT_START)
+        if server_mod
+        else OVERNIGHT_START
+    )
+    end = (
+        getattr(server_mod, "OVERNIGHT_END", OVERNIGHT_END)
+        if server_mod
+        else OVERNIGHT_END
+    )
     if dt is None:
         dt = datetime.now()
     hour = dt.hour + dt.minute / 60.0
@@ -100,6 +122,9 @@ def is_overnight_hours(dt: Optional[datetime] = None) -> bool:
 
 def is_force_fast_poll() -> bool:
     """Checks whether FORCE_FAST_POLL is enabled."""
+    server_mod = sys.modules.get("server")
+    if server_mod and getattr(server_mod, "FORCE_FAST_POLL", False):
+        return True
     return bool(FORCE_FAST_POLL)
 
 
@@ -132,12 +157,20 @@ def get_dormant_note() -> str:
     Human-readable label for the dormant overnight strip, announcing when the
     dashboard wakes (the overnight window end).
     """
+    server_mod = sys.modules.get("server")
+    end = (
+        getattr(server_mod, "OVERNIGHT_END", OVERNIGHT_END)
+        if server_mod
+        else OVERNIGHT_END
+    )
     # Round to the nearest minute first so e.g. 6.999 reads 7:00, not 6:00.
-    total_minutes = int(round(OVERNIGHT_END * 60)) % (24 * 60)
+    total_minutes = int(round(end * 60)) % (24 * 60)
     hour, minute = divmod(total_minutes, 60)
     suffix = "AM" if hour < 12 else "PM"
     hour12 = hour % 12 or 12
-    return f"SLEEPING — back at {hour12}:{minute:02d} {suffix} · press power to interact"
+    return (
+        f"SLEEPING — back at {hour12}:{minute:02d} {suffix} · press power to interact"
+    )
 
 
 def get_status_note(presentation: str) -> str:

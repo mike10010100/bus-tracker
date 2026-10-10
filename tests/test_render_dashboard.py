@@ -5,15 +5,13 @@ comprehensive containment harness that asserts every glyph stays inside the box
 it was drawn into across both views, both heights, and a matrix of data shapes.
 """
 
-from datetime import datetime
 import os
 import unittest
-from unittest.mock import patch, MagicMock
-
-from PIL import Image, ImageDraw, ImageFont
-
+from datetime import datetime
+from unittest.mock import MagicMock, patch
 
 import render_dashboard as rd
+from PIL import Image, ImageDraw, ImageFont
 
 
 def _stops(counts=None):
@@ -35,11 +33,21 @@ def _stops(counts=None):
 
 
 def _cb(offline=False):
-    return [{
-        "id": "x", "name": "Clinton & 9th", "full_name": "Clinton & 9th",
-        "walk_min": 3, "distance_m": 246, "ebikes": 5, "classic": 12,
-        "total_bikes": 17, "docks": 9, "is_offline": offline, "is_returning": True,
-    }]
+    return [
+        {
+            "id": "x",
+            "name": "Clinton & 9th",
+            "full_name": "Clinton & 9th",
+            "walk_min": 3,
+            "distance_m": 246,
+            "ebikes": 5,
+            "classic": 12,
+            "total_bikes": 17,
+            "docks": 9,
+            "is_offline": offline,
+            "is_returning": True,
+        }
+    ]
 
 
 class TestFontFallback(unittest.TestCase):
@@ -50,13 +58,19 @@ class TestFontFallback(unittest.TestCase):
 
     def test_returns_none_when_load_default_raises(self):
         with patch.object(rd.os.path, "exists", return_value=False):
-            with patch.object(rd.ImageFont, "load_default", side_effect=Exception("boom")):
+            with patch.object(
+                rd.ImageFont, "load_default", side_effect=Exception("boom")
+            ):
                 self.assertIsNone(rd.get_font(12))
 
     def test_truetype_failure_falls_through(self):
         with patch.object(rd.os.path, "exists", return_value=True):
-            with patch.object(rd.ImageFont, "truetype", side_effect=Exception("bad font")):
-                with patch.object(rd.ImageFont, "load_default", return_value="default-font"):
+            with patch.object(
+                rd.ImageFont, "truetype", side_effect=Exception("bad font")
+            ):
+                with patch.object(
+                    rd.ImageFont, "load_default", return_value="default-font"
+                ):
                     self.assertEqual(rd.get_font(12), "default-font")
 
 
@@ -100,7 +114,12 @@ class TestDrawHelpers(unittest.TestCase):
 
     def test_battery_indicator_charging_draws(self):
         d = self._draw()
-        self.assertGreater(rd.draw_battery_indicator(d, 0, 0, 55, is_charging=True, font=rd.get_font(12)), 0)
+        self.assertGreater(
+            rd.draw_battery_indicator(
+                d, 0, 0, 55, is_charging=True, font=rd.get_font(12)
+            ),
+            0,
+        )
 
 
 class TestStatusPresentation(unittest.TestCase):
@@ -117,21 +136,42 @@ class TestStatusPresentation(unittest.TestCase):
         dormant_out = "/tmp/test_dormant_pres.png"
         try:
             rd.render_dashboard(
-                _stops(), citibike_data=_cb(), output_path=live_out,
-                view="evening", is_mock=True, width=800, height=480,
+                _stops(),
+                citibike_data=_cb(),
+                output_path=live_out,
+                view="evening",
+                is_mock=True,
+                width=800,
+                height=480,
                 presentation="interactive",
             )
             rd.render_dashboard(
-                _stops(), citibike_data=_cb(), output_path=idle_out,
-                view="evening", is_mock=True, width=800, height=480,
-                presentation="idle", status_note="PRESS POWER BUTTON TO INTERACT",
+                _stops(),
+                citibike_data=_cb(),
+                output_path=idle_out,
+                view="evening",
+                is_mock=True,
+                width=800,
+                height=480,
+                presentation="idle",
+                status_note="PRESS POWER BUTTON TO INTERACT",
             )
             rd.render_dashboard(
-                _stops(), citibike_data=_cb(), output_path=dormant_out,
-                view="evening", is_mock=True, width=800, height=480,
-                presentation="dormant", status_note="SLEEPING — back at 6:00 AM",
+                _stops(),
+                citibike_data=_cb(),
+                output_path=dormant_out,
+                view="evening",
+                is_mock=True,
+                width=800,
+                height=480,
+                presentation="dormant",
+                status_note="SLEEPING — back at 6:00 AM",
             )
-            with Image.open(live_out) as live, Image.open(idle_out) as idle, Image.open(dormant_out) as dormant:
+            with (
+                Image.open(live_out) as live,
+                Image.open(idle_out) as idle,
+                Image.open(dormant_out) as dormant,
+            ):
                 self.assertEqual(live.size, idle.size)
                 self.assertNotEqual(live.tobytes(), idle.tobytes())
                 self.assertNotEqual(idle.tobytes(), dormant.tobytes())
@@ -165,24 +205,37 @@ class TestRenderingBranches(unittest.TestCase):
         rd.render_dashboard(
             _stops({"20512": 3, "20494": 3}),
             citibike_data=_cb(offline=True),
-            output_path=self.out, view="morning", is_mock=True,
-            batt_level=90, is_charging=True, width=800, height=600,
+            output_path=self.out,
+            view="morning",
+            is_mock=True,
+            batt_level=90,
+            is_charging=True,
+            width=800,
+            height=600,
         )
         with Image.open(self.out) as img:
             self.assertEqual(img.size, (800, 600))
 
     def test_morning_wide_without_tall(self):
         rd.render_dashboard(
-            _stops(), citibike_data=_cb(), output_path=self.out,
-            view="morning", is_mock=True, width=800, height=480,
+            _stops(),
+            citibike_data=_cb(),
+            output_path=self.out,
+            view="morning",
+            is_mock=True,
+            width=800,
+            height=480,
         )
         with Image.open(self.out) as img:
             self.assertEqual(img.size, (800, 480))
 
     def test_morning_error_empty_states(self):
         rd.render_dashboard(
-            {"20512": [], "20494": []}, citibike_data=_cb(), output_path=self.out,
-            view="morning", stop_status={"20512": rd.STATUS_ERROR, "20494": rd.STATUS_EMPTY},
+            {"20512": [], "20494": []},
+            citibike_data=_cb(),
+            output_path=self.out,
+            view="morning",
+            stop_status={"20512": rd.STATUS_ERROR, "20494": rd.STATUS_EMPTY},
         )
         self.assertTrue(os.path.exists(self.out))
 
@@ -192,39 +245,63 @@ class TestRenderingBranches(unittest.TestCase):
             "20512": [
                 {"eta": "in 1 mins", "vehicle_id": "1", "occupancy": "EMPTY"},
                 {"eta": "in 12 mins", "vehicle_id": "2", "occupancy": "HALF_EMPTY"},
-                {"eta": "in 30 mins", "vehicle_id": "3", "occupancy": "SEATS_AVAILABLE"},
+                {
+                    "eta": "in 30 mins",
+                    "vehicle_id": "3",
+                    "occupancy": "SEATS_AVAILABLE",
+                },
             ],
             "20494": [
                 {"eta": "ALL ABOARD", "vehicle_id": "4", "occupancy": "EMPTY"},
             ],
         }
         rd.render_dashboard(
-            cases, citibike_data=_cb(), output_path=self.out,
-            view="evening", is_mock=True, batt_level=42, is_charging=False,
-            width=800, height=600,
+            cases,
+            citibike_data=_cb(),
+            output_path=self.out,
+            view="evening",
+            is_mock=True,
+            batt_level=42,
+            is_charging=False,
+            width=800,
+            height=600,
         )
         with Image.open(self.out) as img:
             self.assertEqual(img.size, (800, 600))
 
     def test_evening_time_eta_fallback(self):
-        cases = {"20512": [{"eta": "Scheduled", "vehicle_id": None, "occupancy": None}],
-                 "20494": [{"eta": "8:35 AM", "vehicle_id": None, "occupancy": None}]}
+        cases = {
+            "20512": [{"eta": "Scheduled", "vehicle_id": None, "occupancy": None}],
+            "20494": [{"eta": "8:35 AM", "vehicle_id": None, "occupancy": None}],
+        }
         rd.render_dashboard(
-            cases, citibike_data=_cb(), output_path=self.out, view="evening",
+            cases,
+            citibike_data=_cb(),
+            output_path=self.out,
+            view="evening",
         )
         self.assertTrue(os.path.exists(self.out))
 
     def test_evening_without_citibike_uses_full_height(self):
         rd.render_dashboard(
-            _stops(), citibike_data=[], output_path=self.out, view="evening",
-            width=800, height=480,
+            _stops(),
+            citibike_data=[],
+            output_path=self.out,
+            view="evening",
+            width=800,
+            height=480,
         )
         self.assertTrue(os.path.exists(self.out))
 
     def test_evening_offline_citibike(self):
         rd.render_dashboard(
-            _stops(), citibike_data=_cb(offline=True), output_path=self.out,
-            view="evening", is_mock=True, width=800, height=600,
+            _stops(),
+            citibike_data=_cb(offline=True),
+            output_path=self.out,
+            view="evening",
+            is_mock=True,
+            width=800,
+            height=600,
         )
         self.assertTrue(os.path.exists(self.out))
 
@@ -234,8 +311,13 @@ class TestRenderingBranches(unittest.TestCase):
                 cb = _cb()
                 cb[0]["ebikes"], cb[0]["docks"] = ebikes, docks
                 rd.render_dashboard(
-                    _stops(), citibike_data=cb, output_path=self.out,
-                    view="evening", is_mock=True, width=800, height=600,
+                    _stops(),
+                    citibike_data=cb,
+                    output_path=self.out,
+                    view="evening",
+                    is_mock=True,
+                    width=800,
+                    height=600,
                 )
                 self.assertTrue(os.path.exists(self.out))
                 os.remove(self.out)
@@ -248,7 +330,9 @@ class TestRenderingBranches(unittest.TestCase):
 
     def test_render_autodetects_citibike_when_none(self):
         with patch.object(rd.CitiBikeTracker, "get_station_status", return_value=_cb()):
-            rd.render_dashboard(_stops(), citibike_data=None, output_path=self.out, view="morning")
+            rd.render_dashboard(
+                _stops(), citibike_data=None, output_path=self.out, view="morning"
+            )
         self.assertTrue(os.path.exists(self.out))
 
 
@@ -273,6 +357,7 @@ class TestTextStaysInsideContainers(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         from PIL import ImageDraw
+
         cls._orig_text = ImageDraw.ImageDraw.text
         cls._orig_rrect = ImageDraw.ImageDraw.rounded_rectangle
 
@@ -294,6 +379,7 @@ class TestTextStaysInsideContainers(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         from PIL import ImageDraw
+
         ImageDraw.ImageDraw.text = cls._orig_text
         ImageDraw.ImageDraw.rounded_rectangle = cls._orig_rrect
 
@@ -301,9 +387,16 @@ class TestTextStaysInsideContainers(unittest.TestCase):
         type(self).CONTAINER_CALLS = []
         type(self).TEXT_CALLS = []
         rd.render_dashboard(
-            stops, citibike_data=cb, output_path="/tmp/_containment.png",
-            view=view, is_mock=True, batt_level=77, width=800, height=height,
-            scale=scale, **kwargs,
+            stops,
+            citibike_data=cb,
+            output_path="/tmp/_containment.png",
+            view=view,
+            is_mock=True,
+            batt_level=77,
+            width=800,
+            height=height,
+            scale=scale,
+            **kwargs,
         )
         return list(self.CONTAINER_CALLS), list(self.TEXT_CALLS)
 
@@ -313,38 +406,62 @@ class TestTextStaysInsideContainers(unittest.TestCase):
                 continue
             left, top, right, bottom = bbox
             tx, ty = xy
-            enclosing = [c for c in containers if c[0] <= tx <= c[2] and c[1] <= ty <= c[3]]
+            enclosing = [
+                c for c in containers if c[0] <= tx <= c[2] and c[1] <= ty <= c[3]
+            ]
             if not enclosing:
                 continue
             c = min(enclosing, key=lambda r: (r[2] - r[0]) * (r[3] - r[1]))
             self.assertLessEqual(
-                bottom, c[3],
+                bottom,
+                c[3],
                 f"[{context}] text {text[:50]!r} bottom {bottom} exceeds container {c}",
             )
             self.assertLessEqual(
-                right, c[2] - 1,
+                right,
+                c[2] - 1,
                 f"[{context}] text {text[:50]!r} right {right} exceeds container {c}",
             )
-            self.assertGreaterEqual(left, c[0], f"[{context}] text {text[:50]!r} left {left} < {c}")
-            self.assertGreaterEqual(top, c[1], f"[{context}] text {text[:50]!r} top {top} < {c}")
+            self.assertGreaterEqual(
+                left, c[0], f"[{context}] text {text[:50]!r} left {left} < {c}"
+            )
+            self.assertGreaterEqual(
+                top, c[1], f"[{context}] text {text[:50]!r} top {top} < {c}"
+            )
 
     @staticmethod
     def _arrivals(n, eta, dest, with_vid=True):
         return [
-            {"route": "126", "destination": dest, "eta": eta,
-             "occupancy": "SEATS_AVAILABLE", "vehicle_id": (str(20000 + i) if with_vid else None)}
+            {
+                "route": "126",
+                "destination": dest,
+                "eta": eta,
+                "occupancy": "SEATS_AVAILABLE",
+                "vehicle_id": (str(20000 + i) if with_vid else None),
+            }
             for i in range(n)
         ]
 
     @staticmethod
     def _cbset(offline=False, zero=False):
         from citibike import CitiBikeTracker
+
         base = CitiBikeTracker().get_mock_data()
-        names = ["Clinton & 9th", "Washington & 11th EXTREMELY LONG STATION NAME", "Grand & 6th"]
+        names = [
+            "Clinton & 9th",
+            "Washington & 11th EXTREMELY LONG STATION NAME",
+            "Grand & 6th",
+        ]
         for i, nm in enumerate(names):
             base[i]["name"] = nm
         if offline:
-            base[0] = {**base[0], "is_offline": True, "ebikes": 0, "classic": 0, "docks": 0}
+            base[0] = {
+                **base[0],
+                "is_offline": True,
+                "ebikes": 0,
+                "classic": 0,
+                "docks": 0,
+            }
         if zero:
             base[0] = {**base[0], "ebikes": 0, "classic": 0, "docks": 0}
         return base
@@ -352,15 +469,34 @@ class TestTextStaysInsideContainers(unittest.TestCase):
     def test_all_boxes_contain_their_text(self):
         permutations = {
             "normal": ("126 NEW YORK", "in 17 mins (8:47 AM)", 3, True),
-            "long_eta": ("126 NEW YORK VIA LINCOLN TUNNEL", "APPROACHING (11:47 PM)", 3, True),
-            "long_dest": ("126 NEW YORK VIA CLINTON & LINCOLN TUNNEL EXTRA", "in 5 mins", 1, True),
+            "long_eta": (
+                "126 NEW YORK VIA LINCOLN TUNNEL",
+                "APPROACHING (11:47 PM)",
+                3,
+                True,
+            ),
+            "long_dest": (
+                "126 NEW YORK VIA CLINTON & LINCOLN TUNNEL EXTRA",
+                "in 5 mins",
+                1,
+                True,
+            ),
             "many": ("126 NEW YORK", "in 5 mins", 5, True),
             "no_vid": ("126 NEW YORK", "in 5 mins", 3, False),
             "single": ("126 NEW YORK", "in 5 mins", 1, True),
-            "huge": ("126 NEW YORK VIA EVERYTHING", "APPROACHING NOW BOARDING (11:47 PM)", 4, True),
+            "huge": (
+                "126 NEW YORK VIA EVERYTHING",
+                "APPROACHING NOW BOARDING (11:47 PM)",
+                4,
+                True,
+            ),
             "scheduled": ("", "Scheduled", 2, True),
         }
-        cb_perms = {"normal": (False, False), "offline": (True, False), "zero": (False, True)}
+        cb_perms = {
+            "normal": (False, False),
+            "offline": (True, False),
+            "zero": (False, True),
+        }
 
         for view in ("morning", "evening"):
             for height in (480, 600):
@@ -372,18 +508,26 @@ class TestTextStaysInsideContainers(unittest.TestCase):
                         }
                         ctx = f"{view} h={height} {pname}/{cbname}"
                         containers, texts = self._render_and_collect(
-                            stops, self._cbset(offline, zero), view, height,
+                            stops,
+                            self._cbset(offline, zero),
+                            view,
+                            height,
                         )
                         # Guard against a vacuous pass: ensure instrumentation
                         # actually observed boxes and glyphs for every render.
-                        self.assertGreater(len(containers), 3, f"[{ctx}] no containers captured")
+                        self.assertGreater(
+                            len(containers), 3, f"[{ctx}] no containers captured"
+                        )
                         self.assertGreater(len(texts), 3, f"[{ctx}] no text captured")
                         self._assert_all_contained(containers, texts, ctx)
 
                 # Empty/error states
                 ctx = f"{view} h={height} empty/error"
                 containers, texts = self._render_and_collect(
-                    {"20512": [], "20494": []}, self._cbset(), view, height,
+                    {"20512": [], "20494": []},
+                    self._cbset(),
+                    view,
+                    height,
                     stop_status={"20512": rd.STATUS_ERROR, "20494": rd.STATUS_EMPTY},
                 )
                 self._assert_all_contained(containers, texts, ctx)
@@ -392,9 +536,13 @@ class TestTextStaysInsideContainers(unittest.TestCase):
                 if view == "evening":
                     ctx = f"{view} h={height} no-citibike"
                     containers, texts = self._render_and_collect(
-                        {"20512": self._arrivals(3, "in 5 mins", "126 NEW YORK"),
-                         "20494": self._arrivals(3, "in 5 mins", "126 NEW YORK")},
-                        [], view, height,
+                        {
+                            "20512": self._arrivals(3, "in 5 mins", "126 NEW YORK"),
+                            "20494": self._arrivals(3, "in 5 mins", "126 NEW YORK"),
+                        },
+                        [],
+                        view,
+                        height,
                     )
                     self._assert_all_contained(containers, texts, ctx)
 
@@ -406,16 +554,28 @@ class TestTextStaysInsideContainers(unittest.TestCase):
         """
         scale = 1648 / 800
         stops = {
-            "20512": self._arrivals(3, "APPROACHING NOW BOARDING (11:47 PM)", "126 NEW YORK VIA LINCOLN TUNNEL"),
-            "20494": self._arrivals(4, "in 17 mins (8:47 AM)", "126 NEW YORK VIA CLINTON"),
+            "20512": self._arrivals(
+                3,
+                "APPROACHING NOW BOARDING (11:47 PM)",
+                "126 NEW YORK VIA LINCOLN TUNNEL",
+            ),
+            "20494": self._arrivals(
+                4, "in 17 mins (8:47 AM)", "126 NEW YORK VIA CLINTON"
+            ),
         }
         for view in ("morning", "evening"):
             for height in (600,):
                 ctx = f"native {view} h={height}"
                 containers, texts = self._render_and_collect(
-                    stops, self._cbset(), view, height, scale=scale,
+                    stops,
+                    self._cbset(),
+                    view,
+                    height,
+                    scale=scale,
                 )
-                self.assertGreater(len(containers), 3, f"[{ctx}] no containers captured")
+                self.assertGreater(
+                    len(containers), 3, f"[{ctx}] no containers captured"
+                )
                 self.assertGreater(len(texts), 3, f"[{ctx}] no text captured")
                 self._assert_all_contained(containers, texts, ctx)
 
@@ -440,7 +600,9 @@ class TestScaledDraw(unittest.TestCase):
         # Logical bbox should be about half the native glyph size.
         native = real.textbbox((0, 0), "Hello", font=sd._font(font))
         self.assertLess(logical[2] - logical[0], native[2] - native[0])
-        self.assertAlmostEqual((native[2] - native[0]) / 2, logical[2] - logical[0], delta=3)
+        self.assertAlmostEqual(
+            (native[2] - native[0]) / 2, logical[2] - logical[0], delta=3
+        )
 
     def test_fonts_are_reconstructed_larger(self):
         img, sd, real = self._proxy(3.0)
@@ -464,7 +626,9 @@ class TestScaledDraw(unittest.TestCase):
     def test_untagged_font_is_passed_through(self):
         # A font without the transit tags cannot be rescaled; it is used as-is.
         img, sd, real = self._proxy(2.0)
-        plain = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
+        plain = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12
+        )
         self.assertIs(sd._font(plain), plain)
 
     def test_none_font_is_passed_through(self):
@@ -530,8 +694,9 @@ class TestEllipsizeToWidth(unittest.TestCase):
 class TestUncoveredDashboardBranches(unittest.TestCase):
     def test_modular_view_and_canvas_imports(self):
         import canvas
-        import morning_view
         import evening_view
+        import morning_view
+
         self.assertEqual(canvas.WIDTH, 800)
         self.assertTrue(callable(morning_view.render_morning_view))
         self.assertTrue(callable(evening_view.render_evening_view))
@@ -574,9 +739,15 @@ class TestUncoveredDashboardBranches(unittest.TestCase):
         stops_data = {"20512": []}
         now = datetime(2026, 10, 10, 8, 30)
         rd.render_morning_view(
-            draw, stops_data, citi_data, now,
-            batt_level=80, is_charging=False, is_mock=False,
-            width=400, height=480,
+            draw,
+            stops_data,
+            citi_data,
+            now,
+            batt_level=80,
+            is_charging=False,
+            is_mock=False,
+            width=400,
+            height=480,
         )
 
     def test_render_evening_view_bus_meta_variations(self):
@@ -596,9 +767,15 @@ class TestUncoveredDashboardBranches(unittest.TestCase):
             ]
         }
         rd.render_evening_view(
-            draw, stops_data_1, citibike_data=[], now=now,
-            batt_level=80, is_charging=False, is_mock=False,
-            width=800, height=480,
+            draw,
+            stops_data_1,
+            citibike_data=[],
+            now=now,
+            batt_level=80,
+            is_charging=False,
+            is_mock=False,
+            width=800,
+            height=480,
         )
 
         stops_data_2 = {
@@ -614,15 +791,27 @@ class TestUncoveredDashboardBranches(unittest.TestCase):
             ]
         }
         rd.render_evening_view(
-            draw, stops_data_2, citibike_data=[], now=now,
-            batt_level=80, is_charging=False, is_mock=False,
-            width=800, height=480,
+            draw,
+            stops_data_2,
+            citibike_data=[],
+            now=now,
+            batt_level=80,
+            is_charging=False,
+            is_mock=False,
+            width=800,
+            height=480,
         )
 
     def test_render_dashboard_citibike_fetch_exception(self):
         out_path = "/tmp/test_citibike_err.png"
-        with patch("citibike.CitiBikeTracker.get_station_status", side_effect=Exception("GBFS down")):
-            with patch("citibike.CitiBikeTracker.get_mock_data", side_effect=Exception("Mock down")):
+        with patch(
+            "citibike.CitiBikeTracker.get_station_status",
+            side_effect=Exception("GBFS down"),
+        ):
+            with patch(
+                "citibike.CitiBikeTracker.get_mock_data",
+                side_effect=Exception("Mock down"),
+            ):
                 res = rd.render_dashboard(
                     stops_data={"20512": []},
                     citibike_data=None,
@@ -636,5 +825,3 @@ class TestUncoveredDashboardBranches(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-

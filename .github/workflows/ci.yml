@@ -6,12 +6,16 @@ on:
   pull_request:
     branches: [ main ]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   go-client:
-    name: Go Client (test, vet, signed build)
+    name: Go Client (test, lint, race, signed build)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -19,10 +23,10 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@414f19dd40409a147e44a5695029e0d1645e5cf8 # v5.3.0
         with:
           go-version: '1.26'
 
@@ -37,6 +41,12 @@ jobs:
 
       - name: Static Analysis (go vet)
         run: go vet ./...
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@971e284b6050e8a5849b72094c50ab08da042db8 # v6.1.1
+        with:
+          version: v1.57.2
+          working-directory: client-go
 
       - name: Run Unit Tests with Race Detector
         run: go test -v -race ./...
@@ -61,24 +71,28 @@ jobs:
           ls -lh ../tracker-arm
 
   shell:
-    name: Shell scripts (syntax + shellcheck)
+    name: Shell scripts (syntax, shellcheck, tests)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
       - name: Check scripts
         run: make check-sh
 
+      - name: Run Shell test suite
+        run: make test-sh
+
   python-server:
-    name: Python Server (tests)
+    name: Python Server (lint, typecheck, tests)
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
         with:
           python-version: '3.11'
 
@@ -87,25 +101,43 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      - name: Verify Formatting (ruff)
+        run: make fmt-py-check
+
+      - name: Lint (ruff)
+        run: python -m ruff check server tests
+
+      - name: Static Type Checking (mypy)
+        run: python -m mypy server
+
+      - name: Dependency Security Audit (pip-audit)
+        run: pip-audit -r requirements.txt || true
+
       - name: Run Python unit tests
-        run: PYTHONPATH=server python -m unittest discover -s tests -p "test_*.py" -v
+        run: make test-py
 
       - name: Enforce Python Coverage Gate (92%)
-        run: |
-          python -m coverage erase
-          PYTHONPATH=server python -m coverage run --source=server -m unittest discover -s tests -p "test_*.py" >/dev/null
-          python -m coverage report -m --fail-under=92
+        run: make coverage-py
 
   docker:
-    name: Docker image (signed build, ephemeral key)
+    name: Docker image (hadolint, signed build, ephemeral key)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Lint Dockerfile (hadolint)
+        uses: hadolint/hadolint-action@54c25eb95218553a8f451f80591f9d7710d4c1ad # v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error
+
       - name: Generate throwaway signing key
         run: openssl genpkey -algorithm ed25519 -out "$RUNNER_TEMP/ci_ota.key"
+
       - name: Build image
         run: DOCKER_BUILDKIT=1 docker build --secret id=ota_signing_key,src="$RUNNER_TEMP/ci_ota.key" -t transit-tracker:ci .
+
       - name: Smoke test (signed release + identity present, non-root)
         run: |
           set -euo pipefail

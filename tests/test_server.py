@@ -5,16 +5,16 @@ and the data/render caching split.
 
 import time
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
+from version import VERSION
 
 import server
 from server import (
     check_control_auth,
     get_fresh_data,
     is_private_address,
-    sha256_file,
 )
-from version import VERSION
 
 
 class TestVersionWiring(unittest.TestCase):
@@ -40,6 +40,7 @@ class TestPrivateAddress(unittest.TestCase):
 class TestOTAStructures(unittest.TestCase):
     def test_binary_info_named_tuple(self):
         from ota import BinaryInfo, get_binary_info
+
         info = BinaryInfo(True, 12345.0, "deadbeef", 42)
         self.assertTrue(info.exists)
         self.assertEqual(info.mtime, 12345.0)
@@ -51,6 +52,7 @@ class TestOTAStructures(unittest.TestCase):
         self.assertEqual(info[2], "deadbeef")
 
         from unittest.mock import patch
+
         with patch("os.stat", side_effect=OSError("not found")):
             non_info = get_binary_info("/nonexistent/file/path")
             self.assertFalse(non_info.exists)
@@ -58,6 +60,7 @@ class TestOTAStructures(unittest.TestCase):
 
     def test_get_local_ip_returns_none_on_error(self):
         from unittest.mock import patch
+
         with patch("socket.socket", side_effect=OSError("no net")):
             self.assertIsNone(server.get_local_ip())
 
@@ -78,25 +81,41 @@ class TestControlAuth(unittest.TestCase):
     def test_token_required_when_configured(self):
         with patch.object(server, "CONTROL_TOKEN", "secret"):
             self.assertFalse(check_control_auth(self._handler("192.168.1.10")))
-            self.assertTrue(check_control_auth(self._handler("192.168.1.10", {"X-Tracker-Token": "secret"})))
-            self.assertFalse(check_control_auth(self._handler("192.168.1.10", {"X-Tracker-Token": "wrong"})))
+            self.assertTrue(
+                check_control_auth(
+                    self._handler("192.168.1.10", {"X-Tracker-Token": "secret"})
+                )
+            )
+            self.assertFalse(
+                check_control_auth(
+                    self._handler("192.168.1.10", {"X-Tracker-Token": "wrong"})
+                )
+            )
 
 
 class TestErrorStateRendering(unittest.TestCase):
     def test_empty_state_message_error_vs_empty(self):
-        from render_dashboard import empty_state_message, STATUS_ERROR, STATUS_EMPTY, STATUS_OK
+        from render_dashboard import (
+            STATUS_EMPTY,
+            STATUS_ERROR,
+            STATUS_OK,
+            empty_state_message,
+        )
 
         err_msg, err_color = empty_state_message(STATUS_ERROR)
         empty_msg, empty_color = empty_state_message(STATUS_EMPTY)
         self.assertIn("unavailable", err_msg.lower())
         self.assertNotEqual(err_msg, empty_msg)
         self.assertNotEqual(err_color, empty_color)
-        self.assertEqual(empty_state_message(STATUS_OK), empty_state_message(STATUS_EMPTY))
+        self.assertEqual(
+            empty_state_message(STATUS_OK), empty_state_message(STATUS_EMPTY)
+        )
 
     def test_render_with_error_status(self):
-        from render_dashboard import render_dashboard, get_mock_data, STATUS_ERROR
-        from citibike import CitiBikeTracker
         import os
+
+        from citibike import CitiBikeTracker
+        from render_dashboard import STATUS_ERROR, render_dashboard
 
         out = "/tmp/test_error_view.png"
         render_dashboard(
@@ -114,7 +133,9 @@ class TestDataCache(unittest.TestCase):
     def setUp(self):
         # Reset module-level caches between tests.
         with server._data_lock:
-            server._data_cache.update({"time": 0.0, "stops": None, "status": {}, "cb": None})
+            server._data_cache.update(
+                {"time": 0.0, "stops": None, "status": {}, "cb": None}
+            )
         with server._render_lock:
             server._render_cache.clear()
 
@@ -126,12 +147,16 @@ class TestDataCache(unittest.TestCase):
 
     def test_get_fresh_data_returns_cached_within_ttl(self):
         from citibike import CB_STATUS_OK, CitiBikeSnapshot
+
         fake_tracker = MagicMock()
         fake_tracker.get_arrivals_with_status.return_value = ("ok", [])
         fake_gtfs = MagicMock()
         fake_gtfs.get_upcoming.return_value = []
         snap = CitiBikeSnapshot(CB_STATUS_OK, [{"name": "Station A"}], time.time())
-        with patch.object(server, "tracker", fake_tracker), patch.object(server, "gtfs_tracker", fake_gtfs):
+        with (
+            patch.object(server, "tracker", fake_tracker),
+            patch.object(server, "gtfs_tracker", fake_gtfs),
+        ):
             with patch.object(server, "cb_tracker") as cb:
                 cb.get_snapshot.return_value = snap
                 first = get_fresh_data(use_mock=False)
@@ -141,17 +166,43 @@ class TestDataCache(unittest.TestCase):
 
     def test_get_fresh_data_live_paths_use_tracker_and_citibike(self):
         from unittest.mock import MagicMock, patch
+
         from citibike import CB_STATUS_OK, CitiBikeSnapshot
 
         fake_tracker = MagicMock()
-        fake_tracker.get_arrivals_with_status.return_value = ("ok", [{
-            "departurestatus": "in 4 mins", "departuretime": "8:34 AM",
-            "public_route": "126", "header": "126 NYC", "passload": "EMPTY", "vehicle_id": "7",
-        }])
+        fake_tracker.get_arrivals_with_status.return_value = (
+            "ok",
+            [
+                {
+                    "departurestatus": "in 4 mins",
+                    "departuretime": "8:34 AM",
+                    "public_route": "126",
+                    "header": "126 NYC",
+                    "passload": "EMPTY",
+                    "vehicle_id": "7",
+                }
+            ],
+        )
         fake_gtfs = MagicMock()
         fake_gtfs.get_upcoming.return_value = []  # force the public-API fallback
-        snap = CitiBikeSnapshot(CB_STATUS_OK, [{"name": "X", "ebikes": 1, "classic": 2, "docks": 3, "walk_min": 3, "is_offline": False}], time.time())
-        with patch.object(server, "tracker", fake_tracker), patch.object(server, "gtfs_tracker", fake_gtfs):
+        snap = CitiBikeSnapshot(
+            CB_STATUS_OK,
+            [
+                {
+                    "name": "X",
+                    "ebikes": 1,
+                    "classic": 2,
+                    "docks": 3,
+                    "walk_min": 3,
+                    "is_offline": False,
+                }
+            ],
+            time.time(),
+        )
+        with (
+            patch.object(server, "tracker", fake_tracker),
+            patch.object(server, "gtfs_tracker", fake_gtfs),
+        ):
             with patch.object(server, "cb_tracker") as cb:
                 cb.get_snapshot.return_value = snap
                 stops, status, data = get_fresh_data(use_mock=False)
@@ -166,7 +217,10 @@ class TestDataCache(unittest.TestCase):
         fake_tracker.get_arrivals_with_status.return_value = ("empty", [])
         fake_gtfs = MagicMock()
         fake_gtfs.get_upcoming.return_value = []
-        with patch.object(server, "tracker", fake_tracker), patch.object(server, "gtfs_tracker", fake_gtfs):
+        with (
+            patch.object(server, "tracker", fake_tracker),
+            patch.object(server, "gtfs_tracker", fake_gtfs),
+        ):
             with patch.object(server, "cb_tracker") as cb:
                 cb.get_snapshot.side_effect = Exception("GBFS down")
                 _stops, _status, data = get_fresh_data(use_mock=False)
@@ -176,11 +230,20 @@ class TestDataCache(unittest.TestCase):
         from unittest.mock import MagicMock, patch
 
         fake_gtfs = MagicMock()
-        fake_gtfs.get_upcoming.return_value = [{
-            "route": "126", "destination": "126 NEW YORK", "eta": "in 5 mins (8:35 AM)",
-            "occupancy": None, "vehicle_id": None, "live": True,
-        }]
-        with patch.object(server, "gtfs_tracker", fake_gtfs), patch.object(server, "cb_tracker") as cb:
+        fake_gtfs.get_upcoming.return_value = [
+            {
+                "route": "126",
+                "destination": "126 NEW YORK",
+                "eta": "in 5 mins (8:35 AM)",
+                "occupancy": None,
+                "vehicle_id": None,
+                "live": True,
+            }
+        ]
+        with (
+            patch.object(server, "gtfs_tracker", fake_gtfs),
+            patch.object(server, "cb_tracker") as cb,
+        ):
             cb.get_station_status.return_value = []
             stops, status, _data = get_fresh_data(use_mock=False)
         self.assertEqual(status["20512"], "ok")
@@ -189,22 +252,31 @@ class TestDataCache(unittest.TestCase):
     def test_data_cache_ttl_follows_schedule_and_interactive(self):
         from unittest.mock import patch
 
-        self.assertEqual(server.data_cache_ttl(interactive=True), server.INTERACTIVE_TTL)
+        self.assertEqual(
+            server.data_cache_ttl(interactive=True), server.INTERACTIVE_TTL
+        )
         with patch.object(server, "get_target_poll_interval", return_value=600):
             self.assertEqual(server.data_cache_ttl(interactive=False), 600)
 
     def test_get_fresh_dashboard_image_is_cached_by_key(self):
-        img1 = server.get_fresh_dashboard_image(use_mock=True, view="morning", width=800, height=480)
-        img2 = server.get_fresh_dashboard_image(use_mock=True, view="morning", width=800, height=480)
+        img1 = server.get_fresh_dashboard_image(
+            use_mock=True, view="morning", width=800, height=480
+        )
+        img2 = server.get_fresh_dashboard_image(
+            use_mock=True, view="morning", width=800, height=480
+        )
         self.assertEqual(img1.size, img2.size)
         # Changing a key dimension should produce a (re-rendered) distinct entry.
-        img3 = server.get_fresh_dashboard_image(use_mock=True, view="evening", width=800, height=600)
+        img3 = server.get_fresh_dashboard_image(
+            use_mock=True, view="evening", width=800, height=600
+        )
         self.assertEqual(img3.size, (800, 600))
 
 
 class TestVersionFallback(unittest.TestCase):
     def test_get_version_falls_back_on_oserror(self):
         from unittest.mock import patch
+
         import version
 
         with patch("builtins.open", side_effect=OSError("missing")):

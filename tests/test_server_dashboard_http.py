@@ -4,7 +4,6 @@ discovery/image formatting helpers.
 """
 
 import base64
-import datetime
 import hashlib
 import io
 import json
@@ -13,16 +12,15 @@ import socket
 import tempfile
 import time
 import unittest
-import urllib.request
-import urllib.error
 from unittest.mock import patch
-from PIL import Image
 
 import discovery
 import ota
+from PIL import Image
+from test_server_http import ServerHTTPTestBase, _http_get
+
 import server
 from server import format_for_kindle, sha256_file
-from test_server_http import ServerHTTPTestBase, _http_get, _http
 
 
 class TestDashboardRoute(ServerHTTPTestBase):
@@ -35,7 +33,9 @@ class TestDashboardRoute(ServerHTTPTestBase):
         self.assertEqual(img.size, (800, 480))
 
     def test_mock_dashboard_kindle_rotation(self):
-        status, headers, body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5&rotate=90")
+        status, headers, body = _http_get(
+            self.port, "/dashboard.png?mock=1&kindle=pw5&rotate=90"
+        )
         self.assertEqual(status, 200)
         self.assertEqual(headers.get("X-Resolved-View") in ("morning", "evening"), True)
         img = Image.open(io.BytesIO(body))
@@ -79,7 +79,11 @@ class TestDashboardRoute(ServerHTTPTestBase):
     def test_dashboard_carries_version_and_sha_headers(self):
         cand1 = os.path.join(os.path.dirname(server.__file__), "tracker-arm")
         cand2 = os.path.join(os.path.dirname(server.__file__), "..", "tracker-arm")
-        binary = cand1 if os.path.exists(cand1) else (cand2 if os.path.exists(cand2) else cand1)
+        binary = (
+            cand1
+            if os.path.exists(cand1)
+            else (cand2 if os.path.exists(cand2) else cand1)
+        )
         manifest = os.path.join(os.path.dirname(binary), "tracker-arm.manifest.json")
         existed = os.path.exists(binary)
         m_existed = os.path.exists(manifest)
@@ -87,21 +91,27 @@ class TestDashboardRoute(ServerHTTPTestBase):
             with open(binary, "wb") as f:
                 f.write(b"FAKEARM")
         if not m_existed:
-            man_content = json.dumps({
-                "format": "transit-tracker-ota-v1",
-                "version": server.SERVER_VERSION,
-                "sha256": server.sha256_file(binary),
-                "size": os.path.getsize(binary),
-                "signature": base64.b64encode(b"\x00" * 64).decode("ascii"),
-            })
+            man_content = json.dumps(
+                {
+                    "format": "transit-tracker-ota-v1",
+                    "version": server.SERVER_VERSION,
+                    "sha256": server.sha256_file(binary),
+                    "size": os.path.getsize(binary),
+                    "signature": base64.b64encode(b"\x00" * 64).decode("ascii"),
+                }
+            )
             with open(manifest, "w", encoding="utf-8") as f:
                 f.write(man_content)
         ota.clear_caches()
         try:
-            status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
+            status, headers, _body = _http_get(
+                self.port, "/dashboard.png?mock=1&kindle=pw5"
+            )
             self.assertEqual(status, 200)
             self.assertEqual(headers.get("X-Tracker-Version"), server.SERVER_VERSION)
-            self.assertEqual(headers.get("X-Tracker-SHA256"), server.sha256_file(binary))
+            self.assertEqual(
+                headers.get("X-Tracker-SHA256"), server.sha256_file(binary)
+            )
         finally:
             if not m_existed and os.path.exists(manifest):
                 os.remove(manifest)
@@ -129,12 +139,16 @@ class TestDashboardRoute(ServerHTTPTestBase):
         self.assertTrue(len(body) > 0)
 
     def test_battery_valid_in_range_accepted(self):
-        status, _headers, body = _http_get(self.port, "/dashboard.png?mock=1&batt=77&charging=1")
+        status, _headers, body = _http_get(
+            self.port, "/dashboard.png?mock=1&batt=77&charging=1"
+        )
         self.assertEqual(status, 200)
         self.assertTrue(len(body) > 0)
 
     def test_view_via_header(self):
-        status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1", headers={"X-Tracker-View": "evening"})
+        status, headers, _body = _http_get(
+            self.port, "/dashboard.png?mock=1", headers={"X-Tracker-View": "evening"}
+        )
         self.assertEqual(status, 200)
         self.assertEqual(headers.get("X-Tracker-View"), "evening")
 
@@ -149,7 +163,11 @@ class TestTrackerArmRoute(ServerHTTPTestBase):
         super().setUpClass()
         cand1 = os.path.join(os.path.dirname(server.__file__), "tracker-arm")
         cand2 = os.path.join(os.path.dirname(server.__file__), "..", "tracker-arm")
-        cls.binary = cand1 if os.path.exists(cand1) else (cand2 if os.path.exists(cand2) else cand1)
+        cls.binary = (
+            cand1
+            if os.path.exists(cand1)
+            else (cand2 if os.path.exists(cand2) else cand1)
+        )
         cls._pre_existing = os.path.exists(cls.binary)
         if not cls._pre_existing:
             with open(cls.binary, "wb") as f:
@@ -189,7 +207,9 @@ class TestTrackerArmRoute(ServerHTTPTestBase):
     def test_conditional_request_304(self):
         _status, headers, _body = _http_get(self.port, "/tracker-arm")
         last_mod = headers.get("Last-Modified")
-        status, _headers, _body = _http_get(self.port, "/tracker-arm", headers={"If-Modified-Since": last_mod})
+        status, _headers, _body = _http_get(
+            self.port, "/tracker-arm", headers={"If-Modified-Since": last_mod}
+        )
         self.assertEqual(status, 304)
 
 
@@ -199,7 +219,9 @@ class TestDiscoveryAndLighting(unittest.TestCase):
             f.write(b"payload-bytes")
             path = f.name
         try:
-            self.assertEqual(sha256_file(path), hashlib.sha256(b"payload-bytes").hexdigest())
+            self.assertEqual(
+                sha256_file(path), hashlib.sha256(b"payload-bytes").hexdigest()
+            )
         finally:
             os.remove(path)
 
@@ -210,6 +232,7 @@ class TestDiscoveryAndLighting(unittest.TestCase):
 
     def test_peak_commute_boundaries(self):
         from datetime import datetime
+
         self.assertTrue(server.is_peak_commute_hours(datetime(2026, 1, 1, 7, 30)))
         self.assertFalse(server.is_peak_commute_hours(datetime(2026, 1, 1, 9, 30)))
         self.assertTrue(server.is_peak_commute_hours(datetime(2026, 1, 1, 16, 30)))
@@ -217,6 +240,7 @@ class TestDiscoveryAndLighting(unittest.TestCase):
 
     def test_lighting_and_poll_interval_pair(self):
         from datetime import datetime
+
         peak = datetime(2026, 1, 1, 8, 0)
         off = datetime(2026, 1, 1, 13, 0)
         self.assertEqual(server.get_commute_lighting(peak), (8, 12))
@@ -226,20 +250,31 @@ class TestDiscoveryAndLighting(unittest.TestCase):
 
     def test_presentation_by_schedule(self):
         from datetime import datetime
+
         saved = server.FORCE_FAST_POLL
         server.FORCE_FAST_POLL = False
         try:
-            self.assertEqual(server.get_presentation(datetime(2026, 1, 1, 8, 0)), "interactive")
-            self.assertEqual(server.get_presentation(datetime(2026, 1, 1, 13, 0)), "idle")
-            self.assertEqual(server.get_presentation(datetime(2026, 1, 1, 23, 0)), "dormant")
-            self.assertEqual(server.get_presentation(datetime(2026, 1, 1, 2, 0)), "dormant")
+            self.assertEqual(
+                server.get_presentation(datetime(2026, 1, 1, 8, 0)), "interactive"
+            )
+            self.assertEqual(
+                server.get_presentation(datetime(2026, 1, 1, 13, 0)), "idle"
+            )
+            self.assertEqual(
+                server.get_presentation(datetime(2026, 1, 1, 23, 0)), "dormant"
+            )
+            self.assertEqual(
+                server.get_presentation(datetime(2026, 1, 1, 2, 0)), "dormant"
+            )
         finally:
             server.FORCE_FAST_POLL = saved
 
     def test_status_notes(self):
         self.assertIn("SLEEPING", server.get_status_note("dormant"))
         self.assertIn("press power", server.get_status_note("dormant").lower())
-        self.assertEqual(server.get_status_note("idle"), "PRESS POWER BUTTON TO INTERACT")
+        self.assertEqual(
+            server.get_status_note("idle"), "PRESS POWER BUTTON TO INTERACT"
+        )
         self.assertEqual(server.get_status_note("interactive"), "")
 
 
@@ -248,10 +283,14 @@ class TestPresentationOverHTTP(ServerHTTPTestBase):
         saved = server.FORCE_FAST_POLL
         server.FORCE_FAST_POLL = False
         try:
-            status, headers, _ = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
+            status, headers, _ = _http_get(
+                self.port, "/dashboard.png?mock=1&kindle=pw5"
+            )
             self.assertEqual(status, 200)
             self.assertIn("X-Tracker-Presentation", headers)
-            self.assertIn(headers["X-Tracker-Presentation"], ("interactive", "idle", "dormant"))
+            self.assertIn(
+                headers["X-Tracker-Presentation"], ("interactive", "idle", "dormant")
+            )
         finally:
             server.FORCE_FAST_POLL = saved
 
@@ -271,7 +310,9 @@ class TestPresentationOverHTTP(ServerHTTPTestBase):
         saved = server.get_presentation
         server.get_presentation = lambda dt=None: "dormant"
         try:
-            status, headers, body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
+            status, headers, body = _http_get(
+                self.port, "/dashboard.png?mock=1&kindle=pw5"
+            )
             self.assertEqual(status, 200)
             self.assertEqual(headers.get("X-Tracker-Presentation"), "dormant")
             self.assertTrue(len(body) > 0)
@@ -312,11 +353,15 @@ class TestMdnsAdvertiser(unittest.TestCase):
         discovery.ServiceInfo = lambda *a, **k: {"args": a, "kwargs": k}
         with patch("discovery.get_local_ip", return_value="192.168.1.100"):
             try:
-                zc, info = discovery.start_mdns_advertiser(http_port=8000, version="1.2.3")
+                zc, info = discovery.start_mdns_advertiser(
+                    http_port=8000, version="1.2.3"
+                )
                 self.assertIsInstance(zc, FakeZC)
                 self.assertIsNotNone(info)
                 self.assertIn("info", registered)
-                self.assertEqual(registered["info"]["kwargs"]["server"], "transittracker.local.")
+                self.assertEqual(
+                    registered["info"]["kwargs"]["server"], "transittracker.local."
+                )
             finally:
                 discovery.ZEROCONF_AVAILABLE = original_flag
                 if original_zc is None:
@@ -363,7 +408,9 @@ class TestMdnsFailure(unittest.TestCase):
         discovery.Zeroconf = FailingZC
         with patch("discovery.get_local_ip", return_value="192.168.1.100"):
             try:
-                zc, info = discovery.start_mdns_advertiser(http_port=8000, version="1.0.0")
+                zc, info = discovery.start_mdns_advertiser(
+                    http_port=8000, version="1.0.0"
+                )
                 self.assertIsNone(zc)
                 self.assertIsNone(info)
             finally:
@@ -390,7 +437,9 @@ class TestUDPDiscoveryResponder(unittest.TestCase):
 
         discovery.DISCOVERY_PORT = port
         try:
-            t = discovery.start_discovery_responder(http_port=server.PORT, version="9.9.9", port=port)
+            t = discovery.start_discovery_responder(
+                http_port=server.PORT, version="9.9.9", port=port
+            )
             self.assertTrue(t.daemon)
             time.sleep(0.2)
 
@@ -421,7 +470,9 @@ class TestSanitizeKindlePanel(unittest.TestCase):
         self.assertEqual(server.sanitize_kindle_panel(5000, 4000), server.PW5_LANDSCAPE)
 
     def test_non_numeric_falls_back(self):
-        self.assertEqual(server.sanitize_kindle_panel("abc", "xyz"), server.PW5_LANDSCAPE)
+        self.assertEqual(
+            server.sanitize_kindle_panel("abc", "xyz"), server.PW5_LANDSCAPE
+        )
         self.assertEqual(server.sanitize_kindle_panel(None, None), server.PW5_LANDSCAPE)
 
     def test_bad_aspect_ratio_falls_back(self):
@@ -447,12 +498,18 @@ class TestFormatForKindle(unittest.TestCase):
 
     def test_custom_target_size(self):
         base = Image.new("RGB", (1448, 1072), "white")
-        out = format_for_kindle(base, orientation="landscape", rotation=90, target=(1448, 1072))
+        out = format_for_kindle(
+            base, orientation="landscape", rotation=90, target=(1448, 1072)
+        )
         self.assertEqual(out.size, (1072, 1448))
 
     def test_native_render_scale(self):
-        self.assertAlmostEqual(server.native_render_scale(1648, 1236, 800), 2.06, places=2)
-        self.assertAlmostEqual(server.native_render_scale(1448, 1072, 800), 1.81, places=2)
+        self.assertAlmostEqual(
+            server.native_render_scale(1648, 1236, 800), 2.06, places=2
+        )
+        self.assertAlmostEqual(
+            server.native_render_scale(1448, 1072, 800), 1.81, places=2
+        )
 
 
 if __name__ == "__main__":

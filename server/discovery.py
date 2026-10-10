@@ -1,14 +1,15 @@
+import ipaddress
 import socket
 import threading
-import ipaddress
-from typing import Tuple, Any, Optional
+from typing import Any, Optional
 
 try:
-    from zeroconf import Zeroconf, ServiceInfo
+    from zeroconf import ServiceInfo, Zeroconf
+
     ZEROCONF_AVAILABLE = True
 except ImportError:
-    Zeroconf = None
-    ServiceInfo = None
+    Zeroconf = None  # type: ignore[assignment,misc]
+    ServiceInfo = None  # type: ignore[assignment,misc]
     ZEROCONF_AVAILABLE = False
 
 from version import VERSION
@@ -104,15 +105,22 @@ def start_discovery_responder(
                     msg = data.decode("utf-8", errors="ignore").strip()
                     # Accept the legacy BUS_TRACKER_DISCOVER probe so devices running
                     # an older binary can still locate the server and OTA-upgrade.
-                    if "TRANSIT_TRACKER_DISCOVER" in msg or "BUS_TRACKER_DISCOVER" in msg:
+                    if (
+                        "TRANSIT_TRACKER_DISCOVER" in msg
+                        or "BUS_TRACKER_DISCOVER" in msg
+                    ):
                         resp_ip = local_ip_for_peer(addr[0], addr[1])
                         if not resp_ip:
-                            print(f"[Discovery] No route back to {addr[0]}; not answering")
+                            print(
+                                f"[Discovery] No route back to {addr[0]}; not answering"
+                            )
                             continue
                         url = format_http_url(resp_ip, http_port)
-                        reply = f"TRANSIT_TRACKER_OFFER {url} {version}\n".encode("utf-8")
+                        reply = f"TRANSIT_TRACKER_OFFER {url} {version}\n".encode()
                         sock.sendto(reply, addr)
-                        print(f"[Discovery] Answered probe from {addr[0]}:{addr[1]} -> {url}")
+                        print(
+                            f"[Discovery] Answered probe from {addr[0]}:{addr[1]} -> {url}"
+                        )
                 except Exception:
                     pass
 
@@ -121,7 +129,9 @@ def start_discovery_responder(
     return t
 
 
-def start_mdns_advertiser(http_port: int = 8000, version: str = VERSION) -> Tuple[Optional[Any], Optional[Any]]:
+def start_mdns_advertiser(
+    http_port: int = 8000, version: str = VERSION
+) -> tuple[Optional[Any], Optional[Any]]:
     """
     Registers _transittracker._tcp.local. service with Zeroconf / mDNS.
     """
@@ -136,7 +146,7 @@ def start_mdns_advertiser(http_port: int = 8000, version: str = VERSION) -> Tupl
             return None, None
         ip_bytes = socket.inet_aton(local_ip)
         service_type = "_transittracker._tcp.local."
-        service_name = f"TransitTracker._transittracker._tcp.local."
+        service_name = "TransitTracker._transittracker._tcp.local."
         desc = {"version": version, "endpoint": "/dashboard.png"}
 
         info = ServiceInfo(

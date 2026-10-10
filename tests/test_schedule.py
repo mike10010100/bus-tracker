@@ -4,7 +4,8 @@ Unit tests for commute schedule and lighting logic in server.py
 
 import unittest
 from datetime import datetime
-from server import is_peak_commute_hours, get_commute_lighting, get_target_poll_interval
+
+from server import get_commute_lighting, get_target_poll_interval, is_peak_commute_hours
 
 
 class TestCommuteSchedule(unittest.TestCase):
@@ -52,6 +53,7 @@ class TestCommuteSchedule(unittest.TestCase):
 
     def test_is_overnight_hours_wraps_midnight(self):
         from server import is_overnight_hours
+
         cases = [
             (datetime(2026, 10, 8, 23, 30), True),
             (datetime(2026, 10, 8, 0, 30), True),
@@ -75,15 +77,18 @@ class TestCommuteSchedule(unittest.TestCase):
         self.assertEqual(off.warmth, 0)
 
     def test_force_fast_poll_overrides_schedule(self):
-        import server
         import schedule
+
+        import server
 
         original = schedule.FORCE_FAST_POLL
         try:
             schedule.FORCE_FAST_POLL = True
             server.FORCE_FAST_POLL = True
             # Even at 3 AM, forced-fast returns 60s.
-            self.assertEqual(server.get_target_poll_interval(datetime(2026, 10, 8, 3, 0)), 60)
+            self.assertEqual(
+                server.get_target_poll_interval(datetime(2026, 10, 8, 3, 0)), 60
+            )
         finally:
             schedule.FORCE_FAST_POLL = original
             server.FORCE_FAST_POLL = original

@@ -1,0 +1,50 @@
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "C4",  # flake8-comprehensions
+    "S",   # flake8-bandit (security analysis)
+]
+ignore = [
+    "E501", # line length is handled by ruff format
+    "S101", # allow assert in tests
+    "S104", # binding to 0.0.0.0 is intended for LAN server
+    "S110", # try-except-pass in fallback/cleanup routines
+    "S112", # try-except-continue in fallback loops
+    "S310", # urllib.request.urlopen for known HTTP endpoints
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S105", "S106", "S108", "S311", "S110"]
+"server/discovery.py" = ["S104"]
+"server/server.py" = ["S104"]
+
+[tool.mypy]
+python_version = "3.9"
+ignore_missing_imports = true
+disable_error_code = ["import-untyped"]
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+
+[tool.coverage.run]
+source = ["server"]
+branch = true
+omit = [
+    "tests/*",
+    "test_*.py",
+    "client-go/*",
+    "scratch/*",
+]
+
+[tool.coverage.report]
+fail_under = 92
+show_missing = true

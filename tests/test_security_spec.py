@@ -7,31 +7,24 @@ Comprehensive tests for security architecture:
 """
 
 import base64
-import copy
 import hashlib
-import io
 import json
 import os
-import re
 import socket
 import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import MagicMock, patch
 from http.server import ThreadingHTTPServer
+from unittest.mock import MagicMock, patch
 
+import ota
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
-from cryptography.hazmat.primitives import serialization
-
-import discovery
 from identity import (
     CERT_FORMAT,
-    RESP_FORMAT,
-    SIGNED_HEADERS,
     IdentityError,
     ServerIdentity,
     b64decode_strict,
@@ -40,20 +33,26 @@ from identity import (
     load_identity,
 )
 from logsafe import redact, safe_log_lines, strip_controls
-import ota
 from paths import artifact_candidates, find_artifact, resolve_cache_dir
-import server
-from server import DashboardHandler, check_control_auth
 from test_server_http import _http, _http_get
+
+import server
+from server import DashboardHandler
 
 
 class TestVectorsAndCrypto(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         vec_path = os.path.join(
-            os.path.dirname(__file__), "..", "client-go", "internal", "otasig", "testdata", "vectors.json"
+            os.path.dirname(__file__),
+            "..",
+            "client-go",
+            "internal",
+            "otasig",
+            "testdata",
+            "vectors.json",
         )
-        with open(vec_path, "r", encoding="utf-8") as f:
+        with open(vec_path, encoding="utf-8") as f:
             cls.vectors = json.load(f)
 
     def test_response_message_builder_against_vectors(self):
@@ -98,9 +97,13 @@ class TestVectorsAndCrypto(unittest.TestCase):
 
     def test_is_valid_nonce(self):
         self.assertTrue(is_valid_nonce("0123456789abcdef0123456789abcdef"))
-        self.assertFalse(is_valid_nonce("0123456789ABCDEF0123456789ABCDEF"))  # uppercase rejected
+        self.assertFalse(
+            is_valid_nonce("0123456789ABCDEF0123456789ABCDEF")
+        )  # uppercase rejected
         self.assertFalse(is_valid_nonce("short"))
-        self.assertFalse(is_valid_nonce("0123456789abcdef0123456789abcdef0"))  # 33 chars
+        self.assertFalse(
+            is_valid_nonce("0123456789abcdef0123456789abcdef0")
+        )  # 33 chars
         self.assertFalse(is_valid_nonce(None))
         self.assertFalse(is_valid_nonce(123))
 
@@ -132,13 +135,15 @@ class TestIdentityModule(unittest.TestCase):
         identity = ServerIdentity(priv, cert_json)
         self.assertEqual(identity.public_key_b64, pub_b64)
 
-        hdrs = dict(identity.sign_response(
-            nonce="0123456789abcdef0123456789abcdef",
-            path="/dashboard.png",
-            status=200,
-            body=b"TESTPNG",
-            headers={"etag": '"xyz"'},
-        ))
+        hdrs = dict(
+            identity.sign_response(
+                nonce="0123456789abcdef0123456789abcdef",
+                path="/dashboard.png",
+                status=200,
+                body=b"TESTPNG",
+                headers={"etag": '"xyz"'},
+            )
+        )
         self.assertIn("X-Tracker-Cert", hdrs)
         self.assertIn("X-Tracker-Auth", hdrs)
         self.assertEqual(hdrs["X-Tracker-Cert"], identity.cert_header)
@@ -156,10 +161,13 @@ class TestIdentityModule(unittest.TestCase):
 
     def test_load_identity_missing_files(self):
         with tempfile.TemporaryDirectory() as td:
-            with patch.dict("os.environ", {
-                "IDENTITY_KEY_PATH": os.path.join(td, "nonexistent.key"),
-                "IDENTITY_CERT_PATH": os.path.join(td, "nonexistent.cert"),
-            }):
+            with patch.dict(
+                "os.environ",
+                {
+                    "IDENTITY_KEY_PATH": os.path.join(td, "nonexistent.key"),
+                    "IDENTITY_CERT_PATH": os.path.join(td, "nonexistent.cert"),
+                },
+            ):
                 ident, status = load_identity()
                 self.assertIsNone(ident)
                 self.assertIn("not found", status)
@@ -173,10 +181,13 @@ class TestIdentityModule(unittest.TestCase):
             with open(cert_path, "wb") as f:
                 f.write(b'{"bad": "cert"}')
 
-            with patch.dict("os.environ", {
-                "IDENTITY_KEY_PATH": key_path,
-                "IDENTITY_CERT_PATH": cert_path,
-            }):
+            with patch.dict(
+                "os.environ",
+                {
+                    "IDENTITY_KEY_PATH": key_path,
+                    "IDENTITY_CERT_PATH": cert_path,
+                },
+            ):
                 ident, status = load_identity()
                 self.assertIsNone(ident)
                 self.assertIn("unusable", status)
@@ -301,8 +312,14 @@ class TestPathsAndLogsafe(unittest.TestCase):
         self.assertIsNone(find_artifact("definitely_does_not_exist_xyz"))
 
     def test_logsafe_redact_and_strip(self):
-        self.assertEqual(redact("GET /stop?token=secret123 HTTP/1.1"), "GET /stop?token=REDACTED HTTP/1.1")
-        self.assertEqual(redact("http://host/?foo=1&token=abc&bar=2"), "http://host/?foo=1&token=REDACTED&bar=2")
+        self.assertEqual(
+            redact("GET /stop?token=secret123 HTTP/1.1"),
+            "GET /stop?token=REDACTED HTTP/1.1",
+        )
+        self.assertEqual(
+            redact("http://host/?foo=1&token=abc&bar=2"),
+            "http://host/?foo=1&token=REDACTED&bar=2",
+        )
 
         dirty = "\x1b[31mRed text\x1b[0m\x07\x08clean"
         clean = strip_controls(dirty)
@@ -353,7 +370,9 @@ class TestAuthenticatedEndpoints(unittest.TestCase):
 
         # Valid nonce -> 200 with signed auth header
         nonce = "aabbccddeeff00112233445566778899"
-        status, headers, body = _http_get(self.port, "/identity", headers={"X-Tracker-Nonce": nonce})
+        status, headers, body = _http_get(
+            self.port, "/identity", headers={"X-Tracker-Nonce": nonce}
+        )
         self.assertEqual(status, 200)
         self.assertIn("X-Tracker-Cert", headers)
         self.assertIn("X-Tracker-Auth", headers)
@@ -371,13 +390,17 @@ class TestAuthenticatedEndpoints(unittest.TestCase):
             body=body,
             headers={},
         )
-        pub = Ed25519PublicKey.from_public_bytes(b64decode_strict(self.test_identity.public_key_b64))
+        pub = Ed25519PublicKey.from_public_bytes(
+            b64decode_strict(self.test_identity.public_key_b64)
+        )
         pub.verify(sig, expected_msg)
 
     def test_signed_dashboard_200_and_304(self):
         nonce = "11223344556677889900aabbccddeeff"
         status, headers, body = _http_get(
-            self.port, "/dashboard.png?mock=1&kindle=pw5", headers={"X-Tracker-Nonce": nonce}
+            self.port,
+            "/dashboard.png?mock=1&kindle=pw5",
+            headers={"X-Tracker-Nonce": nonce},
         )
         self.assertEqual(status, 200)
         self.assertIn("X-Tracker-Auth", headers)
@@ -410,7 +433,9 @@ class TestAuthenticatedEndpoints(unittest.TestCase):
         self.assertEqual(status, 400)
 
     def test_view_sanitization(self):
-        status, headers, _ = _http_get(self.port, "/dashboard.png?mock=1&view=<script>alert(1)</script>")
+        status, headers, _ = _http_get(
+            self.port, "/dashboard.png?mock=1&view=<script>alert(1)</script>"
+        )
         self.assertEqual(status, 200)
         self.assertEqual(headers.get("X-Tracker-View"), "auto")
 
@@ -439,7 +464,10 @@ class TestAuthenticatedEndpoints(unittest.TestCase):
             "POST",
             self.port,
             "/mode",
-            headers={"X-Tracker-Token": server.CONTROL_TOKEN, "Content-Type": "application/x-www-form-urlencoded"},
+            headers={
+                "X-Tracker-Token": server.CONTROL_TOKEN,
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
             body=b"set=oneshot",
         )
         self.assertEqual(status, 200)
@@ -450,7 +478,10 @@ class TestAuthenticatedEndpoints(unittest.TestCase):
             "POST",
             self.port,
             "/action",
-            headers={"X-Tracker-Token": server.CONTROL_TOKEN, "Content-Type": "application/x-www-form-urlencoded"},
+            headers={
+                "X-Tracker-Token": server.CONTROL_TOKEN,
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
             body=b"do=disable-ads",
         )
         self.assertEqual(status, 200)
@@ -461,7 +492,10 @@ class TestAuthenticatedEndpoints(unittest.TestCase):
             "POST",
             self.port,
             "/diag/request",
-            headers={"X-Tracker-Token": server.CONTROL_TOKEN, "Content-Type": "application/x-www-form-urlencoded"},
+            headers={
+                "X-Tracker-Token": server.CONTROL_TOKEN,
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
             body=b"level=full",
         )
         self.assertEqual(status, 200)
@@ -492,7 +526,7 @@ class TestAuthenticatedEndpoints(unittest.TestCase):
                 self.assertEqual(resp_json["version"], "2.0.0")
 
     def test_parse_cert_errors_and_verify(self):
-        from identity import parse_cert, verify_cert, cert_message
+        from identity import parse_cert, verify_cert
 
         # Invalid JSON
         with self.assertRaises(IdentityError):
@@ -508,25 +542,35 @@ class TestAuthenticatedEndpoints(unittest.TestCase):
 
         # Bad public key
         with self.assertRaises(IdentityError):
-            parse_cert(b'{"format": "transit-tracker-server-v1", "public_key": "short"}')
+            parse_cert(
+                b'{"format": "transit-tracker-server-v1", "public_key": "short"}'
+            )
 
         # Bad issued_at
         good_pub = base64.b64encode(b"\x00" * 32).decode("ascii")
         with self.assertRaises(IdentityError):
-            parse_cert(json.dumps({
-                "format": "transit-tracker-server-v1",
-                "public_key": good_pub,
-                "issued_at": -1,
-            }).encode("utf-8"))
+            parse_cert(
+                json.dumps(
+                    {
+                        "format": "transit-tracker-server-v1",
+                        "public_key": good_pub,
+                        "issued_at": -1,
+                    }
+                ).encode("utf-8")
+            )
 
         # Bad signature length
         with self.assertRaises(IdentityError):
-            parse_cert(json.dumps({
-                "format": "transit-tracker-server-v1",
-                "public_key": good_pub,
-                "issued_at": 100,
-                "signature": "short",
-            }).encode("utf-8"))
+            parse_cert(
+                json.dumps(
+                    {
+                        "format": "transit-tracker-server-v1",
+                        "public_key": good_pub,
+                        "issued_at": 100,
+                        "signature": "short",
+                    }
+                ).encode("utf-8")
+            )
 
         # Verify cert helper failure
         self.assertFalse(verify_cert({}, good_pub))
@@ -534,12 +578,14 @@ class TestAuthenticatedEndpoints(unittest.TestCase):
         # ServerIdentity mismatched pubkey
         priv = Ed25519PrivateKey.generate()
         other_pub = base64.b64encode(b"\x99" * 32).decode("ascii")
-        bad_cert = json.dumps({
-            "format": "transit-tracker-server-v1",
-            "public_key": other_pub,
-            "issued_at": 100,
-            "signature": base64.b64encode(b"\x00" * 64).decode("ascii"),
-        }).encode("utf-8")
+        bad_cert = json.dumps(
+            {
+                "format": "transit-tracker-server-v1",
+                "public_key": other_pub,
+                "issued_at": 100,
+                "signature": base64.b64encode(b"\x00" * 64).decode("ascii"),
+            }
+        ).encode("utf-8")
         with self.assertRaises(IdentityError):
             ServerIdentity(priv, bad_cert)
 

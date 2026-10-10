@@ -18,7 +18,7 @@ def get_version() -> str:
     if not os.path.exists(version_file) and os.path.exists(_parent_version):
         version_file = _parent_version
     try:
-        with open(version_file, "r", encoding="utf-8") as f:
+        with open(version_file, encoding="utf-8") as f:
             return f.read().strip()
     except OSError:
         return "0.0.0"

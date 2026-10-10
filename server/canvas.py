@@ -1,7 +1,8 @@
 import os
 import re
-from typing import Optional, List, Dict, Any, Tuple
-from PIL import Image, ImageDraw, ImageFont
+from typing import Any, Optional
+
+from PIL import ImageDraw, ImageFont
 
 # Design-space canvas dimensions. All layout math in this module is expressed
 # in this logical 800px-wide coordinate space; ScaledDraw translates it to the
@@ -29,9 +30,9 @@ class ScaledDraw:
     def __init__(self, draw: ImageDraw.ImageDraw, scale: float = 1.0) -> None:
         self._d = draw
         self._s = float(scale)
-        self._font_cache: Dict[Tuple[str, int], Any] = {}
+        self._font_cache: dict[tuple[str, int], Any] = {}
 
-    def _pt(self, p: Any) -> Tuple[float, float]:
+    def _pt(self, p: Any) -> tuple[float, float]:
         return (p[0] * self._s, p[1] * self._s)
 
     def _box(self, xy: Any) -> Any:
@@ -40,7 +41,7 @@ class ScaledDraw:
             return [xy[0] * self._s, xy[1] * self._s, xy[2] * self._s, xy[3] * self._s]
         return [self._pt(xy[0]), self._pt(xy[1])]
 
-    def _outline(self, w: Optional[float]) -> Optional[int]:
+    def _outline(self, w: Optional[float]) -> Any:
         if w is None:
             return None
         return max(1, int(round(w * self._s)))
@@ -57,7 +58,7 @@ class ScaledDraw:
         if cached is not None:
             return cached
         try:
-            scaled = ImageFont.truetype(path, max(1, int(round(size * self._s))))
+            scaled: Any = ImageFont.truetype(path, max(1, int(round(size * self._s))))
             try:
                 scaled._transit_path = path
                 scaled._transit_size = max(1, int(round(size * self._s)))
@@ -68,10 +69,14 @@ class ScaledDraw:
         self._font_cache[key] = scaled
         return scaled
 
-    def text(self, xy: Any, text: str, fill: Any = None, font: Any = None, **kwargs: Any) -> None:
+    def text(
+        self, xy: Any, text: str, fill: Any = None, font: Any = None, **kwargs: Any
+    ) -> None:
         self._d.text(self._pt(xy), text, fill=fill, font=self._font(font), **kwargs)
 
-    def textbbox(self, xy: Any, text: str, font: Any = None, **kwargs: Any) -> Tuple[float, float, float, float]:
+    def textbbox(
+        self, xy: Any, text: str, font: Any = None, **kwargs: Any
+    ) -> tuple[float, float, float, float]:
         bbox = self._d.textbbox(self._pt(xy), text, font=self._font(font), **kwargs)
         return tuple(v / self._s for v in bbox)  # type: ignore[return-value]
 
@@ -79,12 +84,35 @@ class ScaledDraw:
         return self._d.textlength(text, font=self._font(font), **kwargs) / self._s
 
     def line(self, xy: Any, fill: Any = None, width: float = 1, **kwargs: Any) -> None:
-        self._d.line([self._pt(p) for p in xy], fill=fill, width=self._outline(width), **kwargs)
+        self._d.line(
+            [self._pt(p) for p in xy], fill=fill, width=self._outline(width), **kwargs
+        )
 
-    def rectangle(self, xy: Any, fill: Any = None, outline: Any = None, width: float = 1, **kwargs: Any) -> None:
-        self._d.rectangle(self._box(xy), fill=fill, outline=outline, width=self._outline(width), **kwargs)
+    def rectangle(
+        self,
+        xy: Any,
+        fill: Any = None,
+        outline: Any = None,
+        width: float = 1,
+        **kwargs: Any,
+    ) -> None:
+        self._d.rectangle(
+            self._box(xy),
+            fill=fill,
+            outline=outline,
+            width=self._outline(width),
+            **kwargs,
+        )
 
-    def rounded_rectangle(self, xy: Any, radius: float = 0, fill: Any = None, outline: Any = None, width: float = 1, **kwargs: Any) -> None:
+    def rounded_rectangle(
+        self,
+        xy: Any,
+        radius: float = 0,
+        fill: Any = None,
+        outline: Any = None,
+        width: float = 1,
+        **kwargs: Any,
+    ) -> None:
         self._d.rounded_rectangle(
             self._box(xy),
             radius=max(0, int(round(radius * self._s))),
@@ -94,11 +122,24 @@ class ScaledDraw:
             **kwargs,
         )
 
-    def polygon(self, xy: Any, fill: Any = None, outline: Any = None, width: float = 1, **kwargs: Any) -> None:
-        self._d.polygon([self._pt(p) for p in xy], fill=fill, outline=outline, width=self._outline(width), **kwargs)
+    def polygon(
+        self,
+        xy: Any,
+        fill: Any = None,
+        outline: Any = None,
+        width: float = 1,
+        **kwargs: Any,
+    ) -> None:
+        self._d.polygon(
+            [self._pt(p) for p in xy],
+            fill=fill,
+            outline=outline,
+            width=self._outline(width),
+            **kwargs,
+        )
 
 
-STOPS = [
+STOPS: list[dict[str, Any]] = [
     {
         "id": "20512",
         "name": "Washington & 9th",
@@ -114,18 +155,26 @@ STOPS = [
 ]
 
 
-def get_font(size: int, bold: bool = False) -> Optional[ImageFont.ImageFont]:
+def get_font(size: int, bold: bool = False) -> Any:
     """
     Attempts to load a clean sans-serif system font (Arial/Helvetica),
     falling back gracefully to Pillow's default font.
     """
     font_paths = [
         # Linux / Docker paths (fonts-dejavu-core)
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        if bold
+        else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
+        if bold
+        else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf"
+        if bold
+        else "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
         # macOS paths
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
+        if bold
+        else "/System/Library/Fonts/Supplemental/Arial.ttf",
         "/System/Library/Fonts/Helvetica.ttc",
         "/System/Library/Fonts/Supplemental/Trebuchet MS.ttf",
         "/System/Library/Fonts/SFNS.ttf",
@@ -134,7 +183,7 @@ def get_font(size: int, bold: bool = False) -> Optional[ImageFont.ImageFont]:
     for p in font_paths:
         if os.path.exists(p):
             try:
-                font = ImageFont.truetype(p, size)
+                font: Any = ImageFont.truetype(p, size)
                 # Tag so ScaledDraw can reconstruct this font at native size.
                 font._transit_path = p
                 font._transit_size = size
@@ -142,13 +191,13 @@ def get_font(size: int, bold: bool = False) -> Optional[ImageFont.ImageFont]:
             except Exception:
                 continue
     try:
-        font = ImageFont.load_default()
+        default_font: Any = ImageFont.load_default()
         try:
-            font._transit_path = getattr(font, "path", None)
-            font._transit_size = size
+            default_font._transit_path = getattr(default_font, "path", None)
+            default_font._transit_size = size
         except Exception:
             pass
-        return font
+        return default_font
     except Exception:
         return None
 
@@ -161,7 +210,7 @@ _NO_BUS_MESSAGE = "No buses tracked in next hour"
 _ERROR_MESSAGE = "Live data unavailable — retrying"
 
 
-def empty_state_message(status: Optional[str]) -> Tuple[str, str]:
+def empty_state_message(status: Optional[str]) -> tuple[str, str]:
     """
     Maps an upstream fetch status to the message (and colour) shown in an
     empty arrival card, so an upstream outage is never presented as
@@ -262,7 +311,12 @@ def draw_mock_badge(draw: Any, x: int, y: int, font: Any = None) -> int:
     box_h = 22
     x1 = x + tw + 16
     draw.rounded_rectangle([x, y, x1, y + box_h], radius=4, fill="black")
-    draw.text((x + 8 - bbox[0], y + (box_h - (bbox[3] - bbox[1])) // 2 - bbox[1]), text, fill="white", font=font)
+    draw.text(
+        (x + 8 - bbox[0], y + (box_h - (bbox[3] - bbox[1])) // 2 - bbox[1]),
+        text,
+        fill="white",
+        font=font,
+    )
     return x1
 
 
@@ -310,14 +364,28 @@ def draw_battery_indicator(
     icon_x = curr_x
     icon_y = y + 1
 
-    draw.rounded_rectangle([icon_x, icon_y, icon_x + bw, icon_y + bh], radius=3, outline="black", width=2)
+    draw.rounded_rectangle(
+        [icon_x, icon_y, icon_x + bw, icon_y + bh], radius=3, outline="black", width=2
+    )
     term_y = icon_y + (bh - term_h) // 2
-    draw.rounded_rectangle([icon_x + bw, term_y, icon_x + bw + term_w, term_y + term_h], radius=1, fill="black")
+    draw.rounded_rectangle(
+        [icon_x + bw, term_y, icon_x + bw + term_w, term_y + term_h],
+        radius=1,
+        fill="black",
+    )
 
     inner_pad = 3
     max_fill_w = bw - (inner_pad * 2) - 1
     fill_w = max(2, int(max_fill_w * (min(level, 100) / 100.0)))
-    draw.rectangle([icon_x + inner_pad, icon_y + inner_pad, icon_x + inner_pad + fill_w, icon_y + bh - inner_pad], fill="black")
+    draw.rectangle(
+        [
+            icon_x + inner_pad,
+            icon_y + inner_pad,
+            icon_x + inner_pad + fill_w,
+            icon_y + bh - inner_pad,
+        ],
+        fill="black",
+    )
 
     return (icon_x + bw + term_w) - x
 
@@ -348,8 +416,8 @@ def draw_bottom_button_bar(
     if font is None:
         font = get_font(12, bold=True)
 
-    is_bus = (active_view == "evening")
-    is_bike = (active_view == "morning")
+    is_bus = active_view == "evening"
+    is_bike = active_view == "morning"
 
     # No EXIT button: on a dedicated dashboard an accidental exit drops the
     # device to the Kindle Home screen and the client doesn't come back until it
@@ -367,11 +435,18 @@ def draw_bottom_button_bar(
         x1 = x0 + col_w
         bg = "black" if active else "#f4f4f4"
         fg = "white" if active else "black"
-        draw.rounded_rectangle([x0, btn_y0, x1, btn_y1], radius=6, fill=bg, outline="black", width=2)
+        draw.rounded_rectangle(
+            [x0, btn_y0, x1, btn_y1], radius=6, fill=bg, outline="black", width=2
+        )
         bbox = draw.textbbox((0, 0), label, font=font)
         tw = bbox[2] - bbox[0]
         th = bbox[3] - bbox[1]
-        draw.text((x0 + (col_w - tw) // 2, btn_y0 + (btn_h - th) // 2 - 1), label, fill=fg, font=font)
+        draw.text(
+            (x0 + (col_w - tw) // 2, btn_y0 + (btn_h - th) // 2 - 1),
+            label,
+            fill=fg,
+            font=font,
+        )
 
 
 def draw_status_strip(
@@ -398,7 +473,11 @@ def draw_status_strip(
     label = note or "PRESS POWER BUTTON TO INTERACT"
     font = get_font(12, bold=True)
     draw.rounded_rectangle(
-        [20, btn_y0, width - 20, btn_y1], radius=6, fill="#f2f2f2", outline="#999999", width=2
+        [20, btn_y0, width - 20, btn_y1],
+        radius=6,
+        fill="#f2f2f2",
+        outline="#999999",
+        width=2,
     )
     bbox = draw.textbbox((0, 0), label, font=font)
     tw = bbox[2] - bbox[0]
