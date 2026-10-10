@@ -11,7 +11,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${ROOT_DIR}"
 
-# Locate docker compose command
 COMPOSE_CMD=()
 if docker compose version >/dev/null 2>&1; then
     COMPOSE_CMD=(docker compose)
@@ -26,7 +25,6 @@ else
     exit 1
 fi
 
-# Extract SemVer version from VERSION file or server package
 VERSION=""
 if [[ -f "VERSION" ]]; then
     VERSION=$(tr -d '[:space:]' < VERSION)
@@ -46,19 +44,16 @@ echo "======================================================================"
 echo "🚌 Deploying Transit Tracker (${IMAGE_TAG})"
 echo "======================================================================"
 
-# Build versioned image (Docker multi-stage compiles tracker-arm automatically)
+# Docker multi-stage compiles tracker-arm automatically
 export IMAGE_TAG
 "${COMPOSE_CMD[@]}" build transit-tracker
 
-# Maintain 'latest' tag pointing to the new versioned build
 if docker image inspect "transit-tracker:${IMAGE_TAG}" >/dev/null 2>&1; then
     docker tag "transit-tracker:${IMAGE_TAG}" "transit-tracker:latest" || true
 fi
 
-# Launch the stack
 "${COMPOSE_CMD[@]}" up -d --force-recreate transit-tracker
 
-# Wait for transit-tracker to pass healthcheck
 echo "⏳ Waiting for Transit Tracker to pass healthcheck..."
 CONTAINER_NAME="transit-tracker"
 MAX_WAIT_SECS=60

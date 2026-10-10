@@ -19,7 +19,6 @@ if [ -f "$SERVER_CONFIG" ]; then
     fi
 fi
 
-# Ensure http:// or https:// prefix
 case "$SERVER" in
     http://*|https://*) ;;
     *) SERVER="http://$SERVER" ;;
@@ -74,12 +73,10 @@ if [ "$DOWNLOAD_SUCCESS" -eq 1 ]; then
     fi
 fi
 
-# 2. If valid binary in RAM, execute it
 if [ -x "$BINARY" ]; then
     exec "$BINARY" -server "$SERVER"
 fi
 
-# 3. If server was unreachable, launch cached backup from storage
 if [ -s "$BACKUP" ]; then
     cp "$BACKUP" "$BINARY" 2>/dev/null || true
     chmod +x "$BINARY" 2>/dev/null || true
@@ -88,7 +85,6 @@ if [ -s "$BACKUP" ]; then
     fi
 fi
 
-# 4. If completely offline with no cache, show notification and exit
 if command -v eips >/dev/null 2>&1; then
     eips -c
     eips 15 18 "Cannot connect to Transit Tracker server at:"

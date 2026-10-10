@@ -63,17 +63,14 @@ func (tc *TrackerClient) getNextPollInterval(serverIntervalSec int) time.Duratio
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 
-	// If a data-affecting interaction occurred recently, stay in fast mode.
 	if !tc.lastDataInteraction.IsZero() && time.Since(tc.lastDataInteraction) < FastPollHoldDuration {
 		return PeakPollInterval
 	}
 
-	// Use server guidance if provided
 	if serverIntervalSec > 0 {
 		return time.Duration(serverIntervalSec) * time.Second
 	}
 
-	// Fallback calculation based on local time: 60s during rush, 10m off-peak
 	now := time.Now()
 	hour := float64(now.Hour()) + float64(now.Minute())/60.0
 	if (hour >= 7.5 && hour < 9.5) || (hour >= 16.5 && hour < 19.0) {

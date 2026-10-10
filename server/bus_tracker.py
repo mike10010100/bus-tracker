@@ -111,7 +111,6 @@ class NJTransitBusTracker:
 
             if str(data.get("Authenticated")).lower() == "true" and data.get("UserToken"):
                 self.token = data["UserToken"]
-                # 23 hours in seconds = 82800
                 self.token_expiry = time.time() + 82800
             else:
                 raise RuntimeError(f"NJ Transit authentication failed: {data}")
@@ -246,7 +245,6 @@ class NJTransitBusTracker:
 
 
 if __name__ == "__main__":
-    # Test target stops in Hoboken for Route 126 to NYC
     STOPS_TO_TRACK = {
         "Washington St at 9th St (Stop #20512)": "20512",
         "Clinton St at 9th St (Stop #20494)": "20494",

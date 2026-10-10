@@ -29,10 +29,8 @@ func TestGestureDetectorSingleTap(t *testing.T) {
 	gd.curX = 500
 	gd.curY = 500
 
-	// Trigger single tap
 	gd.TriggerTap(now)
 
-	// Wait for single tap timer to fire
 	time.Sleep(60 * time.Millisecond)
 
 	mu.Lock()
@@ -79,7 +77,6 @@ func TestGestureDetectorDoubleTap(t *testing.T) {
 	t1 := t0.Add(50 * time.Millisecond)
 	gd.TriggerTap(t1)
 
-	// Wait for any timers to resolve
 	time.Sleep(120 * time.Millisecond)
 
 	mu.Lock()
@@ -176,19 +173,16 @@ func TestGestureDetectorCornerTaps(t *testing.T) {
 		mu.Unlock()
 	}
 
-	// 1. Top-Right corner tap (design space)
 	gd.curX = 700
 	gd.curY = 50
 	t0 := time.Now()
 	gd.TriggerTap(t0)
 
-	// 2. Top-Left corner tap
 	gd.curX = 50
 	gd.curY = 50
 	t1 := t0.Add(50 * time.Millisecond)
 	gd.TriggerTap(t1)
 
-	// 3. Bottom-Left corner tap (above the button bar)
 	gd.curX = 50
 	gd.curY = 550
 	t2 := t1.Add(50 * time.Millisecond)
@@ -417,24 +411,20 @@ func TestGestureDetectorButtonTaps(t *testing.T) {
 
 	t0 := time.Now()
 
-	// 1. Buses button (x < 164, y >= 556)
 	gd.curX = 50
 	gd.curY = 580
 	gd.TriggerTap(t0)
 
-	// 2. Bikes button (202 <= x < 394, y >= 556)
 	gd.curX = 300
 	gd.curY = 580
 	t1 := t0.Add(20 * time.Millisecond)
 	gd.TriggerTap(t1)
 
-	// 3. Light button (394 <= x < 586, y >= 556)
 	gd.curX = 490
 	gd.curY = 580
 	t2 := t1.Add(20 * time.Millisecond)
 	gd.TriggerTap(t2)
 
-	// 4. Refresh button (x >= 586, y >= 556)
 	gd.curX = 700
 	gd.curY = 580
 	t3 := t2.Add(20 * time.Millisecond)

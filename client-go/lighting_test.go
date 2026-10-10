@@ -30,28 +30,23 @@ func TestNextFrontlightState(t *testing.T) {
 }
 
 func TestFrontlightCycleFullLoop(t *testing.T) {
-	// Starting at 0 (Off)
 	state := 0
 
-	// Step 1: 0 -> 8
 	state, warmth := NextFrontlightState(state)
 	if state != 8 || warmth != 12 {
 		t.Fatalf("Step 1 expected (8, 12), got (%d, %d)", state, warmth)
 	}
 
-	// Step 2: 8 -> 18
 	state, warmth = NextFrontlightState(state)
 	if state != 18 || warmth != 8 {
 		t.Fatalf("Step 2 expected (18, 8), got (%d, %d)", state, warmth)
 	}
 
-	// Step 3: 18 -> 0
 	state, warmth = NextFrontlightState(state)
 	if state != 0 || warmth != 0 {
 		t.Fatalf("Step 3 expected (0, 0), got (%d, %d)", state, warmth)
 	}
 
-	// Step 4: 0 -> 8 (loop repeats)
 	state, warmth = NextFrontlightState(state)
 	if state != 8 || warmth != 12 {
 		t.Fatalf("Step 4 expected (8, 12), got (%d, %d)", state, warmth)

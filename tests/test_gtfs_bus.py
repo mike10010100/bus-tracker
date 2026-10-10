@@ -323,24 +323,20 @@ class TestIndexCachingAndLifecycle(unittest.TestCase):
             loaded = t._load_cached_index()
             self.assertEqual(loaded, idx)
 
-            # Test corrupt file
             with open(t._index_path, "w", encoding="utf-8") as f:
                 f.write("not-json")
             self.assertIsNone(t._load_cached_index())
 
-            # Test save error handling
             bad_tracker = GTFSBusTracker(route="126", stops=["20512"], cache_dir="/dev/null/notdir")
-            bad_tracker._save_index(idx)  # should not raise
+            bad_tracker._save_index(idx)
 
     def test_ensure_index_branches(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             t = GTFSBusTracker(route="126", stops=["20512"], cache_dir=tmpdir)
-            # Branch 1: already set in memory
             t._index = {"mock": True}
             self.assertEqual(t.ensure_index(), {"mock": True})
             t._index = None
 
-            # Branch 2: loaded from disk cache
             idx = {
                 "route": "126",
                 "stops": ["20512"],
@@ -352,7 +348,6 @@ class TestIndexCachingAndLifecycle(unittest.TestCase):
             self.assertEqual(t.ensure_index(), idx)
             self.assertEqual(t._index, idx)
 
-            # Branch 3: cache missing, fetch from network
             t2 = GTFSBusTracker(route="126", stops=["20512"], cache_dir=os.path.join(tmpdir, "new_cache"))
             t2.get_token = MagicMock(return_value="tok")
             zip_bytes = make_zip()
@@ -365,7 +360,6 @@ class TestIndexCachingAndLifecycle(unittest.TestCase):
             self.assertEqual(res["route"], "126")
             self.assertIn("A", res["trips"])
 
-            # Branch 4: network fetch error
             t3 = GTFSBusTracker(route="126", stops=["20512"], cache_dir=os.path.join(tmpdir, "err_cache"))
             t3.get_token = MagicMock(side_effect=Exception("network error"))
             self.assertIsNone(t3.ensure_index())

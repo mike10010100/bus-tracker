@@ -31,7 +31,6 @@ class ScaledDraw:
         self._s = float(scale)
         self._font_cache: Dict[Tuple[str, int], Any] = {}
 
-    # -- helpers -----------------------------------------------------------
     def _pt(self, p: Any) -> Tuple[float, float]:
         return (p[0] * self._s, p[1] * self._s)
 
@@ -69,7 +68,6 @@ class ScaledDraw:
         self._font_cache[key] = scaled
         return scaled
 
-    # -- drawing primitives ------------------------------------------------
     def text(self, xy: Any, text: str, fill: Any = None, font: Any = None, **kwargs: Any) -> None:
         self._d.text(self._pt(xy), text, fill=fill, font=self._font(font), **kwargs)
 
@@ -155,7 +153,6 @@ def get_font(size: int, bold: bool = False) -> Optional[ImageFont.ImageFont]:
         return None
 
 
-# Arrival fetch statuses mirrored from bus_tracker.NJTransitBusTracker
 STATUS_OK = "ok"
 STATUS_EMPTY = "empty"
 STATUS_ERROR = "error"
@@ -283,7 +280,6 @@ def draw_battery_indicator(
 
     curr_x = x
 
-    # Draw crisp vector lightning bolt if charging
     if is_charging:
         bolt_pts = [
             (curr_x + 5, y),
@@ -310,13 +306,10 @@ def draw_battery_indicator(
     icon_x = curr_x
     icon_y = y + 1
 
-    # Outer battery shell
     draw.rounded_rectangle([icon_x, icon_y, icon_x + bw, icon_y + bh], radius=3, outline="black", width=2)
-    # Terminal cap on right edge
     term_y = icon_y + (bh - term_h) // 2
     draw.rounded_rectangle([icon_x + bw, term_y, icon_x + bw + term_w, term_y + term_h], radius=1, fill="black")
 
-    # Inner charge bar
     inner_pad = 3
     max_fill_w = bw - (inner_pad * 2) - 1
     fill_w = max(2, int(max_fill_w * (min(level, 100) / 100.0)))
@@ -342,7 +335,6 @@ def draw_bottom_button_bar(
     btn_y1 = height - (10 if is_tall else 8)
     btn_h = btn_y1 - btn_y0
 
-    # Subtle separator line above the buttons
     draw.line([(20, btn_y0 - 8), (width - 20, btn_y0 - 8)], fill="#bbbbbb", width=1)
 
     start_x = 20
@@ -396,7 +388,6 @@ def draw_status_strip(
     btn_y0 = height - (44 if is_tall else 38)
     btn_y1 = height - (10 if is_tall else 8)
 
-    # Erase the separator line and the entire button row.
     draw.rectangle([0, btn_y0 - 9, width, height], fill="white")
     draw.line([(20, btn_y0 - 8), (width - 20, btn_y0 - 8)], fill="#dddddd", width=1)
 

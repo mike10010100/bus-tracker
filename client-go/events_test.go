@@ -36,7 +36,6 @@ func TestDetectEventStep(t *testing.T) {
 		t.Errorf("Expected step 24, got %d", step)
 	}
 
-	// Default fallback
 	if step := DetectEventStep([]byte{1, 2, 3}, 3); step != 16 {
 		t.Errorf("Expected fallback 16, got %d", step)
 	}
@@ -144,19 +143,16 @@ func TestIsExplicitTouchRelease(t *testing.T) {
 func TestExtractCoordinates(t *testing.T) {
 	curX, curY := int32(100), int32(200)
 
-	// ABS_MT_POSITION_X
 	newX, newY, ok := ExtractCoordinates(RawEventMsg{EvType: EV_ABS, EvCode: ABS_MT_POSITION_X, EvValue: 550}, curX, curY)
 	if !ok || newX != 550 || newY != 200 {
 		t.Errorf("ABS_MT_POSITION_X failed: got (%d, %d, %v)", newX, newY, ok)
 	}
 
-	// ABS_MT_POSITION_Y
 	newX, newY, ok = ExtractCoordinates(RawEventMsg{EvType: EV_ABS, EvCode: ABS_MT_POSITION_Y, EvValue: 750}, 550, curY)
 	if !ok || newX != 550 || newY != 750 {
 		t.Errorf("ABS_MT_POSITION_Y failed: got (%d, %d, %v)", newX, newY, ok)
 	}
 
-	// Non-coordinate event
 	newX, newY, ok = ExtractCoordinates(RawEventMsg{EvType: EV_SYN, EvCode: 0, EvValue: 0}, 550, 750)
 	if ok || newX != 550 || newY != 750 {
 		t.Errorf("Non-coordinate event should return ok=false: got (%d, %d, %v)", newX, newY, ok)

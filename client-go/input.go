@@ -94,7 +94,6 @@ func (tc *TrackerClient) runEventLoop(ctx context.Context, cancel context.Cancel
 		case <-ctx.Done():
 			return
 		case ev := <-eventCh:
-			// 1. Hardware Power Button
 			if IsPowerKeyEvent(ev) {
 				if tc.exitOnPowerKey {
 					tc.logRemote(fmt.Sprintf("Power button pressed on %s! Exiting...", ev.Device))
@@ -106,7 +105,6 @@ func (tc *TrackerClient) runEventLoop(ctx context.Context, cancel context.Cancel
 				tc.logRemote("Power key ignored (dedicated dashboard mode).")
 				continue
 			}
-			// 2. Feed into Gesture Recognizer
 			gd.ProcessEvent(ev)
 		}
 	}

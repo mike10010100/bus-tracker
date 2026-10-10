@@ -26,7 +26,6 @@ from gtfs_bus import GTFSBusTracker
 from render_dashboard import render_dashboard, STOPS, get_mock_data, resolve_view, WIDTH
 from version import VERSION
 
-# Modularized sub-components
 from discovery import (
     ZEROCONF_AVAILABLE,
     DISCOVERY_PORT,
@@ -254,7 +253,6 @@ def get_fresh_dashboard_image(
         if cached is not None:
             return Image.open(io.BytesIO(cached))
 
-    # Render dashboard natively at the requested scale (no bitmap upscaling).
     img_path = f"/tmp/server_dashboard_{threading.get_ident()}.png"
     render_dashboard(
         stops_data,
@@ -487,7 +485,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             last_mod = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime(mtime))
             print(f"[Server OTA] client={self.address_string()} cmd={self.command} version={SERVER_VERSION} ims={self.headers.get('If-Modified-Since')}")
 
-            # Handle conditional request (If-Modified-Since)
             ims = self.headers.get("If-Modified-Since")
             if ims == last_mod:
                 self.send_response(304)
@@ -525,7 +522,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             rot_val = int(params.get("rotate", [90])[0])
             view_param = params.get("view", [self.headers.get("X-Tracker-View", "auto")])[0]
 
-            # Extract battery and charging status from query params or headers
             batt_param = params.get("batt", [None])[0] or params.get("battery", [None])[0] or self.headers.get("X-Kindle-Battery")
             charging_param = params.get("charging", [None])[0] or self.headers.get("X-Kindle-Charging")
 
@@ -739,7 +735,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_empty(404)
 
     def log_message(self, format, *args):
-        # Concise logging
         print(f"[Server] {self.address_string()} - {args[0]}")
 
 

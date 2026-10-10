@@ -222,7 +222,6 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 	}
 	tc.mu.Unlock()
 
-	// Write image to /tmp/dashboard.png
 	tmpFile, err := osCreate(ImagePath)
 	if err != nil {
 		return serverPollSec
@@ -233,13 +232,11 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 		return serverPollSec
 	}
 
-	// Push directly to Kindle e-ink display
 	cmd := execCommand("eips", "-f", "-g", ImagePath)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	_ = cmd.Run()
 
-	// Apply lighting headers if manual override is inactive
 	tc.mu.Lock()
 	manualActive := time.Since(tc.manualLightTime) < ManualHoldDuration
 	tc.mu.Unlock()
@@ -260,7 +257,6 @@ func (tc *TrackerClient) fetchAndDrawDashboard(ctx context.Context, exitCancel c
 		}
 	}
 
-	// New version: download and exec it (no-op on the common path).
 	if tc.maybeUpdateBinary(ctx, serverVer, serverSHA) {
 		return 0
 	}
@@ -286,7 +282,6 @@ func (tc *TrackerClient) runPollLoop(ctx context.Context, cancel context.CancelF
 			return
 
 		case <-tc.refreshCh:
-			// Forced refresh requested via screen tap.
 			serverPollSec := tc.fetchAndDrawDashboard(ctx, cancel)
 			reschedule(serverPollSec)
 

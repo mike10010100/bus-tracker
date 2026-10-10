@@ -466,7 +466,6 @@ class TestServerCoverageAdditions(ServerHTTPTestBase):
             server.warm_up_gtfs()
             mock_gtfs.ensure_index.assert_called_once()
 
-            # Error branch
             mock_gtfs.ensure_index.side_effect = Exception("warmup failed")
             server.warm_up_gtfs()
         finally:

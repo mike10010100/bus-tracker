@@ -163,10 +163,8 @@ class CitiBikeTracker:
             return sorted_results
 
         except Exception as e:
-            # If fetch fails but we have cached data, return cached
             if self._cached_data:
                 return self._cached_data
-            # Otherwise return mock fallback
             return self.get_mock_data()
 
     def get_mock_data(self) -> List[StationStatus]:

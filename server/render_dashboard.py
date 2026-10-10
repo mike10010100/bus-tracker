@@ -133,7 +133,6 @@ def render_dashboard(
     if presentation != "interactive":
         draw_status_strip(draw, width, height, note=status_note)
 
-    # Save output
     img.save(output_path, "PNG")
     print(f"✓ Dashboard image successfully rendered [{active_view.upper()} VIEW]: {output_path} ({native_w}x{native_h}, scale={scale:g})")
     return output_path

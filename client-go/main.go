@@ -278,7 +278,6 @@ func run(parent context.Context) {
 	_ = osWriteFile("/tmp/tracker_server.txt", []byte(serverURL), 0644)
 	_ = osWriteFile("/mnt/us/documents/tracker_server.txt", []byte(serverURL), 0644)
 
-	// Send initial startup diagnostic
 	tc.logRemote(fmt.Sprintf("Transit Tracker v%s starting up (mode: %s, server: %s, view: %s)...", Version, currentModeName(), serverURL, initialView))
 	// Log the raw framebuffer geometry so panel/orientation issues are visible.
 	if modes, err := osReadFile("/sys/class/graphics/fb0/modes"); err == nil {
@@ -316,7 +315,6 @@ func run(parent context.Context) {
 		return
 	}
 
-	// Resident mode: hold the device awake, listen for sleep/power, and poll.
 	lipcSet("com.lab126.powerd", "preventScreenSaver", "1")
 
 	tc.startInputListeners(ctx, cancel)

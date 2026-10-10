@@ -132,7 +132,6 @@ class TestCitiBikeTracker(unittest.TestCase):
             res = tracker.get_station_status(force_refresh=True)
             self.assertEqual(len(res), 6)
 
-            # Check Clinton & 9th
             c9 = next(s for s in res if s["name"] == "Clinton & 9th")
             self.assertEqual(c9["total_bikes"], 15)
             self.assertEqual(c9["ebikes"], 5)
@@ -227,7 +226,6 @@ class TestCitiBikeTracker(unittest.TestCase):
                 img = Image.open(out_file)
                 self.assertEqual(img.size, (800, 600))
 
-                # Format for Kindle PW5 (rotate=90)
                 kindle_img = format_for_kindle(img, orientation="landscape", rotation=90)
                 self.assertEqual(kindle_img.size, (1236, 1648))
                 self.assertEqual(kindle_img.mode, "L")

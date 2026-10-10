@@ -125,7 +125,6 @@ func DiscoverViaUDP(ctx context.Context, port int, timeout time.Duration) (strin
 		}
 	}
 
-	// Buffer for response
 	buf := make([]byte, 1024)
 	deadline := time.Now().Add(timeout)
 	_ = conn.SetReadDeadline(deadline)
@@ -144,7 +143,6 @@ func DiscoverViaUDP(ctx context.Context, port int, timeout time.Duration) (strin
 
 		offer, err := ParseDiscoveryOffer(string(buf[:n]))
 		if err == nil && offer.URL != "" && AdoptableServerURL(offer.URL) {
-			// Verify server reachability via quick HEAD probe
 			if verifyServerFn(ctx, offer.URL, 800*time.Millisecond) {
 				return offer.URL, nil
 			}
@@ -228,7 +226,6 @@ func DiscoverViaSubnetSweep(ctx context.Context, httpPort int) (string, error) {
 		}
 	}
 
-	// Wait for completion or match in separate goroutine
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -290,14 +287,12 @@ func PersistServerURL(serverURL string, writeFile func(string, []byte, os.FileMo
 	return lastErr
 }
 
-// SaveServerURL uses production os.WriteFile
 func SaveServerURL(serverURL string) error {
 	return PersistServerURL(serverURL, os.WriteFile)
 }
 
 // AutoDiscoverServer tries UDP broadcast first, then falls back to subnet sweep
 func AutoDiscoverServer(ctx context.Context) (string, error) {
-	// 1. Try fast UDP broadcast discovery
 	udpCtx, cancelUDP := context.WithTimeout(ctx, 2*time.Second)
 	defer cancelUDP()
 
@@ -306,7 +301,6 @@ func AutoDiscoverServer(ctx context.Context) (string, error) {
 		return discovered, nil
 	}
 
-	// 2. Fall back to fast local subnet sweep
 	sweepCtx, cancelSweep := context.WithTimeout(ctx, 3*time.Second)
 	defer cancelSweep()
 

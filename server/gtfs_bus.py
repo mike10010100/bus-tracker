@@ -126,7 +126,6 @@ class GTFSBusTracker:
         self._occupancy: Optional[Dict[str, Dict[str, Any]]] = None
         self._occupancy_at: float = 0
 
-    # -- URLs --------------------------------------------------------------
     @property
     def auth_url(self) -> str:
         return self.base_url + self.AUTH_PATH
@@ -147,7 +146,6 @@ class GTFSBusTracker:
     def _index_path(self) -> str:
         return os.path.join(self.cache_dir, "gtfs_index.json")
 
-    # -- Auth --------------------------------------------------------------
     def get_token(self) -> str:
         if self.token and time.time() < self.token_expiry:
             return self.token
@@ -166,7 +164,6 @@ class GTFSBusTracker:
             return self.token
         raise RuntimeError(f"NJ Transit GTFS auth failed: {data}")
 
-    # -- Static schedule ---------------------------------------------------
     def _index_is_fresh(self, index: Dict[str, Any]) -> bool:
         if not index or index.get("route") != self.route:
             return False
@@ -287,7 +284,6 @@ class GTFSBusTracker:
                 active.discard(sid)
         return active
 
-    # -- Realtime ----------------------------------------------------------
     def fetch_realtime(self) -> Dict[str, Dict[str, Any]]:
         """Fetches GTFS-RT trip updates, keyed trip_id -> stop_id -> {time,delay,vehicle_id}."""
         index = self._index or {}
@@ -363,7 +359,6 @@ class GTFSBusTracker:
             }
         return out
 
-    # -- Query -------------------------------------------------------------
     def get_upcoming(self, stop_id: str, limit: int = 3, allow_realtime: bool = True,
                      now: Optional[datetime.datetime] = None) -> List[Dict[str, Any]]:
         """

@@ -45,7 +45,6 @@ func lipcGet(prop, key string) string {
 func (tc *TrackerClient) cleanup() {
 	tc.logRemote("Cleaning up and exiting to Kindle Home...")
 
-	// Re-enable screensaver
 	lipcSet("com.lab126.powerd", "preventScreenSaver", "0")
 
 	// Low-power mode stops the Amazon UI framework (lab126_gui) to allow

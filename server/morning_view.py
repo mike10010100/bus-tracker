@@ -55,7 +55,6 @@ def render_morning_view(
     now_time_str = now.strftime("%-I:%M %p")
     now_date_str = now.strftime("%A, %b %-d")
 
-    # 1. Header
     time_bbox = draw.textbbox((0, 0), now_time_str, font=font_time)
     time_w = time_bbox[2] - time_bbox[0]
     time_x = width - 20 - time_w
@@ -74,7 +73,6 @@ def render_morning_view(
 
     b_x1 = draw_header_badge(draw, 20, 14, "CITI BIKE", font_title, pad_x=12)
     morning_title = "HOBOKEN MORNING DOCKS"
-    # Ensure title never collides with battery indicator
     max_title_w = (batt_x - 16) - (b_x1 + 12)
     tb = draw.textbbox((0, 0), morning_title, font=font_title)
     if (tb[2] - tb[0]) > max_title_w:
@@ -92,7 +90,6 @@ def render_morning_view(
 
     draw.line([(20, 62), (width - 20, 62)], fill="black", width=2)
 
-    # 2. Citi Bike Hero Cards (3 Columns)
     cb_y0 = 70
     cb_y1 = 416 if is_tall else 346
     col_w = (width - 40 - 22) // 3
@@ -159,7 +156,6 @@ def render_morning_view(
                 status_label = "NO E-BIKES"
             draw.text((cx0 + 18, badge_box_y0 + (9 if is_tall else 8)), status_label, fill="black", font=font_badge)
 
-    # 3. Compact 126 Bus Section (Bottom Bar)
     bus_y0 = 422 if is_tall else 348
     bus_y1 = 542 if is_tall else 424
     draw.rounded_rectangle([20, bus_y0, width - 20, bus_y1], radius=10, fill="white", outline="black", width=2)
@@ -221,5 +217,4 @@ def render_morning_view(
             msg = ellipsize_to_width(draw, msg, msg_font, col_max_w)
             draw.text((bx0 + 14, content_top + row_empty), msg, fill=color, font=msg_font)
 
-    # 4. Touch Button Bar (Interactive Actions)
     draw_bottom_button_bar(draw, width, height, active_view="morning")

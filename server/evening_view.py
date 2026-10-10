@@ -61,7 +61,6 @@ def render_evening_view(
     now_time_str = now.strftime("%-I:%M %p")
     now_date_str = now.strftime("%A, %b %-d")
 
-    # 1. Header
     b_x1 = draw_header_badge(draw, 20, 14, "126", font_title, pad_x=16)
     draw.text((b_x1 + 12, 15), "HOBOKEN → NYC PORT AUTHORITY", fill="black", font=font_title)
     sub_title = "NJ TRANSIT 126 & CITI BIKE LIVE TRACKER" if has_citibike else "NJ TRANSIT REAL-TIME TRACKER"
@@ -92,7 +91,6 @@ def render_evening_view(
 
     draw.line([(20, 62), (width - 20, 62)], fill="black", width=2)
 
-    # 2. Dual Bus Cards (Side-by-Side)
     col_w = (width - 40 - 20) // 2
     col_h = (346 if is_tall else 276) if has_citibike else (475 if is_tall else 345)
     card_y = 70 if has_citibike else 80
@@ -265,7 +263,6 @@ def render_evening_view(
                 draw.text((x0 + 20, box_y0 + (8 if is_tall else (9 if has_citibike else 12))), "UPCOMING BUSES:", fill="#555555", font=font_walk)
                 draw.text((x0 + 20, box_y0 + (25 if is_tall else (27 if has_citibike else 32))), "No further buses in next 60 min", fill="#666666", font=font_detail)
 
-    # 3. Citi Bike Bottom Section
     if has_citibike:
         cb_x0, cb_y0, cb_x1, cb_y1 = 20, (422 if is_tall else 348), width - 20, (542 if is_tall else 424)
         draw.rounded_rectangle([cb_x0, cb_y0, cb_x1, cb_y1], radius=10, fill="white", outline="black", width=2)
@@ -330,5 +327,4 @@ def render_evening_view(
                         cb_badge = "● CLASSIC ONLY"
                     draw.text((cx0 + 14, body_y0 + r_badge), cb_badge, fill="#444444", font=font_cb_walk)
 
-    # 4. Touch Button Bar (Interactive Actions)
     draw_bottom_button_bar(draw, width, height, active_view="evening")

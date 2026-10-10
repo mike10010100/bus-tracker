@@ -2,39 +2,31 @@
 
 SHELL := /bin/bash
 
-# Coverage gates (percentage of statements). Enforced by `make coverage`.
 COVERAGE_MIN_GO ?= 93
 COVERAGE_MIN_PY ?= 92
 
-# Default target
 all: check build
 
-# Run complete verification suite (format, vet, tests, coverage gate, shell syntax)
 check: fmt-check vet test-go test-py coverage check-sh
 
 test: test-go test-py
 
-# Run Go tests with race detection and verbose reporting
 test-go:
 	@echo "==> Running Go unit tests with data race detector..."
 	@cd client-go && go test -v -race ./...
 
-# Run Python unit tests
 test-py:
 	@echo "==> Running Python unit tests..."
 	@PYTHONPATH=server python3 -m unittest discover -s tests -p "test_*.py" -v
 
-# Run static analysis
 vet:
 	@echo "==> Running go vet static analysis..."
 	@cd client-go && go vet ./...
 
-# Format all Go source files according to Go best practices
 fmt:
 	@echo "==> Formatting Go files with gofmt -s..."
 	@gofmt -s -w client-go
 
-# Verify that all Go source files are formatted
 fmt-check:
 	@echo "==> Checking Go formatting..."
 	@DIFF=$$(gofmt -s -d client-go); \
@@ -44,7 +36,6 @@ fmt-check:
 		exit 1; \
 	fi
 
-# Syntax and idiom check for shell scripts
 check-sh:
 	@echo "==> Checking shell scripts syntax..."
 	@bash -n scripts/check_coverage_go.sh
@@ -56,7 +47,6 @@ check-sh:
 		shellcheck --severity=warning -s sh scripts/TransitTracker.sh; \
 	fi
 
-# Enforce coverage gates for both stacks
 coverage: coverage-go coverage-py
 
 coverage-go:
@@ -78,7 +68,6 @@ build:
 	@cd client-go && CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="$(LDFLAGS)" -o ../tracker-arm .
 	@echo "==> Build complete: tracker-arm ($$(ls -lh tracker-arm | awk '{print $$5}'))"
 
-# Clean build artifacts and bytecode caches
 clean:
 	@rm -f tracker-arm server/tracker-arm client-go/client-go client-go/cover.out /tmp/server_dashboard*.png
 	@rm -rf htmlcov .coverage
