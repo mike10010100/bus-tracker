@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -40,6 +39,9 @@ func ResolveServerURLWithDiscoverer(
 		if (arg == "-server" || arg == "--server") && i+1 < len(args) {
 			val := strings.TrimSpace(args[i+1])
 			if val != "" {
+				if !strings.HasPrefix(val, "http://") && !strings.HasPrefix(val, "https://") {
+					val = "http://" + val
+				}
 				return val
 			}
 		}
@@ -47,6 +49,9 @@ func ResolveServerURLWithDiscoverer(
 			parts := strings.SplitN(arg, "=", 2)
 			val := strings.TrimSpace(parts[1])
 			if val != "" {
+				if !strings.HasPrefix(val, "http://") && !strings.HasPrefix(val, "https://") {
+					val = "http://" + val
+				}
 				return val
 			}
 		}
@@ -55,6 +60,9 @@ func ResolveServerURLWithDiscoverer(
 	// 2. Environment variable
 	if getenv != nil {
 		if envVal := strings.TrimSpace(getenv("TRACKER_SERVER")); envVal != "" {
+			if !strings.HasPrefix(envVal, "http://") && !strings.HasPrefix(envVal, "https://") {
+				envVal = "http://" + envVal
+			}
 			return envVal
 		}
 	}
@@ -69,6 +77,9 @@ func ResolveServerURLWithDiscoverer(
 			if data, err := readFile(p); err == nil {
 				val := strings.TrimSpace(string(data))
 				if val != "" {
+					if !strings.HasPrefix(val, "http://") && !strings.HasPrefix(val, "https://") {
+						val = "http://" + val
+					}
 					return val
 				}
 			}
@@ -83,24 +94,12 @@ func ResolveServerURLWithDiscoverer(
 	}
 
 	// 5. Test candidate servers with short timeout to detect reachable host
-	client := &http.Client{}
 	for _, candidate := range DefaultCandidateServers {
 		ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
-		req, err := http.NewRequestWithContext(ctx, http.MethodHead, candidate+"/tracker-arm", nil)
-		if err != nil {
-			cancel()
-			continue
-		}
-		resp, err := client.Do(req)
-		if err == nil {
-			status := resp.StatusCode
-			_ = resp.Body.Close()
-			cancel()
-			if status == http.StatusOK {
-				return candidate
-			}
-		} else {
-			cancel()
+		ok := verifyServerFn(ctx, candidate, 400*time.Millisecond)
+		cancel()
+		if ok {
+			return candidate
 		}
 	}
 

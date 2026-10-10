@@ -240,15 +240,16 @@ func actionTouchWakeTest(ctx context.Context) string {
 	// Snapshot every wakeup-capable ancestor of an input device, then enable
 	// wakeup on all of them. Snapshotting lets us restore the exact prior state
 	// (notably, we must not leave the power key unable to wake the device).
+	_ = ensurePrivateDir()
 	b.WriteString("snapshot wakeup: " + shell(ctx,
-		": > /tmp/wakeup_before; "+
+		": > /tmp/transit-tracker/wakeup_before; "+
 			"for d in /sys/class/input/event*; do "+
 			"p=$(readlink -f $d/device 2>/dev/null); "+
 			"while [ -n \"$p\" ] && [ \"$p\" != \"/\" ]; do "+
 			"if [ -e \"$p/power/wakeup\" ]; then "+
-			"echo \"$p $(cat $p/power/wakeup 2>/dev/null)\" >> /tmp/wakeup_before; fi; "+
+			"echo \"$p $(cat $p/power/wakeup 2>/dev/null)\" >> /tmp/transit-tracker/wakeup_before; fi; "+
 			"p=$(dirname $p); done; done; "+
-			"sort -u /tmp/wakeup_before") + "\n")
+			"sort -u /tmp/transit-tracker/wakeup_before") + "\n")
 
 	b.WriteString("enable touch wakeup: " + shell(ctx,
 		"for d in /sys/class/input/event*; do "+
@@ -298,7 +299,7 @@ func actionTouchWakeTest(ctx context.Context) string {
 		"while read -r path val; do "+
 			"[ -e \"$path\" ] && echo \"$val\" > \"$path\" 2>/dev/null; "+
 			"echo \"  $path restored to $(cat $path 2>/dev/null)\"; "+
-			"done < /tmp/wakeup_before; rm -f /tmp/wakeup_before; echo done") + "\n")
+			"done < /tmp/transit-tracker/wakeup_before; rm -f /tmp/transit-tracker/wakeup_before; echo done") + "\n")
 
 	touchMoved := wakeupCountersChanged(wakeupBefore, wakeupAfter, "2-0024")
 	rtcMoved := wakeupCountersChanged(wakeupBefore, wakeupAfter, "bd70528-rtc")

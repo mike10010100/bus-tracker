@@ -5,9 +5,10 @@ with dynamic prioritization for stations that currently have e-bikes available.
 """
 
 import json
+import threading
 import time
 import urllib.request
-from typing import Dict, List, Any, Optional, TypedDict
+from typing import Dict, List, Any, NamedTuple, Optional, TypedDict
 
 from version import VERSION
 
@@ -32,6 +33,28 @@ class StationStatus(TypedDict, total=False):
     docks: int
     is_offline: bool
     is_returning: bool
+    # True when the station is missing from the feed: its counts are unknown,
+    # so it is rendered as offline/unknown rather than "0 bikes, 0 docks".
+    is_unknown: bool
+
+
+# Snapshot statuses. Unlike the old behaviour, a failed feed is never papered
+# over with mock numbers: callers get ERROR (no data) or STALE (cached data no
+# older than MAX_STALE_SECS, rendered with an "as of HH:MM" marker).
+CB_STATUS_OK = "ok"
+CB_STATUS_STALE = "stale"
+CB_STATUS_ERROR = "error"
+MAX_STALE_SECS = 15 * 60
+
+
+class CitiBikeSnapshot(NamedTuple):
+    status: str
+    stations: List[StationStatus]
+    as_of: Optional[float]  # unix time of the feed fetch, None when no data
+
+
+class CitiBikeUnavailable(RuntimeError):
+    """Raised when no live or acceptably fresh cached data is available."""
 
 
 # Closest Citi Bike stations to 919 Park Ave, Hoboken, NJ (40.7484552, -74.0302997)
@@ -108,67 +131,90 @@ class CitiBikeTracker:
         self.cache_ttl = cache_ttl
         self._last_fetch_time = 0.0
         self._cached_data: List[StationStatus] = []
+        self._lock = threading.Lock()
+
+    def _fetch_live(self) -> List[StationStatus]:
+        """Fetches the GBFS feed and maps it onto the configured stations."""
+        req = urllib.request.Request(
+            GBFS_STATUS_URL,
+            headers={"User-Agent": f"TransitTracker/{VERSION} (Kindle Transit Display)"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+
+        stations_raw = payload.get("data", {}).get("stations", [])
+        status_map = {s["station_id"]: s for s in stations_raw if "station_id" in s}
+
+        results = []
+        for target in self.stations:
+            sid = target["id"]
+            raw_info = status_map.get(sid)
+            is_unknown = raw_info is None
+            raw_info = raw_info or {}
+
+            ebikes = raw_info.get("num_ebikes_available", 0)
+            total_bikes = raw_info.get("num_bikes_available", 0)
+            classic = max(0, total_bikes - ebikes)
+            docks = raw_info.get("num_docks_available", 0)
+            is_renting = (not is_unknown) and raw_info.get("is_renting", 1) == 1
+            is_returning = (not is_unknown) and raw_info.get("is_returning", 1) == 1
+            is_offline = not is_renting
+
+            results.append({
+                "id": sid,
+                "name": target["name"],
+                "full_name": target.get("full_name", target["name"]),
+                "walk_min": target["walk_min"],
+                "distance_m": target.get("distance_m", 0),
+                "ebikes": ebikes,
+                "classic": classic,
+                "total_bikes": total_bikes,
+                "docks": docks,
+                "is_offline": is_offline,
+                "is_returning": is_returning,
+                "is_unknown": is_unknown,
+            })
+        return sort_stations_by_ebike_priority(results)
+
+    def get_snapshot(self, force_refresh: bool = False) -> CitiBikeSnapshot:
+        """
+        Returns the station status with an explicit freshness status. Never
+        raises and never returns mock data:
+        - OK: fetched within cache_ttl (or just now);
+        - STALE: the feed failed, cached data no older than MAX_STALE_SECS;
+        - ERROR: the feed failed and there is no acceptable cached data.
+        """
+        with self._lock:
+            now = time.time()
+            if not force_refresh and self._cached_data and (now - self._last_fetch_time < self.cache_ttl):
+                return CitiBikeSnapshot(CB_STATUS_OK, self._cached_data, self._last_fetch_time)
+            try:
+                data = self._fetch_live()
+            except Exception as e:
+                age = now - self._last_fetch_time
+                if self._cached_data and age <= MAX_STALE_SECS:
+                    print(f"[CitiBike] feed unavailable ({e}); serving data from {int(age)}s ago")
+                    return CitiBikeSnapshot(CB_STATUS_STALE, self._cached_data, self._last_fetch_time)
+                print(f"[CitiBike] feed unavailable ({e}); no usable cached data")
+                return CitiBikeSnapshot(CB_STATUS_ERROR, [], None)
+            self._cached_data = data
+            self._last_fetch_time = now
+            return CitiBikeSnapshot(CB_STATUS_OK, data, now)
 
     def get_station_status(self, force_refresh: bool = False) -> List[StationStatus]:
         """
         Returns real-time status for the configured target stations,
         dynamically prioritized by e-bike availability and proximity.
-        Uses in-memory cache if within cache_ttl.
+        Uses in-memory cache if within cache_ttl; on a feed failure returns
+        cached data up to MAX_STALE_SECS old, else raises CitiBikeUnavailable.
         """
-        now = time.time()
-        if not force_refresh and (now - self._last_fetch_time < self.cache_ttl) and self._cached_data:
-            return self._cached_data
-
-        try:
-            req = urllib.request.Request(
-                GBFS_STATUS_URL,
-                headers={"User-Agent": f"TransitTracker/{VERSION} (Kindle Transit Display)"},
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-
-            stations_raw = payload.get("data", {}).get("stations", [])
-            status_map = {s["station_id"]: s for s in stations_raw if "station_id" in s}
-
-            results = []
-            for target in self.stations:
-                sid = target["id"]
-                raw_info = status_map.get(sid, {})
-
-                ebikes = raw_info.get("num_ebikes_available", 0)
-                total_bikes = raw_info.get("num_bikes_available", 0)
-                classic = max(0, total_bikes - ebikes)
-                docks = raw_info.get("num_docks_available", 0)
-                is_renting = raw_info.get("is_renting", 1) == 1
-                is_returning = raw_info.get("is_returning", 1) == 1
-                is_offline = not is_renting
-
-                results.append({
-                    "id": sid,
-                    "name": target["name"],
-                    "full_name": target.get("full_name", target["name"]),
-                    "walk_min": target["walk_min"],
-                    "distance_m": target.get("distance_m", 0),
-                    "ebikes": ebikes,
-                    "classic": classic,
-                    "total_bikes": total_bikes,
-                    "docks": docks,
-                    "is_offline": is_offline,
-                    "is_returning": is_returning,
-                })
-
-            sorted_results = sort_stations_by_ebike_priority(results)
-            self._cached_data = sorted_results
-            self._last_fetch_time = now
-            return sorted_results
-
-        except Exception as e:
-            if self._cached_data:
-                return self._cached_data
-            return self.get_mock_data()
+        snap = self.get_snapshot(force_refresh=force_refresh)
+        if snap.status == CB_STATUS_ERROR:
+            raise CitiBikeUnavailable("Citi Bike data unavailable")
+        return snap.stations
 
     def get_mock_data(self) -> List[StationStatus]:
-        """Mock fallback data with realistic commute availability across all tracked stations."""
+        """Mock preview data (?mock=1 only) with realistic commute availability across all tracked stations."""
         mock = [
             {
                 "id": "fadf00cf-d84a-49e8-9607-c67154915412",

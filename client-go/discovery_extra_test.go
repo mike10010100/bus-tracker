@@ -2,13 +2,19 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/mike10010100/transit-tracker/client-go/internal/otasig"
 )
 
 // withDiscoverySeams restores discovery seams after the test.
@@ -19,12 +25,15 @@ func withDiscoverySeams(t *testing.T) {
 	origUDP := discoverViaUDP
 	origSweep := discoverViaSweep
 	origIfaces := netInterfaces
+	origAllowLoopback := allowLoopbackDiscovery
+	allowLoopbackDiscovery = true
 	t.Cleanup(func() {
 		verifyServerFn = origVerify
 		saveServerURL = origSave
 		discoverViaUDP = origUDP
 		discoverViaSweep = origSweep
 		netInterfaces = origIfaces
+		allowLoopbackDiscovery = origAllowLoopback
 	})
 }
 
@@ -178,12 +187,10 @@ func TestDiscoverViaUDP_InvalidOfferThenValid(t *testing.T) {
 
 func TestDiscoverViaUDP_LocalhostFallbackToRemoteIP(t *testing.T) {
 	withDiscoverySeams(t)
-	// The offer URL fails the first verification, so the code falls back to the
-	// responder's source IP; the second verification succeeds.
-	calls := 0
-	verifyServerFn = func(_ context.Context, _ string, _ time.Duration) bool {
-		calls++
-		return calls > 1
+	// The offer URL advertises localhost; the client rewrites the host to the
+	// UDP responder's source IP (127.0.0.1) and verifies the candidate.
+	verifyServerFn = func(_ context.Context, u string, _ time.Duration) bool {
+		return strings.Contains(u, "127.0.0.1:8000")
 	}
 
 	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
@@ -208,7 +215,7 @@ func TestDiscoverViaUDP_LocalhostFallbackToRemoteIP(t *testing.T) {
 				}
 			}
 			if n > 0 {
-				_, _ = udpConn.WriteTo([]byte("TRANSIT_TRACKER_OFFER http://127.0.0.1:8000 1.0"), raddr)
+				_, _ = udpConn.WriteTo([]byte("TRANSIT_TRACKER_OFFER http://localhost:8000 1.0"), raddr)
 				return
 			}
 		}
@@ -221,14 +228,14 @@ func TestDiscoverViaUDP_LocalhostFallbackToRemoteIP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected localhost fallback to succeed, got %v", err)
 	}
-	if got == "" {
-		t.Fatal("expected a non-empty fallback URL")
+	if got != "http://127.0.0.1:8000" {
+		t.Fatalf("expected http://127.0.0.1:8000, got %q", got)
 	}
 }
 
 func TestVerifyServer_RealHTTP(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/tracker-arm" {
+		if r.URL.Path == "/identity" || r.URL.Path == "/tracker-arm" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -363,4 +370,83 @@ func TestDiscoverySentinelErrors(t *testing.T) {
 			t.Errorf("got %v, want errors.Is ErrMalformedOffer", err)
 		}
 	})
+}
+
+func TestVerifyServer_AuthBranches(t *testing.T) {
+	withDiscoverySeams(t)
+	releasePub, releasePriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverPub, serverPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cert, err := otasig.SignCert(releasePriv, serverPub, time.Now().Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	certJSON, _ := json.Marshal(cert)
+	certHdr := base64.StdEncoding.EncodeToString(certJSON)
+
+	body := []byte(`{"status":"ok"}`)
+	bodySHA := otasig.SHA256Hex(body)
+
+	// Valid signed /identity handler
+	validSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nonce := r.Header.Get(otasig.NonceHeader)
+		sig, _ := otasig.SignResponse(serverPriv, nonce, "/identity", http.StatusOK, bodySHA, w.Header())
+		w.Header().Set(otasig.CertHeader, certHdr)
+		w.Header().Set(otasig.AuthHeader, sig)
+		w.WriteHeader(http.StatusOK)
+		w.Write(body)
+	}))
+	defer validSrv.Close()
+
+	// 1. Valid auth when OTAPublicKey is set
+	OTAPublicKey = otasig.EncodePublicKey(releasePub)
+	if !verifyServer(context.Background(), validSrv.URL, time.Second) {
+		t.Error("expected verifyServer to succeed for validly signed /identity")
+	}
+
+	// 2. Invalid OTAPublicKey
+	OTAPublicKey = "invalid-base64"
+	if verifyServer(context.Background(), validSrv.URL, time.Second) {
+		t.Error("expected verifyServer to fail for invalid OTAPublicKey")
+	}
+	OTAPublicKey = otasig.EncodePublicKey(releasePub)
+
+	// 3. Bad signature on /identity
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(otasig.CertHeader, certHdr)
+		w.Header().Set(otasig.AuthHeader, "bad-signature")
+		w.WriteHeader(http.StatusOK)
+		w.Write(body)
+	}))
+	defer badSrv.Close()
+	if verifyServer(context.Background(), badSrv.URL, time.Second) {
+		t.Error("expected verifyServer to fail for invalid signature")
+	}
+
+	// 4. Oversized body on /identity (> MaxManifestSize)
+	largeBody := make([]byte, otasig.MaxManifestSize+10)
+	largeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write(largeBody)
+	}))
+	defer largeSrv.Close()
+	OTAPublicKey = "" // plain check
+	if verifyServer(context.Background(), largeSrv.URL, time.Second) {
+		t.Error("expected verifyServer to fail for oversized body")
+	}
+
+	// 5. 500 status on /identity
+	srv500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv500.Close()
+	if verifyServer(context.Background(), srv500.URL, time.Second) {
+		t.Error("expected verifyServer to fail on HTTP 500")
+	}
 }

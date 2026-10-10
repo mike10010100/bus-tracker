@@ -1,5 +1,4 @@
 import socket
-import sys
 import threading
 import ipaddress
 from typing import Tuple, Any, Optional
@@ -26,30 +25,70 @@ def is_private_address(addr: str) -> bool:
     return ip.is_loopback or ip.is_link_local or ip.is_private
 
 
-def get_local_ip() -> str:
+def _usable_ip(addr: Any) -> Optional[str]:
+    """Returns addr as a string if it is a concrete IPv4/IPv6 address."""
+    try:
+        ip = ipaddress.ip_address(str(addr))
+    except ValueError:
+        return None
+    if ip.is_unspecified or ip.is_multicast:
+        return None
+    return str(ip)
+
+
+def get_local_ip() -> Optional[str]:
+    """
+    Best-effort address of the default-route interface (for the startup banner
+    and mDNS). Returns None, never "localhost", when there is no route.
+    """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
-            return str(s.getsockname()[0])
+            return _usable_ip(s.getsockname()[0])
     except Exception:
-        return "localhost"
+        return None
 
 
-def start_discovery_responder(http_port: int = 8000, version: str = VERSION) -> threading.Thread:
+def local_ip_for_peer(peer_ip: str, peer_port: int = DISCOVERY_PORT) -> Optional[str]:
     """
-    Listens on UDP 8001 for TRANSIT_TRACKER_DISCOVER broadcasts
-    and replies with the server URL and version.
+    Returns the local address the kernel would use to reach peer_ip, i.e. the
+    interface the prober is on. Correct on multi-homed hosts and with no
+    default route. A UDP connect() sends no packets.
     """
-    server_mod = sys.modules.get("server")
-    sock_mod = getattr(server_mod, "socket", socket) if server_mod else socket
-    disc_port = getattr(server_mod, "DISCOVERY_PORT", DISCOVERY_PORT) if server_mod else DISCOVERY_PORT
+    try:
+        family = socket.AF_INET6 if ":" in peer_ip else socket.AF_INET
+        with socket.socket(family, socket.SOCK_DGRAM) as s:
+            s.connect((peer_ip, peer_port or 9))
+            return _usable_ip(s.getsockname()[0])
+    except Exception:
+        return None
+
+
+def format_http_url(host: str, port: int) -> str:
+    """Builds http://host:port, bracketing IPv6 literals."""
+    if ":" in host:
+        host = f"[{host}]"
+    return f"http://{host}:{port}"
+
+
+def start_discovery_responder(
+    http_port: int = 8000,
+    version: str = VERSION,
+    port: Optional[int] = None,
+) -> threading.Thread:
+    """
+    Listens on UDP 8001 for TRANSIT_TRACKER_DISCOVER broadcasts and replies
+    with the server URL and version. The advertised host is the local address
+    facing the prober; if it cannot be determined, no offer is sent.
+    """
+    disc_port = DISCOVERY_PORT if port is None else port
 
     def responder_loop() -> None:
         try:
-            sock = sock_mod.socket(sock_mod.AF_INET, sock_mod.SOCK_DGRAM)
-            sock.setsockopt(sock_mod.SOL_SOCKET, sock_mod.SO_REUSEADDR, 1)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
-                sock.setsockopt(sock_mod.SOL_SOCKET, sock_mod.SO_REUSEPORT, 1)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             except (AttributeError, OSError):
                 pass
             sock.bind(("", disc_port))
@@ -66,10 +105,14 @@ def start_discovery_responder(http_port: int = 8000, version: str = VERSION) -> 
                     # Accept the legacy BUS_TRACKER_DISCOVER probe so devices running
                     # an older binary can still locate the server and OTA-upgrade.
                     if "TRANSIT_TRACKER_DISCOVER" in msg or "BUS_TRACKER_DISCOVER" in msg:
-                        resp_ip = get_local_ip()
-                        reply = f"TRANSIT_TRACKER_OFFER http://{resp_ip}:{http_port} {version}\n".encode("utf-8")
+                        resp_ip = local_ip_for_peer(addr[0], addr[1])
+                        if not resp_ip:
+                            print(f"[Discovery] No route back to {addr[0]}; not answering")
+                            continue
+                        url = format_http_url(resp_ip, http_port)
+                        reply = f"TRANSIT_TRACKER_OFFER {url} {version}\n".encode("utf-8")
                         sock.sendto(reply, addr)
-                        print(f"[Discovery] Answered probe from {addr[0]}:{addr[1]} -> http://{resp_ip}:{http_port}")
+                        print(f"[Discovery] Answered probe from {addr[0]}:{addr[1]} -> {url}")
                 except Exception:
                     pass
 
@@ -82,23 +125,21 @@ def start_mdns_advertiser(http_port: int = 8000, version: str = VERSION) -> Tupl
     """
     Registers _transittracker._tcp.local. service with Zeroconf / mDNS.
     """
-    server_mod = sys.modules.get("server")
-    zc_avail = getattr(server_mod, "ZEROCONF_AVAILABLE", ZEROCONF_AVAILABLE) if server_mod else ZEROCONF_AVAILABLE
-    if not zc_avail:
+    if not ZEROCONF_AVAILABLE:
         print("[mDNS] Zeroconf library not installed; skipping mDNS advertisement.")
         return None, None
 
-    zc_cls = getattr(server_mod, "Zeroconf", Zeroconf) if server_mod and hasattr(server_mod, "Zeroconf") else Zeroconf
-    sinfo_cls = getattr(server_mod, "ServiceInfo", ServiceInfo) if server_mod and hasattr(server_mod, "ServiceInfo") else ServiceInfo
-
     try:
         local_ip = get_local_ip()
+        if not local_ip or ":" in local_ip:
+            print("[mDNS] No usable IPv4 address; skipping mDNS advertisement.")
+            return None, None
         ip_bytes = socket.inet_aton(local_ip)
         service_type = "_transittracker._tcp.local."
         service_name = f"TransitTracker._transittracker._tcp.local."
         desc = {"version": version, "endpoint": "/dashboard.png"}
 
-        info = sinfo_cls(
+        info = ServiceInfo(
             service_type,
             service_name,
             addresses=[ip_bytes],
@@ -106,7 +147,7 @@ def start_mdns_advertiser(http_port: int = 8000, version: str = VERSION) -> Tupl
             properties=desc,
             server="transittracker.local.",
         )
-        zc = zc_cls()
+        zc = Zeroconf()
         zc.register_service(info)
         print(f"[mDNS] Registered service {service_name} at {local_ip}:{http_port}")
         return zc, info

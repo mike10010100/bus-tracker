@@ -6,9 +6,18 @@ dashboard*.png
 nosebleed.zip
 fill_storage.py
 tracker-arm
+tracker-arm.new
+tracker-arm.manifest.json
+tracker-arm.manifest.json.new
 client-go/client-go
 client-go/cover.out
 *.out
 .coverage
 htmlcov/
 .agents/
+# Release signing key (never commit) and per-build server identity.
+secrets/
+server_identity.key
+server_identity.cert.json
+# Local runtime cache (GTFS index, auto-generated control token).
+cache/

@@ -1,10 +1,17 @@
-version: "3.8"
-
 services:
   transit-tracker:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # 1 = allow building without a signing key (dev only; devices are then
+        # never offered the binary and it can never OTA-update itself).
+        ALLOW_UNSIGNED_OTA: ${ALLOW_UNSIGNED_OTA:-0}
+      # The release signing key is passed to the build as a BuildKit secret, so
+      # it never lands in an image layer or the build cache. Create it once with
+      # `make keygen` (or `openssl genpkey -algorithm ed25519 -out secrets/ota_ed25519.key`).
+      secrets:
+        - ota_signing_key
     image: transit-tracker:${IMAGE_TAG:-latest}
     container_name: transit-tracker
     restart: unless-stopped
@@ -12,6 +19,8 @@ services:
     # allows the container to bind directly to the LAN interface. This enables:
     # 1. Zero-config mDNS service advertisement (_transittracker._tcp.local)
     # 2. Receiving Kindle UDP discovery broadcasts (port 8001) without NAT traversal
+    # Note: the server then listens on every host interface. Control endpoints
+    # always require TRACKER_CONTROL_TOKEN (auto-generated if unset).
     network_mode: host
     environment:
       - PORT=${PORT:-8000}
@@ -20,11 +29,17 @@ services:
       - NJT_PASSWORD=${NJT_PASSWORD:-}
       - NJT_API_USERNAME=${NJT_API_USERNAME:-}
       - NJT_API_PASSWORD=${NJT_API_PASSWORD:-}
+      # Shared secret for /stop, /resume, /mode, /action and /diag. When unset,
+      # one is generated on first start, stored in the cache volume and printed
+      # to the container log.
+      - TRACKER_CONTROL_TOKEN=${TRACKER_CONTROL_TOKEN:-}
       # Peak commute windows (decimal hours), overridable without a rebuild.
       - PEAK_AM_START=${PEAK_AM_START:-7.5}
       - PEAK_AM_END=${PEAK_AM_END:-9.5}
       - PEAK_PM_START=${PEAK_PM_START:-16.5}
       - PEAK_PM_END=${PEAK_PM_END:-19.0}
+      # Weekends are off-peak unless this is 1.
+      - PEAK_WEEKENDS=${PEAK_WEEKENDS:-0}
       # Overnight deep-eco window and its long poll interval (seconds).
       - OVERNIGHT_START=${OVERNIGHT_START:-22.0}
       - OVERNIGHT_END=${OVERNIGHT_END:-6.0}
@@ -41,15 +56,20 @@ services:
         required: false
     volumes:
       # Persist the GTFS static-schedule index across container recreates so the
-      # 55 MB feed isn't re-downloaded and re-parsed on every deploy.
+      # 55 MB feed isn't re-downloaded and re-parsed on every deploy. Also holds
+      # the auto-generated control token.
       - tracker-cache:/app/cache
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      # $$ defers expansion to the container shell so a custom PORT is honoured.
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost:$${PORT:-8000}/healthz"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 10s
 
+secrets:
+  ota_signing_key:
+    file: ${OTA_SIGNING_KEY_FILE:-./secrets/ota_ed25519.key}
+
 volumes:
   tracker-cache:
-

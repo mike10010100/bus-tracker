@@ -1,7 +1,12 @@
+import datetime
 import os
+import re
+import threading
 import time
 from typing import List, Dict, Any, Optional, Tuple, TypedDict
 import requests
+
+from logsafe import redact
 
 
 class ArrivalRecord(TypedDict, total=False):
@@ -11,6 +16,9 @@ class ArrivalRecord(TypedDict, total=False):
     occupancy: Optional[str]
     vehicle_id: Optional[str]
     live: Optional[bool]
+    # Unix time of the departure. When present, the renderer recomputes the
+    # countdown from it at render time (the `eta` text is only a fallback).
+    epoch: Optional[float]
 
 
 def load_env_file(env_file: str) -> None:
@@ -46,7 +54,45 @@ except ImportError:
     # Native fallback if python-dotenv is not installed
     load_env_file(_env_file)
 
-def normalize_arrival(t: Dict[str, Any]) -> ArrivalRecord:
+_DUE_RE = re.compile(r"\b(approach\w*|due|now|arriving|boarding|board|all aboard)\b", re.IGNORECASE)
+_MINS_RE = re.compile(r"\b(\d+)\s*min", re.IGNORECASE)
+_CLOCK_RE = re.compile(r"\b(\d{1,2}):(\d{2})(?:\s*([AaPp])\.?[Mm]\.?)?\b")
+
+
+def estimate_departure_epoch(status: str, dep_time: str, now: Optional[float] = None) -> Optional[float]:
+    """
+    Estimates the departure's unix time at fetch time from the upstream status
+    ("in 5 mins", "APPROACHING") or, failing that, its clock time ("8:35 AM",
+    "20:35"). Returns None when neither can be parsed.
+    """
+    now = time.time() if now is None else now
+    if status:
+        m = _MINS_RE.search(status)
+        if m:
+            return now + int(m.group(1)) * 60
+        if _DUE_RE.search(status):
+            return now
+    for text in (dep_time, status):
+        m = _CLOCK_RE.search(text or "")
+        if not m:
+            continue
+        hour, minute, ampm = int(m.group(1)), int(m.group(2)), (m.group(3) or "").lower()
+        if ampm:
+            if not 1 <= hour <= 12:
+                continue
+            hour = hour % 12 + (12 if ampm == "p" else 0)
+        if hour > 23 or minute > 59:
+            continue
+        local_now = datetime.datetime.fromtimestamp(now)
+        candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        # A clock time well in the past means "tomorrow" (e.g. 12:05 AM seen at 11:58 PM).
+        if candidate.timestamp() < now - 6 * 3600:
+            candidate += datetime.timedelta(days=1)
+        return candidate.timestamp()
+    return None
+
+
+def normalize_arrival(t: Dict[str, Any], now: Optional[float] = None) -> ArrivalRecord:
     """
     Maps a raw NJ Transit trip (from either BUSDV2 or GraphQL) to the canonical
     Arrival record consumed by the renderer. Centralizing this mapping keeps the
@@ -55,13 +101,33 @@ def normalize_arrival(t: Dict[str, Any]) -> ArrivalRecord:
     status = (t.get("departurestatus") or "").strip()
     dep_time = (t.get("departuretime") or "").strip()
     eta_str = f"{status} ({dep_time})" if status and dep_time else (status or dep_time or "Scheduled")
-    return {
+    record: ArrivalRecord = {
         "route": t.get("public_route"),
         "destination": (t.get("header") or "").strip(),
         "eta": eta_str,
         "occupancy": t.get("passload"),
         "vehicle_id": t.get("vehicle_id"),
     }
+    epoch = estimate_departure_epoch(status, dep_time, now=now)
+    if epoch is not None:
+        record["epoch"] = epoch
+    return record
+
+
+TEST_HOST_MARKER = "testpcsdata"
+
+
+def describe_base_url(base_url: Optional[str] = None) -> str:
+    """
+    Startup notice for the effective BUSDV2 base URL. Warns loudly when it is
+    NJ Transit's *test* environment (the historical default).
+    """
+    url = (base_url or NJTransitBusTracker.DEFAULT_BASE_URL).rstrip("/")
+    if TEST_HOST_MARKER in url.lower():
+        return (f"[Tracker] WARNING: BUSDV2 base URL is the NJ Transit TEST host ({url}); "
+                f"production credentials are being sent to the test environment. "
+                f"Set NJT_BASE_URL=https://pcsdata.njtransit.com to use production.")
+    return f"[Tracker] BUSDV2 base URL: {url}"
 
 
 class NJTransitBusTracker:
@@ -80,6 +146,8 @@ class NJTransitBusTracker:
         self.token: Optional[str] = None
         self.token_expiry: float = 0
         self.session = requests.Session()
+        # requests.Session and the token are shared by request threads.
+        self._lock = threading.RLock()
 
     @property
     def auth_url(self) -> str:
@@ -94,6 +162,10 @@ class NJTransitBusTracker:
         Retrieves a valid token. If expired or not present, automatically
         authenticates with NJ Transit to obtain a new 24-hour token.
         """
+        with self._lock:
+            return self._get_token_locked()
+
+    def _get_token_locked(self) -> str:
         if not self.token or time.time() > self.token_expiry:
             if not self.username or not self.password:
                 raise ValueError(
@@ -138,18 +210,20 @@ class NJTransitBusTracker:
         Fetches live arrivals via NJ Transit's public web GraphQL API.
         No token or authentication required; highly reliable fallback.
         """
-        resp = self.session.post(
-            self.GRAPHQL_URL,
-            json={
-                "operationName": "BusArrivalsByStopID",
-                "variables": {"stopID": str(stop_id)},
-                "query": self.GRAPHQL_QUERY,
-            },
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json().get("data", {}).get("getBusArrivalsByStopID") or []
+        with self._lock:
+            resp = self.session.post(
+                self.GRAPHQL_URL,
+                json={
+                    "operationName": "BusArrivalsByStopID",
+                    "variables": {"stopID": str(stop_id)},
+                    "query": self.GRAPHQL_QUERY,
+                },
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        data = payload.get("data", {}).get("getBusArrivalsByStopID") or []
         results = []
         for item in data:
             pub_route = item.get("publicRoute") or ""
@@ -182,19 +256,20 @@ class NJTransitBusTracker:
         """
         try:
             token = self.get_token()
-            resp = self.session.post(
-                self.bus_dv_url,
-                data={
-                    "token": token,
-                    "stop": str(stop_id),
-                    "route": route,
-                    "direction": "",
-                    "IP": "",
-                },
-                timeout=8,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            with self._lock:
+                resp = self.session.post(
+                    self.bus_dv_url,
+                    data={
+                        "token": token,
+                        "stop": str(stop_id),
+                        "route": route,
+                        "direction": "",
+                        "IP": "",
+                    },
+                    timeout=8,
+                )
+                resp.raise_for_status()
+                data = resp.json()
             trips = data.get("DVTrip")
             # BUSDV2 can answer 200 with an error payload (e.g. {"message":
             # {"message":"unknown user"}, "DVTrip":null}) when the account is not
@@ -209,7 +284,7 @@ class NJTransitBusTracker:
             try:
                 trips = self.get_arrivals_graphql(stop_id=stop_id, route=route)
             except Exception as e2:
-                print(f"[Tracker] Both BUSDV2 ({e}) and GraphQL ({e2}) failed.")
+                print(f"[Tracker] Both BUSDV2 ({redact(e)}) and GraphQL ({redact(e2)}) failed.")
                 return self.STATUS_ERROR, []
 
         return (self.STATUS_OK if trips else self.STATUS_EMPTY), trips

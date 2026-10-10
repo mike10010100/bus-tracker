@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"strings"
 )
@@ -48,10 +47,12 @@ func (tc *TrackerClient) postLog(ctx context.Context, msg string) {
 // boot hook) which is safe but shells out a little.
 func (tc *TrackerClient) postDiagnostics(active bool) {
 	report := GatherDiagnostics().Format()
-	if active {
-		report += "\n\n" + RunActiveProbe().Format()
-	}
-	go tc.postText(context.Background(), "/diag", report)
+	go func() {
+		if active {
+			report += "\n\n" + RunActiveProbe().Format()
+		}
+		tc.postText(context.Background(), "/diag", report)
+	}()
 }
 
 func (tc *TrackerClient) postText(ctx context.Context, path, msg string) {
@@ -68,20 +69,5 @@ func (tc *TrackerClient) postText(ctx context.Context, path, msg string) {
 }
 
 func (tc *TrackerClient) handleNetworkError(ctx context.Context) {
-	tc.mu.Lock()
-	tc.consecutiveErrors++
-	errCount := tc.consecutiveErrors
-	tc.mu.Unlock()
-
-	// If server is unreachable, immediately trigger LAN auto-discovery
-	if errCount >= 1 {
-		tc.logRemote(fmt.Sprintf("Server unreachable (error %d). Triggering LAN auto-discovery...", errCount))
-		if discovered, err := autoDiscover(ctx); err == nil && discovered != "" {
-			tc.setServerURL(discovered)
-			tc.mu.Lock()
-			tc.consecutiveErrors = 0
-			tc.mu.Unlock()
-			tc.logRemote(fmt.Sprintf("LAN Auto-discovery re-routed server to %s", discovered))
-		}
-	}
+	tc.recordPollFailure(ctx)
 }

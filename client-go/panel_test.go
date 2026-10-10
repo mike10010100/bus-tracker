@@ -128,6 +128,8 @@ func TestPlausiblePanel(t *testing.T) {
 		{"buffer doubled", PanelSize{3296, 1248}, false},
 		{"too small", PanelSize{100, 100}, false},
 		{"too large", PanelSize{3000, 2000}, false},
+		{"height too small", PanelSize{1000, 300}, false},
+		{"height too large", PanelSize{1000, 1900}, false},
 		{"bad ratio", PanelSize{2000, 600}, false},
 	}
 	for _, tt := range tests {

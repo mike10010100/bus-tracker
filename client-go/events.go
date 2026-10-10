@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"runtime"
 )
 
 // Linux input subsystem constants
@@ -37,6 +38,9 @@ type RawEventMsg struct {
 // DetectEventStep determines whether the kernel is emitting 16-byte (32-bit ARM)
 // or 24-byte (64-bit / y2038) input_event structures.
 func DetectEventStep(buf []byte, n int) int {
+	if runtime.GOARCH == "arm" || runtime.GOARCH == "386" || runtime.GOARCH == "mips" {
+		return 16
+	}
 	if n >= 24 && n%24 == 0 && buf[16] <= 5 && buf[17] == 0 {
 		return 24
 	}

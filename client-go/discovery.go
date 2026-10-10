@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mike10010100/transit-tracker/client-go/internal/otasig"
 )
 
 var (
@@ -107,7 +111,8 @@ func GetBroadcastAddresses(port int) []string {
 	return addrs
 }
 
-// DiscoverViaUDP broadcasts a discovery probe and waits for a server response
+// DiscoverViaUDP broadcasts a discovery probe and waits for a server response.
+// Implements sender IP validation and candidate verification per spec §6.
 func DiscoverViaUDP(ctx context.Context, port int, timeout time.Duration) (string, error) {
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
@@ -141,19 +146,26 @@ func DiscoverViaUDP(ctx context.Context, port int, timeout time.Duration) (strin
 			return "", fmt.Errorf("%w: %w", ErrNoUDPReply, err)
 		}
 
+		udpRemote, ok := remoteAddr.(*net.UDPAddr)
+		if !ok {
+			continue
+		}
+		senderIP := udpRemote.IP.String()
+
 		offer, err := ParseDiscoveryOffer(string(buf[:n]))
-		if err == nil && offer.URL != "" && AdoptableServerURL(offer.URL) {
+		if err != nil || offer.URL == "" {
+			offer = &ServerOffer{URL: fmt.Sprintf("http://%s:%d", senderIP, DefaultServerPort)}
+		}
+
+		// Per spec §6: offer host must equal the UDP sender's IP
+		u, err := url.Parse(offer.URL)
+		if err != nil || u.Hostname() != senderIP {
+			offer.URL = fmt.Sprintf("http://%s:%d", senderIP, DefaultServerPort)
+		}
+
+		if AdoptableServerURL(offer.URL) {
 			if verifyServerFn(ctx, offer.URL, 800*time.Millisecond) {
 				return offer.URL, nil
-			}
-			// If offer URL contains localhost or 0.0.0.0, fallback to remoteAddr IP
-			if strings.Contains(offer.URL, "localhost") || strings.Contains(offer.URL, "127.0.0.1") {
-				if udpRemote, ok := remoteAddr.(*net.UDPAddr); ok {
-					altURL := fmt.Sprintf("http://%s:%d", udpRemote.IP.String(), DefaultServerPort)
-					if verifyServerFn(ctx, altURL, 800*time.Millisecond) {
-						return altURL, nil
-					}
-				}
 			}
 		}
 	}
@@ -193,9 +205,6 @@ func DiscoverViaSubnetSweep(ctx context.Context, httpPort int) (string, error) {
 	sweepCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Snapshot the verification function so probe goroutines (which may outlive
-	// this call when we return early on a match) capture a stable local value
-	// rather than re-reading the seam concurrently with test cleanup.
 	verify := verifyServerFn
 
 	resultChan := make(chan string, 1)
@@ -242,22 +251,55 @@ func DiscoverViaSubnetSweep(ctx context.Context, httpPort int) (string, error) {
 	}
 }
 
-// verifyServer checks if candidate responds to HEAD /tracker-arm
+// verifyServer checks if candidate responds to GET /identity with a valid nonce and auth.
+// If OTAPublicKey is set, response must be signed and authenticated per spec §3.
+// If OTAPublicKey is empty, a plain 200 OK is sufficient.
 func verifyServer(ctx context.Context, serverURL string, timeout time.Duration) bool {
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, "HEAD", serverURL+"/tracker-arm", nil)
+	req, err := http.NewRequestWithContext(reqCtx, "GET", serverURL+"/identity", nil)
 	if err != nil {
 		return false
 	}
-	client := &http.Client{Timeout: timeout}
+	nonce, err := otasig.NewNonce()
+	if err != nil {
+		return false
+	}
+	req.Header.Set(otasig.NonceHeader, nonce)
+
+	client := &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, otasig.MaxManifestSize+1))
+	if err != nil || len(bodyBytes) > otasig.MaxManifestSize {
+		return false
+	}
+
+	if OTAPublicKey != "" {
+		releasePub, err := otasig.ParsePublicKey(OTAPublicKey)
+		if err != nil {
+			return false
+		}
+		if err := verifyResponseAuth(releasePub, nonce, "/identity", resp, bodyBytes); err != nil {
+			return false
+		}
+	}
+
+	return true
 }
 
 // PersistServerURL writes the discovered server URL to persistent storage

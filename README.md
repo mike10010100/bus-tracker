@@ -105,69 +105,89 @@ python server.py
 
 ### Control Endpoints
 
-`/stop` and `/resume` change tracker state. By default they are only accepted
-from private/loopback addresses. To expose them across a network, set a shared
-secret and pass it as a header or query parameter:
+State-mutating control plane operations (`POST /stop`, `POST /resume`, `POST /mode`, `POST /action`, `POST /diag/request`) and diagnostics reads (`GET /mode`, `GET /action`, `GET /diag`) require authentication via the `X-Tracker-Token` header:
 
 ```bash
 export TRACKER_CONTROL_TOKEN=my-secret
-curl -H "X-Tracker-Token: my-secret" http://<SERVER_IP>:8000/stop
+curl -X POST -H "X-Tracker-Token: my-secret" http://<SERVER_IP>:8000/stop
 ```
+
+- **Zero-Bypass Policy:** There is no loopback or private IP bypass; every control request requires the token. Query parameter tokens are rejected to prevent leakage in logs or referrers.
+- **Automatic Token Generation:** If `TRACKER_CONTROL_TOKEN` is unset in the environment, the server generates a cryptographically secure random 256-bit hex token (stored with `0600` permissions in the cache directory) and logs it on startup.
+- **Web Interface:** The web management UI stores the token in browser `localStorage` and sends it via fetch headers; the token is never rendered into the HTML document.
 
 ---
 
 ## Kindle Paperwhite Setup
 
-1. Copy `scripts/TransitTracker.sh` to your Kindle's `documents/` directory:
+1. Copy `client-go/launcher/TransitTracker.sh` to your Kindle's `documents/` directory:
    ```bash
-   cp scripts/TransitTracker.sh /Volumes/Kindle/documents/
+   cp client-go/launcher/TransitTracker.sh /Volumes/Kindle/documents/
    ```
 2. In your Kindle Library, tap **"Transit Tracker"**.
-   - **Auto-Discovery:** The Go client will automatically scan your Wi-Fi network via UDP broadcast, locate the running server, and persist its IP address.
+   - **Auto-Discovery:** The Go client automatically scans your Wi-Fi network via UDP broadcast, locates the running server, and cryptographically verifies its identity before persisting the URL.
+   - **Self-Updating Launcher:** The launcher script automatically self-updates itself from the Go binary's embedded release if updated.
    - *(Optional Manual Override)*: You can force a specific server address by creating `/Volumes/Kindle/documents/tracker_server.txt` containing your server URL (e.g. `http://192.168.1.100:8000`).
 
 ---
 
-## Building the Go Client
+## Security Model & Signed OTA Releases
 
-To compile the ARM binary for Kindle:
+The project employs an end-to-end cryptographic trust chain built on **Ed25519** signatures:
+
+1. **Release Key:** `make keygen` generates an Ed25519 release signing key (`secrets/ota_ed25519.key`, mode `0600`).
+2. **Client Pinning:** The public release key is baked into the Go client at compile time (`-X main.OTAPublicKey=...`).
+3. **Signed OTA Manifests:** `tracker-arm.manifest.json` specifies the version, binary SHA-256, and byte size, signed by the release key. The client verifies the signature, hash, and strict semver progression before executing updates.
+4. **Server Identity Certificates:** The server possesses an Ed25519 identity key certified by the release key (`server_identity.cert.json`).
+5. **Authenticated Responses:** Dashboard responses (`/dashboard.png`) and discovery endpoints (`/identity`) include cryptographic nonce signatures. The Kindle validates the signature against the server certificate and release key before rendering or adopting configurations.
+
+### Building the Go Client & Releases
+
+To generate a key and compile a signed release:
 ```bash
-make build    # Cross-compiles tracker-arm with the version from VERSION
+make keygen   # Generate release key in secrets/ota_ed25519.key (run once)
+make build    # Cross-compiles tracker-arm, signs manifest, and mints server cert
+make verify-release # Validates manifest and binary against public key
 ```
-Any running Kindle connected to your server will detect the new build on its next 45-second poll cycle and update itself over Wi-Fi.
+
+For development builds without OTA signing:
+```bash
+ALLOW_UNSIGNED=1 make build
+```
+
+The CLI tool `client-go/cmd/otasign` provides stdlib-only utilities for key generation, public key extraction, manifest signing, server cert minting, and signature verification.
 
 ---
 
 ## Development & Verification Suite
 
-Install the development dependencies (includes `coverage`):
+Install the development dependencies:
 ```bash
 pip install -r requirements-dev.txt
 ```
 
-Run the full test and verification suite:
+Run the full verification suite:
 ```bash
-make test        # Run Go + Python unit tests (Go with race detection)
+make check       # Complete suite: fmt-check, vet, tests, coverage gates, shellcheck
+make test        # Run Go + Python unit tests (Go with -race detector)
 make vet         # Static analysis with go vet
-make fmt         # Format Go sources with gofmt
-make coverage    # Enforce the 90% coverage gate for both stacks
-make check       # Run complete suite: fmt-check, vet, tests, coverage gate
+make fmt         # Format Go sources with gofmt -s
+make coverage    # Enforce coverage gates across both stacks
 ```
 
 ### Test Coverage
 
-Both stacks are gated at **90% statement coverage** and enforced automatically:
+Both stacks enforce strict coverage gates in CI and `make check`:
 
 | Stack  | Tool                       | Gate | Current |
 |--------|----------------------------|------|---------|
-| Go     | `go test -coverprofile`    | 90%  | 90.6%   |
-| Python | `coverage.py` (`.coveragerc`) | 90% | 96%    |
+| Go     | `go test -coverprofile`    | 93%  | 93.4%   |
+| Python | `coverage.py` (`.coveragerc`) | 92% | 94%    |
 
-- **Go gate:** `scripts/check_coverage_go.sh [threshold]` (default 90).
-- **Python gate:** `[report] fail_under = 90` in `.coveragerc`. Test files and `__main__` demo blocks are excluded.
-- `make check` fails the build if coverage drops below the gate; CI runs the same gates on every push/PR.
-
-Tests target real behavior rather than line-count: upstream parsing and the BUSDV2→GraphQL fallback, the `ok`/`empty`/`error` status model, HTTP handlers and control-route auth, OTA SHA-256 verification, private-network server adoption, discovery (UDP + subnet sweep), the touch gesture state machine, and the poll/refresh loop.
+- **Go gate:** `scripts/check_coverage_go.sh 93` (covers `client-go`, `cmd/otasign`, and `internal/otasig`).
+- **Python gate:** `[report] fail_under = 92` in `.coveragerc`.
+- **Race Safety:** All Go unit tests run cleanly with `-race`.
+- **Hermetic Testing:** Tests isolate runtime environments, filesystem access, and network interfaces using dedicated test seams.
 
 ---
 

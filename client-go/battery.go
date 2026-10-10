@@ -41,8 +41,8 @@ func ReadBatteryInfo(
 					statusPath := filepath.Join(filepath.Dir(capPath), "status")
 					isCharge := false
 					if sData, err := readFile(statusPath); err == nil {
-						s := strings.ToLower(string(sData))
-						isCharge = strings.Contains(s, "charg")
+						s := strings.TrimSpace(strings.ToLower(string(sData)))
+						isCharge = (s == "charging" || s == "full")
 					}
 					return BatteryInfo{Level: lvl, IsCharging: isCharge}
 				}

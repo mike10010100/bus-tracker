@@ -3,6 +3,7 @@ Integration tests for the dashboard route, OTA tracker-arm endpoint, and
 discovery/image formatting helpers.
 """
 
+import base64
 import datetime
 import hashlib
 import io
@@ -17,6 +18,8 @@ import urllib.error
 from unittest.mock import patch
 from PIL import Image
 
+import discovery
+import ota
 import server
 from server import format_for_kindle, sha256_file
 from test_server_http import ServerHTTPTestBase, _http_get, _http
@@ -77,18 +80,34 @@ class TestDashboardRoute(ServerHTTPTestBase):
         cand1 = os.path.join(os.path.dirname(server.__file__), "tracker-arm")
         cand2 = os.path.join(os.path.dirname(server.__file__), "..", "tracker-arm")
         binary = cand1 if os.path.exists(cand1) else (cand2 if os.path.exists(cand2) else cand1)
+        manifest = os.path.join(os.path.dirname(binary), "tracker-arm.manifest.json")
         existed = os.path.exists(binary)
+        m_existed = os.path.exists(manifest)
         if not existed:
             with open(binary, "wb") as f:
                 f.write(b"FAKEARM")
+        if not m_existed:
+            man_content = json.dumps({
+                "format": "transit-tracker-ota-v1",
+                "version": server.SERVER_VERSION,
+                "sha256": server.sha256_file(binary),
+                "size": os.path.getsize(binary),
+                "signature": base64.b64encode(b"\x00" * 64).decode("ascii"),
+            })
+            with open(manifest, "w", encoding="utf-8") as f:
+                f.write(man_content)
+        ota.clear_caches()
         try:
             status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
             self.assertEqual(status, 200)
             self.assertEqual(headers.get("X-Tracker-Version"), server.SERVER_VERSION)
             self.assertEqual(headers.get("X-Tracker-SHA256"), server.sha256_file(binary))
         finally:
+            if not m_existed and os.path.exists(manifest):
+                os.remove(manifest)
             if not existed and os.path.exists(binary):
                 os.remove(binary)
+            ota.clear_caches()
 
     def test_dashboard_etag_and_304(self):
         status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1")
@@ -262,19 +281,19 @@ class TestPresentationOverHTTP(ServerHTTPTestBase):
 
 class TestMdnsAdvertiser(unittest.TestCase):
     def test_returns_none_when_zeroconf_unavailable(self):
-        original = server.ZEROCONF_AVAILABLE
-        server.ZEROCONF_AVAILABLE = False
+        original = discovery.ZEROCONF_AVAILABLE
+        discovery.ZEROCONF_AVAILABLE = False
         try:
-            zc, info = server.start_mdns_advertiser(http_port=8000)
+            zc, info = discovery.start_mdns_advertiser(http_port=8000)
             self.assertIsNone(zc)
             self.assertIsNone(info)
         finally:
-            server.ZEROCONF_AVAILABLE = original
+            discovery.ZEROCONF_AVAILABLE = original
 
     def test_registers_service_when_available(self):
-        original_flag = server.ZEROCONF_AVAILABLE
-        original_zc = getattr(server, "Zeroconf", None)
-        original_info = getattr(server, "ServiceInfo", None)
+        original_flag = discovery.ZEROCONF_AVAILABLE
+        original_zc = getattr(discovery, "Zeroconf", None)
+        original_info = getattr(discovery, "ServiceInfo", None)
 
         registered = {}
 
@@ -288,84 +307,90 @@ class TestMdnsAdvertiser(unittest.TestCase):
             def close(self):
                 registered["closed"] = True
 
-        server.ZEROCONF_AVAILABLE = True
-        server.Zeroconf = FakeZC
-        server.ServiceInfo = lambda *a, **k: {"args": a, "kwargs": k}
-        try:
-            zc, info = server.start_mdns_advertiser(http_port=8000, version="1.2.3")
-            self.assertIsInstance(zc, FakeZC)
-            self.assertIsNotNone(info)
-            self.assertIn("info", registered)
-            self.assertEqual(registered["info"]["kwargs"]["server"], "transittracker.local.")
-        finally:
-            server.ZEROCONF_AVAILABLE = original_flag
-            if original_zc is None:
-                del server.Zeroconf
-            else:
-                server.Zeroconf = original_zc
-            if original_info is None:
-                del server.ServiceInfo
-            else:
-                server.ServiceInfo = original_info
+        discovery.ZEROCONF_AVAILABLE = True
+        discovery.Zeroconf = FakeZC
+        discovery.ServiceInfo = lambda *a, **k: {"args": a, "kwargs": k}
+        with patch("discovery.get_local_ip", return_value="192.168.1.100"):
+            try:
+                zc, info = discovery.start_mdns_advertiser(http_port=8000, version="1.2.3")
+                self.assertIsInstance(zc, FakeZC)
+                self.assertIsNotNone(info)
+                self.assertIn("info", registered)
+                self.assertEqual(registered["info"]["kwargs"]["server"], "transittracker.local.")
+            finally:
+                discovery.ZEROCONF_AVAILABLE = original_flag
+                if original_zc is None:
+                    if hasattr(discovery, "Zeroconf"):
+                        delattr(discovery, "Zeroconf")
+                else:
+                    discovery.Zeroconf = original_zc
+                if original_info is None:
+                    if hasattr(discovery, "ServiceInfo"):
+                        delattr(discovery, "ServiceInfo")
+                else:
+                    discovery.ServiceInfo = original_info
 
 
 class TestDiscoveryResponderFailure(unittest.TestCase):
     def test_bind_failure_is_handled(self):
-        original = server.socket.socket
+        original = discovery.socket.socket
 
         def fake_socket(*args, **kwargs):
             raise OSError("bind fail")
 
-        server.socket.socket = fake_socket
+        discovery.socket.socket = fake_socket
         try:
-            t = server.start_discovery_responder(http_port=8000, version="1.0.0")
+            t = discovery.start_discovery_responder(http_port=8000, version="1.0.0")
             t.join(timeout=1)
             self.assertFalse(t.is_alive())
         finally:
-            server.socket.socket = original
+            discovery.socket.socket = original
 
 
 class TestMdnsFailure(unittest.TestCase):
     def test_registration_exception_returns_none(self):
-        original_flag = server.ZEROCONF_AVAILABLE
-        original_zc = getattr(server, "Zeroconf", None)
-        original_info = getattr(server, "ServiceInfo", None)
+        original_flag = discovery.ZEROCONF_AVAILABLE
+        original_zc = getattr(discovery, "Zeroconf", None)
+        original_info = getattr(discovery, "ServiceInfo", None)
 
-        server.ZEROCONF_AVAILABLE = True
-        server.ServiceInfo = lambda *a, **k: object()
+        discovery.ZEROCONF_AVAILABLE = True
+        discovery.ServiceInfo = lambda *a, **k: object()
 
         class FailingZC:
             def register_service(self, info):
                 raise OSError("cannot bind mdns")
 
-        server.Zeroconf = FailingZC
-        try:
-            zc, info = server.start_mdns_advertiser(http_port=8000, version="1.0.0")
-            self.assertIsNone(zc)
-            self.assertIsNone(info)
-        finally:
-            server.ZEROCONF_AVAILABLE = original_flag
-            if original_zc is None:
-                del server.Zeroconf
-            else:
-                server.Zeroconf = original_zc
-            if original_info is None:
-                del server.ServiceInfo
-            else:
-                server.ServiceInfo = original_info
+        discovery.Zeroconf = FailingZC
+        with patch("discovery.get_local_ip", return_value="192.168.1.100"):
+            try:
+                zc, info = discovery.start_mdns_advertiser(http_port=8000, version="1.0.0")
+                self.assertIsNone(zc)
+                self.assertIsNone(info)
+            finally:
+                discovery.ZEROCONF_AVAILABLE = original_flag
+                if original_zc is None:
+                    if hasattr(discovery, "Zeroconf"):
+                        delattr(discovery, "Zeroconf")
+                else:
+                    discovery.Zeroconf = original_zc
+                if original_info is None:
+                    if hasattr(discovery, "ServiceInfo"):
+                        delattr(discovery, "ServiceInfo")
+                else:
+                    discovery.ServiceInfo = original_info
 
 
 class TestUDPDiscoveryResponder(unittest.TestCase):
     def test_responder_answers_probe(self):
-        original_port = server.DISCOVERY_PORT
+        original_port = discovery.DISCOVERY_PORT
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
         probe.close()
 
-        server.DISCOVERY_PORT = port
+        discovery.DISCOVERY_PORT = port
         try:
-            t = server.start_discovery_responder(http_port=server.PORT, version="9.9.9")
+            t = discovery.start_discovery_responder(http_port=server.PORT, version="9.9.9", port=port)
             self.assertTrue(t.daemon)
             time.sleep(0.2)
 
@@ -379,6 +404,7 @@ class TestUDPDiscoveryResponder(unittest.TestCase):
             finally:
                 client.close()
         finally:
+            discovery.DISCOVERY_PORT = original_port
             server.DISCOVERY_PORT = original_port
 
 

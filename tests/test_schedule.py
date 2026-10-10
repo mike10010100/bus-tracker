@@ -76,13 +76,16 @@ class TestCommuteSchedule(unittest.TestCase):
 
     def test_force_fast_poll_overrides_schedule(self):
         import server
+        import schedule
 
-        original = server.FORCE_FAST_POLL
+        original = schedule.FORCE_FAST_POLL
         try:
+            schedule.FORCE_FAST_POLL = True
             server.FORCE_FAST_POLL = True
             # Even at 3 AM, forced-fast returns 60s.
             self.assertEqual(server.get_target_poll_interval(datetime(2026, 10, 8, 3, 0)), 60)
         finally:
+            schedule.FORCE_FAST_POLL = original
             server.FORCE_FAST_POLL = original
 
 

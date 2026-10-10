@@ -21,11 +21,15 @@ import datetime
 import io
 import json
 import os
+import threading
 import time
 import zipfile
 from typing import Any, Dict, List, Optional
 
 import requests
+
+from logsafe import redact
+from paths import resolve_cache_dir
 
 try:
     from google.transit import gtfs_realtime_pb2
@@ -61,6 +65,11 @@ STATIC_TTL = 20 * 3600
 # hour or two ahead) -- enough for a commute board.
 LOOKBACK_SECS = 120
 LOOKAHEAD_SECS = 3 * 3600
+# After a failed static download, don't retry for this long (the download is
+# ~55 MB with a 180 s timeout; retrying per request would tie up threads).
+NEGATIVE_TTL = 15 * 60
+# Realtime feeds are reused for this long across stops/requests.
+REALTIME_TTL = 15
 
 
 def hms_to_secs(value: str) -> int:
@@ -70,6 +79,17 @@ def hms_to_secs(value: str) -> int:
         return h * 3600 + m * 60 + s
     except Exception:
         return -1
+
+
+def service_day_origin(service_date: datetime.date, tz: Optional[datetime.tzinfo] = None) -> float:
+    """
+    Unix time that GTFS stop times of `service_date` are measured from:
+    "noon minus 12h" in local time (per the GTFS spec). This differs from
+    local midnight by an hour on DST-change days. tz=None means the server's
+    local timezone.
+    """
+    noon = datetime.datetime(service_date.year, service_date.month, service_date.day, 12, 0, tzinfo=tz)
+    return noon.timestamp() - 12 * 3600
 
 
 def format_clock(epoch: float) -> str:
@@ -106,8 +126,9 @@ class GTFSBusTracker:
         username: Optional[str] = None,
         password: Optional[str] = None,
         base_url: Optional[str] = None,
-        cache_dir: str = "/app/cache",
+        cache_dir: Optional[str] = None,
         session: Optional[requests.Session] = None,
+        tz: Optional[datetime.tzinfo] = None,
     ):
         raw_user = username or os.environ.get("NJT_USERNAME") or os.environ.get("NJT_API_USERNAME") or ""
         self.username = raw_user.split("@")[0] if "@" in raw_user else raw_user
@@ -115,8 +136,9 @@ class GTFSBusTracker:
         self.route = route
         self.stops = list(stops or [])
         self.base_url = (base_url or self.BASE_URL).rstrip("/")
-        self.cache_dir = cache_dir
+        self.cache_dir = cache_dir or resolve_cache_dir()
         self.session = session or requests.Session()
+        self.tz = tz  # None = server local time
 
         self.token: Optional[str] = None
         self.token_expiry: float = 0
@@ -125,6 +147,16 @@ class GTFSBusTracker:
         self._realtime_at: float = 0
         self._occupancy: Optional[Dict[str, Dict[str, Any]]] = None
         self._occupancy_at: float = 0
+
+        # Thread-safety: request threads, the warm-up thread and the background
+        # rebuild thread share this object.
+        self._session_lock = threading.RLock()   # requests.Session use
+        self._token_lock = threading.Lock()      # token refresh
+        self._state_lock = threading.Lock()      # _index / _last_failure / _build_thread
+        self._build_lock = threading.Lock()      # one static rebuild at a time
+        self._realtime_lock = threading.Lock()   # one realtime refresh at a time
+        self._build_thread: Optional[threading.Thread] = None
+        self._last_failure: float = 0.0
 
     @property
     def auth_url(self) -> str:
@@ -147,22 +179,24 @@ class GTFSBusTracker:
         return os.path.join(self.cache_dir, "gtfs_index.json")
 
     def get_token(self) -> str:
-        if self.token and time.time() < self.token_expiry:
-            return self.token
-        if not self.username or not self.password:
-            raise ValueError("Missing NJ Transit credentials (NJT_USERNAME/NJT_PASSWORD).")
-        resp = self.session.post(
-            self.auth_url,
-            data={"username": self.username, "password": self.password},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if str(data.get("Authenticated")).lower() == "true" and data.get("UserToken"):
-            self.token = data["UserToken"]
-            self.token_expiry = time.time() + 82800  # 23h
-            return self.token
-        raise RuntimeError(f"NJ Transit GTFS auth failed: {data}")
+        with self._token_lock:
+            if self.token and time.time() < self.token_expiry:
+                return self.token
+            if not self.username or not self.password:
+                raise ValueError("Missing NJ Transit credentials (NJT_USERNAME/NJT_PASSWORD).")
+            with self._session_lock:
+                resp = self.session.post(
+                    self.auth_url,
+                    data={"username": self.username, "password": self.password},
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            if str(data.get("Authenticated")).lower() == "true" and data.get("UserToken"):
+                self.token = data["UserToken"]
+                self.token_expiry = time.time() + 82800  # 23h
+                return self.token
+            raise RuntimeError(f"NJ Transit GTFS auth failed: {redact(data)}")
 
     def _index_is_fresh(self, index: Dict[str, Any]) -> bool:
         if not index or index.get("route") != self.route:
@@ -192,23 +226,81 @@ class GTFSBusTracker:
         except Exception:
             pass
 
-    def ensure_index(self) -> Optional[Dict[str, Any]]:
-        if self._index is not None:
+    def _current_index(self) -> Optional[Dict[str, Any]]:
+        with self._state_lock:
             return self._index
-        cached = self._load_cached_index()
-        if cached is not None:
-            self._index = cached
-            return self._index
-        try:
-            self.get_token()
-            resp = self.session.get(self.static_url, params={"token": self.token}, timeout=180)
+
+    def _negative_cached(self) -> bool:
+        with self._state_lock:
+            return bool(self._last_failure) and time.time() - self._last_failure < NEGATIVE_TTL
+
+    def _download_static(self) -> bytes:
+        """
+        Downloads the static GTFS zip using the tracker session.
+        """
+        token = self.get_token()
+        with self._session_lock:
+            resp = self.session.get(self.static_url, params={"token": token}, timeout=180)
             resp.raise_for_status()
-            self._index = self.build_index(resp.content)
-            self._save_index(self._index)
-            return self._index
-        except Exception as e:
-            print(f"[GTFS] static schedule unavailable ({e})")
-            return None
+            return resp.content
+
+    def rebuild_index(self) -> Optional[Dict[str, Any]]:
+        """
+        Downloads and rebuilds the static index, single-flight: concurrent
+        callers wait for the in-progress build and then reuse its result.
+        Failures are negative-cached for NEGATIVE_TTL. Returns the current
+        index (possibly the old one if the rebuild failed).
+        """
+        with self._build_lock:
+            current = self._current_index()
+            if current is not None and self._index_is_fresh(current):
+                return current
+            if self._negative_cached():
+                return current
+            try:
+                index = self.build_index(self._download_static())
+            except Exception as e:
+                with self._state_lock:
+                    self._last_failure = time.time()
+                print(f"[GTFS] static schedule unavailable ({redact(e)}); retrying in {NEGATIVE_TTL // 60} min")
+                return current
+            with self._state_lock:
+                self._index = index
+                self._last_failure = 0.0
+            self._save_index(index)
+            return index
+
+    def _start_background_rebuild(self) -> None:
+        if self._negative_cached():
+            return
+        with self._state_lock:
+            if self._build_thread is not None and self._build_thread.is_alive():
+                return
+            self._build_thread = threading.Thread(target=self.rebuild_index, daemon=True, name="GTFSRebuild")
+            self._build_thread.start()
+
+    def ensure_index(self, wait: bool = False) -> Optional[Dict[str, Any]]:
+        """
+        Returns the static index, checking freshness (STATIC_TTL and
+        valid_until) on every call. A stale index keeps being served while a
+        single background rebuild runs; with no index at all the disk cache is
+        tried first. wait=True rebuilds synchronously (used by the warm-up
+        thread) instead of in the background.
+        """
+        current = self._current_index()
+        if current is not None and self._index_is_fresh(current):
+            return current
+        if current is None:
+            cached = self._load_cached_index()
+            if cached is not None:
+                with self._state_lock:
+                    self._index = cached
+                return cached
+            return self.rebuild_index()
+        if wait:
+            return self.rebuild_index()
+        self._start_background_rebuild()
+        return self._current_index()
 
     def build_index(self, zip_bytes: bytes) -> Dict[str, Any]:
         """Parses the static GTFS zip into a small index for this route/stops."""
@@ -286,20 +378,22 @@ class GTFSBusTracker:
 
     def fetch_realtime(self) -> Dict[str, Dict[str, Any]]:
         """Fetches GTFS-RT trip updates, keyed trip_id -> stop_id -> {time,delay,vehicle_id}."""
-        index = self._index or {}
+        index = self._current_index() or {}
         known = index.get("trips", {})
         out: Dict[str, Dict[str, Any]] = {}
         if not _REALTIME_AVAILABLE:
             print("[GTFS] gtfs-realtime-bindings unavailable; skipping realtime.")
             return out
         try:
-            self.get_token()
-            resp = self.session.get(self.trips_url, params={"token": self.token}, timeout=60)
-            resp.raise_for_status()
+            token = self.get_token()
+            with self._session_lock:
+                resp = self.session.get(self.trips_url, params={"token": token}, timeout=60)
+                resp.raise_for_status()
+                content = resp.content
             feed = gtfs_realtime_pb2.FeedMessage()
-            feed.ParseFromString(resp.content)
+            feed.ParseFromString(content)
         except Exception as e:
-            print(f"[GTFS] realtime unavailable ({e})")
+            print(f"[GTFS] realtime unavailable ({redact(e)})")
             return out
 
         for entity in feed.entity:
@@ -336,15 +430,17 @@ class GTFSBusTracker:
         out: Dict[str, Dict[str, Any]] = {}
         if not _REALTIME_AVAILABLE:
             return out
-        known = (self._index or {}).get("trips", {})
+        known = (self._current_index() or {}).get("trips", {})
         try:
-            self.get_token()
-            resp = self.session.get(self.vehicles_url, params={"token": self.token}, timeout=30)
-            resp.raise_for_status()
+            token = self.get_token()
+            with self._session_lock:
+                resp = self.session.get(self.vehicles_url, params={"token": token}, timeout=30)
+                resp.raise_for_status()
+                content = resp.content
             feed = gtfs_realtime_pb2.FeedMessage()
-            feed.ParseFromString(resp.content)
+            feed.ParseFromString(content)
         except Exception as e:
-            print(f"[GTFS] vehicle positions unavailable ({e})")
+            print(f"[GTFS] vehicle positions unavailable ({redact(e)})")
             return out
         for entity in feed.entity:
             if not entity.HasField("vehicle"):
@@ -371,55 +467,56 @@ class GTFSBusTracker:
             return []
         now = now or datetime.datetime.now()
         now_epoch = now.timestamp()
-        now_secs = now.hour * 3600 + now.minute * 60 + now.second
-        midnight = datetime.datetime.combine(now.date(), datetime.time(0, 0))
-        active = self.active_services(index, now.date())
+        tz = now.tzinfo or self.tz
+        today = now.astimezone(tz).date() if tz is not None else now.date()
 
         realtime: Dict[str, Dict[str, Any]] = {}
         occupancy: Dict[str, Dict[str, Any]] = {}
         if allow_realtime:
-            if self._realtime is not None and time.time() - self._realtime_at < 15:
-                realtime = self._realtime
-                occupancy = self._occupancy or {}
-            else:
-                realtime = self.fetch_realtime()
-                occupancy = self.fetch_occupancy()
-                self._realtime = realtime
-                self._realtime_at = time.time()
-                self._occupancy = occupancy
-                self._occupancy_at = time.time()
+            realtime, occupancy = self._get_realtime()
+
+        # Evaluate yesterday's service day too: GTFS times >= 24:00:00 belong
+        # to the previous service day (e.g. 25:10 = 01:10 tomorrow), so between
+        # midnight and ~03:00 they would otherwise vanish. Times are measured
+        # from "noon minus 12h" of the service date, which is DST-correct.
+        service_days = []
+        for service_date in (today - datetime.timedelta(days=1), today):
+            service_days.append((
+                self.active_services(index, service_date),
+                service_day_origin(service_date, tz),
+            ))
 
         # Dedup by the *scheduled* (minute, headsign, direction): the static feed
         # lists the same physical departure under multiple trip_ids (service-day
         # variants), and realtime can shift one copy's time, so keying on the
         # scheduled time collapses them. Prefer the copy that has realtime data.
         by_key: Dict[tuple, Dict[str, Any]] = {}
-        for d in index["deps"].get(stop_id, []):
-            trip = index["trips"].get(d["trip_id"])
-            if not trip or trip["service_id"] not in active:
-                continue
-            secs = d["secs"]
-            if secs < now_secs - LOOKBACK_SECS or secs > now_secs + LOOKAHEAD_SECS:
-                continue
-            sched_epoch = (midnight + datetime.timedelta(seconds=secs)).timestamp()
-            pred = (realtime.get(d["trip_id"]) or {}).get(stop_id) if realtime else None
-            veh = occupancy.get(d["trip_id"]) or {}
-            if pred and pred.get("time"):
-                epoch, live = float(pred["time"]), True
-            else:
-                epoch, live = sched_epoch, False
-            key = (secs // 60, trip["headsign"], trip["direction"])
-            row = {
-                "trip_id": d["trip_id"],
-                "epoch": epoch,
-                "live": live,
-                "direction": trip["direction"],
-                "headsign": trip["headsign"],
-                "vehicle_id": (pred or {}).get("vehicle_id") or veh.get("vehicle_id"),
-                "occupancy": veh.get("occupancy"),
-            }
-            if key not in by_key or (live and not by_key[key]["live"]):
-                by_key[key] = row
+        for active, origin in service_days:
+            for d in index["deps"].get(stop_id, []):
+                trip = index["trips"].get(d["trip_id"])
+                if not trip or trip["service_id"] not in active:
+                    continue
+                sched_epoch = origin + d["secs"]
+                if sched_epoch < now_epoch - LOOKBACK_SECS or sched_epoch > now_epoch + LOOKAHEAD_SECS:
+                    continue
+                pred = (realtime.get(d["trip_id"]) or {}).get(stop_id) if realtime else None
+                veh = occupancy.get(d["trip_id"]) or {}
+                if pred and pred.get("time"):
+                    epoch, live = float(pred["time"]), True
+                else:
+                    epoch, live = sched_epoch, False
+                key = (int(sched_epoch // 60), trip["headsign"], trip["direction"])
+                row = {
+                    "trip_id": d["trip_id"],
+                    "epoch": epoch,
+                    "live": live,
+                    "direction": trip["direction"],
+                    "headsign": trip["headsign"],
+                    "vehicle_id": (pred or {}).get("vehicle_id") or veh.get("vehicle_id"),
+                    "occupancy": veh.get("occupancy"),
+                }
+                if key not in by_key or (live and not by_key[key]["live"]):
+                    by_key[key] = row
 
         rows = sorted(by_key.values(), key=lambda r: r["epoch"])
         result: List[Dict[str, Any]] = []
@@ -428,6 +525,7 @@ class GTFSBusTracker:
                 "route": self.route,
                 "destination": r["headsign"] or f"{self.route} bus",
                 "eta": format_eta(r["epoch"], now_epoch, live=r["live"]),
+                "epoch": r["epoch"],
                 "occupancy": r.get("occupancy"),
                 "vehicle_id": r["vehicle_id"],
                 "live": r["live"],
@@ -435,3 +533,16 @@ class GTFSBusTracker:
             if len(result) >= limit:
                 break
         return result
+
+    def _get_realtime(self) -> tuple:
+        """Returns (trip updates, occupancy), refreshed at most every REALTIME_TTL (single-flight)."""
+        with self._realtime_lock:
+            if self._realtime is not None and time.time() - self._realtime_at < REALTIME_TTL:
+                return self._realtime, self._occupancy or {}
+            realtime = self.fetch_realtime()
+            occupancy = self.fetch_occupancy()
+            self._realtime = realtime
+            self._realtime_at = time.time()
+            self._occupancy = occupancy
+            self._occupancy_at = time.time()
+            return realtime, occupancy

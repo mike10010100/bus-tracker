@@ -172,6 +172,9 @@ def empty_state_message(status: Optional[str]) -> Tuple[str, str]:
     return _NO_BUS_MESSAGE, "#666666"
 
 
+_DUE_WORDS_RE = re.compile(r"\b(approach\w*|due|now|all aboard|board|boarding)\b")
+
+
 def parse_minutes(eta_text: Optional[str]) -> Optional[int]:
     """
     Extracts the arrival minute countdown from ETA strings like:
@@ -180,9 +183,10 @@ def parse_minutes(eta_text: Optional[str]) -> Optional[int]:
     if not eta_text:
         return None
     text = eta_text.lower()
-    if "approach" in text or "due" in text or "now" in text or "all aboard" in text or "board" in text:
+    # Whole words only: "now" must not match inside "Unknown".
+    if _DUE_WORDS_RE.search(text):
         return 0
-    match = re.search(r"(\d+)\s*min", text)
+    match = re.search(r"\b(\d+)\s*min", text)
     if match:
         return int(match.group(1))
     return None

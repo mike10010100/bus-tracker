@@ -3,6 +3,7 @@ Unit tests for Citi Bike live dock tracker module and dashboard rendering integr
 """
 
 import os
+import time
 import unittest
 from unittest.mock import patch, MagicMock
 from PIL import Image
@@ -75,18 +76,26 @@ class TestCitiBikeTracker(unittest.TestCase):
             res = tracker.get_station_status(force_refresh=False)
             self.assertEqual(res, tracker._cached_data)
 
-    def test_network_failure_falls_back_to_mock(self):
+    def test_network_failure_raises_unavailable(self):
+        from citibike import CitiBikeUnavailable, CB_STATUS_ERROR
         tracker = CitiBikeTracker()
         with patch("urllib.request.urlopen", side_effect=Exception("Connection refused")):
-            res = tracker.get_station_status(force_refresh=True)
-            self.assertEqual(len(res), 6)
+            with self.assertRaises(CitiBikeUnavailable):
+                tracker.get_station_status(force_refresh=True)
+            snap = tracker.get_snapshot(force_refresh=True)
+            self.assertEqual(snap.status, CB_STATUS_ERROR)
+            self.assertEqual(snap.stations, [])
 
     def test_network_failure_falls_back_to_cached(self):
+        from citibike import CB_STATUS_STALE
         tracker = CitiBikeTracker()
+        tracker._last_fetch_time = time.time()
         tracker._cached_data = [{"id": "cached_1", "name": "Cached Station"}]
         with patch("urllib.request.urlopen", side_effect=Exception("Connection refused")):
             res = tracker.get_station_status(force_refresh=True)
             self.assertEqual(res, tracker._cached_data)
+            snap = tracker.get_snapshot(force_refresh=True)
+            self.assertEqual(snap.status, CB_STATUS_STALE)
 
 
     def test_successful_gbfs_parsing(self):

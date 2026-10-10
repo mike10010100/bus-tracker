@@ -39,6 +39,28 @@ func TestDetectEventStep(t *testing.T) {
 	if step := DetectEventStep([]byte{1, 2, 3}, 3); step != 16 {
 		t.Errorf("Expected fallback 16, got %d", step)
 	}
+
+	// 24-byte buffer where buf[16] > 5, but buf[8] <= 5
+	buf1 := make([]byte, 24)
+	buf1[16] = 99
+	buf1[8] = 1
+	if step := DetectEventStep(buf1, 24); step != 16 {
+		t.Errorf("Expected fallback 16, got %d", step)
+	}
+
+	// 24-byte buffer where both buf[16] > 5 and buf[8] > 5
+	buf2 := make([]byte, 24)
+	buf2[16] = 99
+	buf2[8] = 99
+	if step := DetectEventStep(buf2, 24); step != 16 {
+		t.Errorf("Expected fallback 16, got %d", step)
+	}
+}
+
+func TestParseInputEventsShortBuffer(t *testing.T) {
+	if events := ParseInputEvents([]byte{1, 2, 3}, 3, "dev"); events != nil {
+		t.Errorf("expected nil for len < 16, got %+v", events)
+	}
 }
 
 func TestParseInputEvents16Byte(t *testing.T) {
@@ -151,6 +173,21 @@ func TestExtractCoordinates(t *testing.T) {
 	newX, newY, ok = ExtractCoordinates(RawEventMsg{EvType: EV_ABS, EvCode: ABS_MT_POSITION_Y, EvValue: 750}, 550, curY)
 	if !ok || newX != 550 || newY != 750 {
 		t.Errorf("ABS_MT_POSITION_Y failed: got (%d, %d, %v)", newX, newY, ok)
+	}
+
+	newX, newY, ok = ExtractCoordinates(RawEventMsg{EvType: EV_ABS, EvCode: ABS_X, EvValue: 333}, curX, curY)
+	if !ok || newX != 333 || newY != 200 {
+		t.Errorf("ABS_X failed: got (%d, %d, %v)", newX, newY, ok)
+	}
+
+	newX, newY, ok = ExtractCoordinates(RawEventMsg{EvType: EV_ABS, EvCode: ABS_Y, EvValue: 444}, curX, curY)
+	if !ok || newX != 100 || newY != 444 {
+		t.Errorf("ABS_Y failed: got (%d, %d, %v)", newX, newY, ok)
+	}
+
+	newX, newY, ok = ExtractCoordinates(RawEventMsg{EvType: EV_ABS, EvCode: ABS_PRESSURE, EvValue: 50}, curX, curY)
+	if ok || newX != 100 || newY != 200 {
+		t.Errorf("ABS_PRESSURE should return ok=false: got (%d, %d, %v)", newX, newY, ok)
 	}
 
 	newX, newY, ok = ExtractCoordinates(RawEventMsg{EvType: EV_SYN, EvCode: 0, EvValue: 0}, 550, 750)

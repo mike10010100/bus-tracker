@@ -5,38 +5,34 @@ import (
 	"time"
 )
 
-// GestureDetectorConfig holds timing and threshold settings for touch recognition.
-//
-// All thresholds are expressed in the renderer's *design* coordinate space: an
-// 800px-wide landscape layout (see render_dashboard.py). Raw touch events arrive
-// in the panel's portrait framebuffer space and are mapped into this space by
-// Transform before hit-testing, so the zones always match what is drawn.
+// DesignWidth mirrors the renderer's logical layout for Kindle Paperwhite 5
+const DesignWidth = 800
+
+// GestureDetectorConfig specifies thresholds and timing windows for gesture recognition
 type GestureDetectorConfig struct {
-	DoubleTapWindow   time.Duration
-	SingleTapDelay    time.Duration
-	InactivityTimeout time.Duration
-	DebounceDuration  time.Duration
-	// Transform maps a raw touch coordinate to design space. Nil = identity.
-	Transform             func(x, y int32) (int32, int32)
-	TopRightThresholdX    int32
-	TopRightThresholdY    int32
-	TopLeftThresholdX     int32
-	TopLeftThresholdY     int32
-	BottomLeftThresholdX  int32
-	BottomLeftThresholdY  int32
 	BottomBarThresholdY   int32
 	ButtonBusesThresholdX int32
 	ButtonBikesThresholdX int32
 	ButtonLightThresholdX int32
+
+	TopRightThresholdX   int32
+	TopRightThresholdY   int32
+	TopLeftThresholdX    int32
+	TopLeftThresholdY    int32
+	BottomLeftThresholdX int32
+	BottomLeftThresholdY int32
+
+	DoubleTapWindow   time.Duration
+	DebounceDuration  time.Duration
+	SingleTapDelay    time.Duration
+	InactivityTimeout time.Duration
+
+	// Transform maps raw evdev coordinates to layout/design coordinates.
+	// Injected by TrackerClient based on the detected panel geometry.
+	Transform func(rawX, rawY int32) (designX, designY int32)
 }
 
-// DesignWidth/DesignHeightMirror the renderer's logical layout for the PW5
-// panel (800 wide, and 600 tall for the 1648x1236 panel). The bottom button bar
-// is drawn at y in [DesignHeight-44, DesignHeight-10] with five equal columns.
-const DesignWidth = 800
-
-// DefaultGestureConfig returns production settings in design space, matching
-// the 800x600 layout used on the Paperwhite 5.
+// DefaultGestureConfig constructs standard layout coordinates for Kindle Paperwhite 5
 func DefaultGestureConfig() GestureDetectorConfig {
 	return GestureDetectorConfig{
 		DoubleTapWindow:   380 * time.Millisecond,
@@ -68,6 +64,7 @@ type GestureDetector struct {
 	rawX            int32
 	rawY            int32
 	touchActive     bool
+	tapEmitted      bool
 	inactivityTimer *time.Timer
 	singleTapTimer  *time.Timer
 	lastTapTime     time.Time
@@ -99,18 +96,20 @@ func (gd *GestureDetector) log(msg string) {
 	}
 }
 
-// TriggerTap processes a completed tap at the given timestamp
+// TriggerTap processes a completed tap at the given timestamp.
+// Gesture callbacks run outside gd.mu to avoid blocking the event pump (finding L6).
 func (gd *GestureDetector) TriggerTap(now time.Time) {
 	gd.mu.Lock()
-	defer gd.mu.Unlock()
 
 	// Debounce rapid duplicate trigger within threshold
 	if !gd.lastTriggerTime.IsZero() && now.Sub(gd.lastTriggerTime) < gd.cfg.DebounceDuration {
+		gd.mu.Unlock()
 		return
 	}
 	gd.lastTriggerTime = now
 
 	x, y := gd.curX, gd.curY
+	var cb func(x, y int32)
 
 	// 1. Bottom Button Bar (Interactive Tactile Buttons)
 	if gd.cfg.BottomBarThresholdY > 0 && y >= gd.cfg.BottomBarThresholdY {
@@ -122,45 +121,43 @@ func (gd *GestureDetector) TriggerTap(now time.Time) {
 		switch {
 		case x < gd.cfg.ButtonBusesThresholdX:
 			if gd.OnBusesTap != nil {
-				gd.OnBusesTap(x, y)
-				return
-			}
-			if gd.OnBottomLeftTap != nil {
-				gd.OnBottomLeftTap(x, y)
-				return
+				cb = gd.OnBusesTap
+			} else if gd.OnBottomLeftTap != nil {
+				cb = gd.OnBottomLeftTap
 			}
 		case x < gd.cfg.ButtonBikesThresholdX:
 			if gd.OnBikesTap != nil {
-				gd.OnBikesTap(x, y)
-				return
-			}
-			if gd.OnBottomLeftTap != nil {
-				gd.OnBottomLeftTap(x, y)
-				return
+				cb = gd.OnBikesTap
+			} else if gd.OnBottomLeftTap != nil {
+				cb = gd.OnBottomLeftTap
 			}
 		case x < gd.cfg.ButtonLightThresholdX:
 			if gd.OnLightTap != nil {
-				gd.OnLightTap(x, y)
-				return
+				cb = gd.OnLightTap
 			}
 		default:
 			if gd.OnRefreshTap != nil {
-				gd.OnRefreshTap(x, y)
-				return
+				cb = gd.OnRefreshTap
 			}
+		}
+		gd.mu.Unlock()
+		if cb != nil {
+			cb(x, y)
 		}
 		return
 	}
 
 	// 2. Corner Touch Gestures (Dedicated Action Zones)
-	// Top-Right Corner Tap -> Immediate Exit
+	// Top-Right Corner Tap -> Refresh
 	if x > gd.cfg.TopRightThresholdX && y < gd.cfg.TopRightThresholdY {
 		if gd.singleTapTimer != nil {
 			gd.singleTapTimer.Stop()
 		}
 		gd.lastTapTime = time.Time{}
-		if gd.OnTopRightTap != nil {
-			gd.OnTopRightTap(x, y)
+		cb = gd.OnTopRightTap
+		gd.mu.Unlock()
+		if cb != nil {
+			cb(x, y)
 		}
 		return
 	}
@@ -171,8 +168,10 @@ func (gd *GestureDetector) TriggerTap(now time.Time) {
 			gd.singleTapTimer.Stop()
 		}
 		gd.lastTapTime = time.Time{}
-		if gd.OnTopLeftTap != nil {
-			gd.OnTopLeftTap(x, y)
+		cb = gd.OnTopLeftTap
+		gd.mu.Unlock()
+		if cb != nil {
+			cb(x, y)
 		}
 		return
 	}
@@ -183,13 +182,15 @@ func (gd *GestureDetector) TriggerTap(now time.Time) {
 			gd.singleTapTimer.Stop()
 		}
 		gd.lastTapTime = time.Time{}
-		if gd.OnBottomLeftTap != nil {
-			gd.OnBottomLeftTap(x, y)
+		cb = gd.OnBottomLeftTap
+		gd.mu.Unlock()
+		if cb != nil {
+			cb(x, y)
 		}
 		return
 	}
 
-	// 2. Double-Tap Check
+	// Double-Tap Check
 	if !gd.lastTapTime.IsZero() {
 		sinceLast := now.Sub(gd.lastTapTime)
 		if sinceLast < gd.cfg.DoubleTapWindow && sinceLast > gd.cfg.DebounceDuration/2 {
@@ -197,26 +198,31 @@ func (gd *GestureDetector) TriggerTap(now time.Time) {
 				gd.singleTapTimer.Stop()
 			}
 			gd.lastTapTime = time.Time{} // Reset after double tap
-			if gd.OnDoubleTap != nil {
-				gd.OnDoubleTap(x, y)
+			cb = gd.OnDoubleTap
+			gd.mu.Unlock()
+			if cb != nil {
+				cb(x, y)
 			}
 			return
 		}
 	}
 	gd.lastTapTime = now
 
-	// 3. Normal Single Tap
+	// Normal Single Tap
 	if gd.singleTapTimer != nil {
 		gd.singleTapTimer.Stop()
 	}
+	singleCb := gd.OnSingleTap
 	gd.singleTapTimer = time.AfterFunc(gd.cfg.SingleTapDelay, func() {
-		if gd.OnSingleTap != nil {
-			gd.OnSingleTap(x, y)
+		if singleCb != nil {
+			singleCb(x, y)
 		}
 	})
+	gd.mu.Unlock()
 }
 
-// ProcessEvent feeds an input event into the gesture recognizer
+// ProcessEvent feeds an input event into the gesture recognizer.
+// Uses per-contact tapEmitted flag to prevent double taps on hold-then-release (finding M13).
 func (gd *GestureDetector) ProcessEvent(ev RawEventMsg) {
 	// Coordinate extraction, mapped into design space so the zone thresholds
 	// match the rendered layout.
@@ -237,33 +243,44 @@ func (gd *GestureDetector) ProcessEvent(ev RawEventMsg) {
 		return
 	}
 
+	isTouchDown := (ev.EvType == EV_KEY && (ev.EvCode == BTN_TOUCH || ev.EvCode == BTN_LEFT) && ev.EvValue == 1) ||
+		(ev.EvType == EV_ABS && ev.EvCode == ABS_MT_TRACKING_ID && ev.EvValue >= 0)
+
+	isTouchRelease := IsExplicitTouchRelease(ev)
+
 	gd.mu.Lock()
-	gd.touchActive = true
+	if isTouchDown {
+		gd.tapEmitted = false
+	}
+	gd.touchActive = !isTouchRelease
 
 	// Reset inactivity fallback timer
 	if gd.inactivityTimer != nil {
 		gd.inactivityTimer.Stop()
 	}
-	gd.inactivityTimer = time.AfterFunc(gd.cfg.InactivityTimeout, func() {
-		gd.mu.Lock()
-		if gd.touchActive {
-			gd.touchActive = false
+
+	if !isTouchRelease {
+		gd.inactivityTimer = time.AfterFunc(gd.cfg.InactivityTimeout, func() {
+			gd.mu.Lock()
+			if gd.touchActive && !gd.tapEmitted {
+				gd.tapEmitted = true
+				gd.touchActive = false
+				gd.mu.Unlock()
+				gd.TriggerTap(time.Now())
+				return
+			}
 			gd.mu.Unlock()
-			gd.TriggerTap(time.Now())
-			return
-		}
+		})
 		gd.mu.Unlock()
-	})
+		return
+	}
+
+	// Explicit touch release
+	shouldTrigger := !gd.tapEmitted
+	gd.tapEmitted = true
 	gd.mu.Unlock()
 
-	// Check explicit release
-	if IsExplicitTouchRelease(ev) {
-		gd.mu.Lock()
-		if gd.inactivityTimer != nil {
-			gd.inactivityTimer.Stop()
-		}
-		gd.touchActive = false
-		gd.mu.Unlock()
+	if shouldTrigger {
 		gd.TriggerTap(time.Now())
 	}
 }

@@ -739,3 +739,22 @@ func TestInteractionAwake_RefreshChannelAndInitialCancel(t *testing.T) {
 		t.Fatalf("expected at least 2 fetches (initial + refreshCh), got %d", atomic.LoadInt32(&fetchCount))
 	}
 }
+
+func TestSleepWallClock_Branches(t *testing.T) {
+	tc := NewTrackerClient("http://127.0.0.1:8000", "auto")
+
+	// 1. Refresh channel wake
+	go func() {
+		tc.refreshCh <- struct{}{}
+	}()
+	if !tc.sleepWallClock(context.Background(), time.Hour) {
+		t.Error("expected true when waking on refreshCh")
+	}
+
+	// 2. Context cancelled wake
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if tc.sleepWallClock(ctx, time.Hour) {
+		t.Error("expected false when context cancelled")
+	}
+}

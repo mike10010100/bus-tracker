@@ -137,7 +137,19 @@ func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context
 		go func(path string, file *os.File) {
 			defer tc.wg.Done()
 			defer file.Close()
+
+			closeDone := make(chan struct{})
+			defer close(closeDone)
+			go func() {
+				select {
+				case <-ctx.Done():
+					_ = file.Close()
+				case <-closeDone:
+				}
+			}()
+
 			buf := make([]byte, 512)
+			consecutiveErrs := 0
 
 			for {
 				select {
@@ -151,10 +163,21 @@ func (tc *TrackerClient) startInputListeners(ctx context.Context, cancel context
 					select {
 					case <-ctx.Done():
 						return
-					case <-time.After(100 * time.Millisecond):
+					default:
+					}
+					consecutiveErrs++
+					backoffDelay := 100 * time.Millisecond
+					if consecutiveErrs > 10 {
+						backoffDelay = 500 * time.Millisecond
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(backoffDelay):
 					}
 					continue
 				}
+				consecutiveErrs = 0
 
 				events := ParseInputEvents(buf, n, path)
 				for _, ev := range events {

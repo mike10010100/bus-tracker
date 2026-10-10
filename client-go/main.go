@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -17,13 +18,40 @@ import (
 // the Python server, and the Citi Bike User-Agent all share one identity.
 var Version = "0.0.0"
 
+// OTAPublicKey is the Ed25519 release public key (base64) used to authenticate
+// OTA manifests and delegated server certificates. Injected via
+// -ldflags "-X main.OTAPublicKey=<b64>". When empty, response verification is skipped
+// and OTA self-updates are completely disabled.
+var OTAPublicKey = ""
+
 const (
 	BinaryPath = "/tmp/tracker"
-	ImagePath  = "/tmp/dashboard.png"
+	PrivateDir = "/tmp/transit-tracker"
+	ImagePath  = "/tmp/transit-tracker/dashboard.png"
 	// ManualHoldDuration bounds the view-override hold and the manual-lighting
 	// hold (how long a user's explicit choice survives before auto resumes).
 	ManualHoldDuration = 45 * time.Minute
 )
+
+// ensurePrivateDir creates /tmp/transit-tracker with 0700 permissions and verifies
+// that it is a real directory owned by current uid (not a pre-planted symlink).
+func ensurePrivateDir() error {
+	info, err := osLstat(PrivateDir)
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			_ = osRemoveAll(PrivateDir)
+		} else if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+			if int(stat.Uid) != osGetuid() {
+				_ = osRemoveAll(PrivateDir)
+			}
+		}
+	}
+	if err := osMkdirAll(PrivateDir, 0700); err != nil {
+		return err
+	}
+	_ = osChmod(PrivateDir, 0700)
+	return nil
+}
 
 // TrackerClient coordinates e-ink display updates, power states, inputs, and server communication.
 type TrackerClient struct {
@@ -54,6 +82,9 @@ type TrackerClient struct {
 	lastDataInteraction time.Time
 	lastETag            string
 	consecutiveErrors   int
+	consecutiveFailures int
+	lastDiscoveryTime   time.Time
+	discoveryBackoff    time.Duration
 	viewMode            string
 	lastRenderedView    string
 	// presentation is the server-advised visual/interaction state: "interactive"
@@ -67,17 +98,26 @@ func NewTrackerClient(server string, initialView string) *TrackerClient {
 	if initialView == "" {
 		initialView = "auto"
 	}
+	var mvt time.Time
+	if initialView != "auto" {
+		mvt = time.Now()
+	}
 	return &TrackerClient{
-		serverURL: server,
-		viewMode:  initialView,
+		serverURL:      server,
+		viewMode:       initialView,
+		manualViewTime: mvt,
 		client: &http.Client{
 			Timeout: 15 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
-		refreshCh:      make(chan struct{}, 1),
-		touchCh:        make(chan struct{}, 1),
-		logCh:          make(chan string, 64),
-		exitOnPowerKey: true,
-		presentation:   "interactive",
+		refreshCh:        make(chan struct{}, 1),
+		touchCh:          make(chan struct{}, 1),
+		logCh:            make(chan string, 64),
+		exitOnPowerKey:   true,
+		presentation:     "interactive",
+		discoveryBackoff: time.Minute,
 	}
 }
 
@@ -232,16 +272,72 @@ func (tc *TrackerClient) interactionAwake(ctx context.Context, cancel context.Ca
 	}
 }
 
+func (tc *TrackerClient) isManualViewActive() bool {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	return !tc.manualViewTime.IsZero() && time.Since(tc.manualViewTime) <= ManualHoldDuration
+}
+
+func (tc *TrackerClient) recordPollSuccess() {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	tc.consecutiveFailures = 0
+	tc.consecutiveErrors = 0
+	tc.discoveryBackoff = time.Minute
+}
+
+func (tc *TrackerClient) recordPollFailure(ctx context.Context) {
+	tc.mu.Lock()
+	tc.consecutiveFailures++
+	tc.consecutiveErrors++
+	count := tc.consecutiveFailures
+	now := time.Now()
+	backoff := tc.discoveryBackoff
+	if backoff < time.Minute {
+		backoff = time.Minute
+	}
+	shouldRediscover := count >= 3 && now.Sub(tc.lastDiscoveryTime) >= backoff
+	if shouldRediscover {
+		tc.lastDiscoveryTime = now
+		tc.discoveryBackoff = backoff * 2
+		if tc.discoveryBackoff > 60*time.Minute {
+			tc.discoveryBackoff = 60 * time.Minute
+		}
+	}
+	tc.mu.Unlock()
+
+	if shouldRediscover {
+		tc.logRemote(fmt.Sprintf("3+ consecutive poll failures (count=%d). Running LAN rediscovery...", count))
+		if discovered, err := autoDiscover(ctx); err == nil && discovered != "" {
+			tc.setServerURL(discovered)
+			tc.recordPollSuccess()
+			_ = SaveServerURL(discovered)
+			tc.logRemote(fmt.Sprintf("LAN Auto-discovery adopted verified server: %s", discovered))
+		}
+	}
+}
+
 // Wait blocks until all background goroutines tracked by tc have finished.
 func (tc *TrackerClient) Wait() {
 	tc.wg.Wait()
 }
 
-func main() {
-	// Silence standard error on headless Kindle
-	if nullFile, err := osOpenFile(os.DevNull, os.O_WRONLY, 0); err == nil {
-		_ = syscall.Dup2(int(nullFile.Fd()), int(os.Stderr.Fd()))
+func setupStderr() {
+	_ = ensurePrivateDir()
+	logPath := filepath.Join(PrivateDir, "client.log")
+	flags := os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	if info, err := osStat(logPath); err == nil && info.Size() > 256*1024 {
+		flags = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
 	}
+	if f, err := osOpenFile(logPath, flags, 0600); err == nil {
+		_ = syscallDup2(int(f.Fd()), int(os.Stderr.Fd()))
+	} else if nullFile, err := osOpenFile(os.DevNull, os.O_WRONLY, 0); err == nil {
+		_ = syscallDup2(int(nullFile.Fd()), int(os.Stderr.Fd()))
+	}
+}
+
+func main() {
+	setupStderr()
 	run(context.Background())
 }
 
@@ -249,6 +345,8 @@ func main() {
 // in the poll loop; oneshot renders once and exits; sleep renders, arms an RTC
 // wake, and cycles through device suspend.
 func run(parent context.Context) {
+	_ = ensurePrivateDir()
+
 	mode := ResolveRunMode(os.Args)
 	currentRunMode = mode
 
@@ -276,7 +374,18 @@ func run(parent context.Context) {
 
 	tc.startLogSender(ctx)
 	_ = osWriteFile("/tmp/tracker_server.txt", []byte(serverURL), 0644)
-	_ = osWriteFile("/mnt/us/documents/tracker_server.txt", []byte(serverURL), 0644)
+
+	// Launcher self-update
+	launcherPath := resolveLauncherPath(os.Args)
+	if err := selfUpdateLauncher(launcherPath); err != nil {
+		tc.logRemote(fmt.Sprintf("Launcher self-update warning: %v", err))
+	}
+
+	if OTAPublicKey == "" {
+		tc.logRemote("WARNING: OTAPublicKey is empty! Response verification is disabled and OTA updates are DISABLED.")
+	} else {
+		tc.logRemote("OTA release verification is ACTIVE.")
+	}
 
 	tc.logRemote(fmt.Sprintf("Transit Tracker v%s starting up (mode: %s, server: %s, view: %s)...", Version, currentModeName(), serverURL, initialView))
 	// Log the raw framebuffer geometry so panel/orientation issues are visible.

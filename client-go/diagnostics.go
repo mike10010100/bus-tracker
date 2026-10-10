@@ -265,6 +265,7 @@ func probeRTCWake() string {
 	runProbeCmd("lipc-set-prop", "-i", "com.lab126.powerd", "rtcWakeup", "120")
 	got := runProbeCmd("lipc-get-prop", "com.lab126.powerd", "rtcWakeup")
 	fmt.Fprintf(&b, "powerd.rtcWakeup: set=120 read_back=%q\n", got)
+	runProbeCmd("lipc-set-prop", "-i", "com.lab126.powerd", "rtcWakeup", "0")
 
 	sysfs := "/sys/class/rtc/rtc0/wakealarm"
 	clearOut := runProbeCmd("sh", "-c", "echo 0 > "+sysfs)
@@ -275,6 +276,7 @@ func probeRTCWake() string {
 
 	rcwake := runProbeCmd("rtcwake", "-d", "/dev/rtc0", "-m", "no", "-s", "120")
 	fmt.Fprintf(&b, "rtcwake -m no: %q\n", rcwake)
+	runProbeCmd("rtcwake", "-d", "/dev/rtc0", "-m", "disable")
 
 	// Suspend support: what does /sys/power/state advertise, and is there a
 	// kernel reason the last suspend failed?

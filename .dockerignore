@@ -1,15 +1,24 @@
 .git
 .github
-.env
-__pycache__
-*.pyc
-*.pyo
-*.pyd
-.DS_Store
+**/.env
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.DS_Store
 scratch
 *.log
 *.png
 !dashboard.png
-tracker-arm
 .coverage
 htmlcov
+# Locally built/signed artifacts: the image builds and signs its own.
+**/tracker-arm
+**/tracker-arm.new
+**/tracker-arm.manifest.json*
+# Never send key material into the build context (the signing key is passed
+# as a BuildKit secret instead).
+secrets
+**/server_identity.key
+**/server_identity.cert.json
+cache

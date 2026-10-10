@@ -112,9 +112,13 @@ func TestPersistServerURL(t *testing.T) {
 }
 
 func TestDiscoverViaUDPIntegration(t *testing.T) {
+	origAllow := allowLoopbackDiscovery
+	allowLoopbackDiscovery = true
+	t.Cleanup(func() { allowLoopbackDiscovery = origAllow })
+
 	// Spin up a mock HTTP server simulating server.py
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/tracker-arm" {
+		if r.URL.Path == "/identity" || r.URL.Path == "/tracker-arm" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}

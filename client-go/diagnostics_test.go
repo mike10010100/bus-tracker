@@ -206,6 +206,7 @@ func TestDiagnosticsFormat_TruncatesLargeFiles(t *testing.T) {
 }
 
 func TestRunActiveProbe_FormatsReport(t *testing.T) {
+	patchDiagSeams(t)
 	origGlob := globInputs
 	origCmdCtx := execCommandContext
 	t.Cleanup(func() {
@@ -254,6 +255,7 @@ func TestRunActiveProbe_FormatsReport(t *testing.T) {
 }
 
 func TestRunActiveProbe_NoRTCDevices(t *testing.T) {
+	patchDiagSeams(t)
 	origGlob := globInputs
 	origCmdCtx := execCommandContext
 	t.Cleanup(func() {
@@ -284,6 +286,7 @@ func TestTruncate(t *testing.T) {
 }
 
 func TestGatherLauncherInfo_ListsPaths(t *testing.T) {
+	patchDiagSeams(t)
 	origCmdCtx := execCommandContext
 	origGlob := globInputs
 	t.Cleanup(func() {
@@ -318,6 +321,7 @@ func TestGatherLauncherInfo_ListsPaths(t *testing.T) {
 }
 
 func TestGatherLauncherInfo_DumpsSchedulerContents(t *testing.T) {
+	patchDiagSeams(t)
 	origCmdCtx := execCommandContext
 	origGlob := globInputs
 	t.Cleanup(func() {
@@ -483,7 +487,7 @@ func TestActionTouchWakeTest_ArmsSafetyAndTogglesWakeup(t *testing.T) {
 	joined := strings.Join(scripts, "\n")
 	// Must arm the RTC before suspending (safety net), snapshot + toggle touch
 	// wakeup, suspend, and restore the exact prior wakeup state afterward.
-	for _, want := range []string{"wakealarm", "power/wakeup", "/tmp/wakeup_before", "wirelessEnable 0", "/sys/power/state", "wirelessEnable 1"} {
+	for _, want := range []string{"wakealarm", "power/wakeup", "/tmp/transit-tracker/wakeup_before", "wirelessEnable 0", "/sys/power/state", "wirelessEnable 1"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("touch-wake-test missing %q\nran:\n%s", want, joined)
 		}

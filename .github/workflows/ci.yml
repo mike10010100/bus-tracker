@@ -6,9 +6,12 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 jobs:
   go-client:
-    name: Go Client (test, vet, build)
+    name: Go Client (test, vet, signed build)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -21,7 +24,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.26'
 
       - name: Verify Formatting (gofmt)
         run: |
@@ -41,17 +44,30 @@ jobs:
       - name: Enforce Go Coverage Gate (93%)
         run: bash ../scripts/check_coverage_go.sh 93
 
-      - name: Cross-Compile ARMv7 Binary for Kindle
+      # Exercise the full signed-release path with a throwaway key: embed the
+      # public key, sign the manifest, mint a server cert, and verify.
+      - name: Cross-Compile + Sign ARMv7 Binary (ephemeral key)
         run: |
-          VERSION=$(cat ../VERSION)
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="-s -w -X main.Version=${VERSION}" -o ../tracker-arm .
+          set -euo pipefail
+          KEY="$RUNNER_TEMP/ci_ota.key"
+          go run ./cmd/otasign keygen -out "$KEY" >/dev/null
+          PUB=$(go run ./cmd/otasign pubkey -key "$KEY")
+          VERSION=$(tr -d '[:space:]' < ../VERSION)
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build \
+            -ldflags="-s -w -X main.Version=${VERSION} -X main.OTAPublicKey=${PUB}" -o ../tracker-arm .
+          go run ./cmd/otasign sign -key "$KEY" -version "$VERSION" -in ../tracker-arm -out ../tracker-arm.manifest.json
+          go run ./cmd/otasign server-cert -key "$KEY" -out-key "$RUNNER_TEMP/server_identity.key" -out-cert "$RUNNER_TEMP/server_identity.cert.json"
+          go run ./cmd/otasign verify -pub "$PUB" -manifest ../tracker-arm.manifest.json -in ../tracker-arm
           ls -lh ../tracker-arm
 
-      - name: Upload Kindle ARM Binary Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: tracker-arm
-          path: tracker-arm
+  shell:
+    name: Shell scripts (syntax + shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Check scripts
+        run: make check-sh
 
   python-server:
     name: Python Server (tests)
@@ -69,8 +85,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install coverage
+          pip install -r requirements-dev.txt
 
       - name: Run Python unit tests
         run: PYTHONPATH=server python -m unittest discover -s tests -p "test_*.py" -v
@@ -79,4 +94,25 @@ jobs:
         run: |
           python -m coverage erase
           PYTHONPATH=server python -m coverage run --source=server -m unittest discover -s tests -p "test_*.py" >/dev/null
-          python -m coverage report -m
+          python -m coverage report -m --fail-under=92
+
+  docker:
+    name: Docker image (signed build, ephemeral key)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Generate throwaway signing key
+        run: openssl genpkey -algorithm ed25519 -out "$RUNNER_TEMP/ci_ota.key"
+      - name: Build image
+        run: DOCKER_BUILDKIT=1 docker build --secret id=ota_signing_key,src="$RUNNER_TEMP/ci_ota.key" -t transit-tracker:ci .
+      - name: Smoke test (signed release + identity present, non-root)
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh transit-tracker:ci -c \
+            'test -s tracker-arm && test -s tracker-arm.manifest.json && test -s server_identity.cert.json && test -s server_identity.key && command -v setpriv'
+          docker run -d --name tt -p 18000:8000 transit-tracker:ci
+          for i in $(seq 1 30); do curl -fsS http://localhost:18000/healthz && break; sleep 1; done
+          curl -fsS -o /dev/null http://localhost:18000/tracker-arm.manifest
+          docker top tt -eo user,args | grep 'server.py' | grep -vq '^root'
+          docker rm -f tt

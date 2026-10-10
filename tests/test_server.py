@@ -3,6 +3,7 @@ Unit tests for server.py control auth, version wiring, error-state rendering,
 and the data/render caching split.
 """
 
+import time
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -55,10 +56,10 @@ class TestOTAStructures(unittest.TestCase):
             self.assertFalse(non_info.exists)
             self.assertEqual(non_info.size, 0)
 
-    def test_get_local_ip_falls_back_to_localhost_on_error(self):
+    def test_get_local_ip_returns_none_on_error(self):
         from unittest.mock import patch
         with patch("socket.socket", side_effect=OSError("no net")):
-            self.assertEqual(server.get_local_ip(), "localhost")
+            self.assertIsNone(server.get_local_ip())
 
 
 class TestControlAuth(unittest.TestCase):
@@ -69,12 +70,9 @@ class TestControlAuth(unittest.TestCase):
         h.path = "/stop"
         return h
 
-    def test_private_origin_allowed_without_token(self):
-        with patch.object(server, "CONTROL_TOKEN", ""):
-            self.assertTrue(check_control_auth(self._handler("192.168.1.10")))
-
-    def test_public_origin_denied_without_token(self):
-        with patch.object(server, "CONTROL_TOKEN", ""):
+    def test_origin_denied_without_token(self):
+        with patch.object(server, "CONTROL_TOKEN", "secret"):
+            self.assertFalse(check_control_auth(self._handler("192.168.1.10")))
             self.assertFalse(check_control_auth(self._handler("8.8.8.8")))
 
     def test_token_required_when_configured(self):
@@ -127,14 +125,23 @@ class TestDataCache(unittest.TestCase):
         self.assertTrue(len(cb) > 0)
 
     def test_get_fresh_data_returns_cached_within_ttl(self):
-        first = get_fresh_data(use_mock=True)
-        # Second call within TTL and not mock must hit the cache branch (line: fresh).
-        second = get_fresh_data(use_mock=False)
-        self.assertIs(second[0], first[0])
-        self.assertIs(second[2], first[2])
+        from citibike import CB_STATUS_OK, CitiBikeSnapshot
+        fake_tracker = MagicMock()
+        fake_tracker.get_arrivals_with_status.return_value = ("ok", [])
+        fake_gtfs = MagicMock()
+        fake_gtfs.get_upcoming.return_value = []
+        snap = CitiBikeSnapshot(CB_STATUS_OK, [{"name": "Station A"}], time.time())
+        with patch.object(server, "tracker", fake_tracker), patch.object(server, "gtfs_tracker", fake_gtfs):
+            with patch.object(server, "cb_tracker") as cb:
+                cb.get_snapshot.return_value = snap
+                first = get_fresh_data(use_mock=False)
+                second = get_fresh_data(use_mock=False)
+                self.assertIs(second[0], first[0])
+                self.assertIs(second[2], first[2])
 
     def test_get_fresh_data_live_paths_use_tracker_and_citibike(self):
         from unittest.mock import MagicMock, patch
+        from citibike import CB_STATUS_OK, CitiBikeSnapshot
 
         fake_tracker = MagicMock()
         fake_tracker.get_arrivals_with_status.return_value = ("ok", [{
@@ -143,9 +150,10 @@ class TestDataCache(unittest.TestCase):
         }])
         fake_gtfs = MagicMock()
         fake_gtfs.get_upcoming.return_value = []  # force the public-API fallback
+        snap = CitiBikeSnapshot(CB_STATUS_OK, [{"name": "X", "ebikes": 1, "classic": 2, "docks": 3, "walk_min": 3, "is_offline": False}], time.time())
         with patch.object(server, "tracker", fake_tracker), patch.object(server, "gtfs_tracker", fake_gtfs):
             with patch.object(server, "cb_tracker") as cb:
-                cb.get_station_status.return_value = [{"name": "X", "ebikes": 1, "classic": 2, "docks": 3, "walk_min": 3, "is_offline": False}]
+                cb.get_snapshot.return_value = snap
                 stops, status, data = get_fresh_data(use_mock=False)
         self.assertIn("20512", stops)
         self.assertEqual(status["20512"], "ok")
@@ -160,10 +168,9 @@ class TestDataCache(unittest.TestCase):
         fake_gtfs.get_upcoming.return_value = []
         with patch.object(server, "tracker", fake_tracker), patch.object(server, "gtfs_tracker", fake_gtfs):
             with patch.object(server, "cb_tracker") as cb:
-                cb.get_station_status.side_effect = Exception("GBFS down")
-                cb.get_mock_data.return_value = [{"name": "MOCK"}]
+                cb.get_snapshot.side_effect = Exception("GBFS down")
                 _stops, _status, data = get_fresh_data(use_mock=False)
-        self.assertEqual(data[0]["name"], "MOCK")
+        self.assertEqual(data, [])
 
     def test_get_fresh_data_uses_gtfs_when_available(self):
         from unittest.mock import MagicMock, patch

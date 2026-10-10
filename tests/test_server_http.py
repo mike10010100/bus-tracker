@@ -42,9 +42,19 @@ def _http(method, port, path, headers=None, body=None):
         return e.code, dict(e.headers), e.read()
 
 
+def _auth_headers(extra=None):
+    tok = getattr(server, "CONTROL_TOKEN", "test-token-1234") or "test-token-1234"
+    hdrs = {"X-Tracker-Token": tok}
+    if extra:
+        hdrs.update(extra)
+    return hdrs
+
+
 class ServerHTTPTestBase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls._orig_token = server.CONTROL_TOKEN
+        server.CONTROL_TOKEN = "test-token-1234"
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), DashboardHandler)
         cls.port = cls.httpd.server_address[1]
         cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
@@ -52,9 +62,14 @@ class ServerHTTPTestBase(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        server.CONTROL_TOKEN = cls._orig_token
         cls.httpd.shutdown()
         cls.httpd.server_close()
         cls.thread.join(timeout=5)
+
+    def setUp(self):
+        super().setUp()
+        server.CONTROL_TOKEN = "test-token-1234"
 
 
 class TestHealthAndRoot(ServerHTTPTestBase):
@@ -72,13 +87,15 @@ class TestHealthAndRoot(ServerHTTPTestBase):
         self.assertIn("text/html", headers.get("Content-Type", ""))
         self.assertIn(b"Dashboard", body)
 
-    def test_root_html_with_token_shows_token_links(self):
+    def test_root_html_does_not_leak_control_token(self):
         original = server.CONTROL_TOKEN
         server.CONTROL_TOKEN = "s3cret"
         try:
-            status, _headers, body = _http_get(self.port, "/")
+            status, headers, body = _http_get(self.port, "/")
             self.assertEqual(status, 200)
-            self.assertIn(b"token=s3cret", body)
+            self.assertNotIn(b"s3cret", body)
+            self.assertIn("Content-Security-Policy", headers)
+            self.assertIn("nonce-", headers["Content-Security-Policy"])
         finally:
             server.CONTROL_TOKEN = original
 
@@ -107,6 +124,8 @@ class TestDiagnosticsEndpoints(ServerHTTPTestBase):
 
     def test_get_diag_404_before_upload(self):
         status, _headers, _body = _http_get(self.port, "/diag")
+        self.assertEqual(status, 403)
+        status, _headers, _body = _http_get(self.port, "/diag", headers=_auth_headers())
         self.assertEqual(status, 404)
 
     def test_parse_diag_battery(self):
@@ -133,14 +152,20 @@ class TestDiagnosticsEndpoints(ServerHTTPTestBase):
     def test_post_then_get_diag(self):
         body = b"sample diagnostics payload"
         _http(method="POST", port=self.port, path="/diag", body=body)
-        status, headers, text = _http_get(self.port, "/diag")
+        status, headers, text = _http_get(self.port, "/diag", headers=_auth_headers())
         self.assertEqual(status, 200)
         self.assertEqual(headers.get("Content-Type"), "text/plain; charset=utf-8")
         self.assertIn(b"sample diagnostics payload", text)
 
     def test_diag_request_flagged_and_consumed_by_dashboard(self):
-        status, _headers, _body = _http_get(self.port, "/diag?request=1")
-        self.assertEqual(status, 404)
+        status, _headers, _body = _http(
+            method="POST",
+            port=self.port,
+            path="/diag/request",
+            headers=_auth_headers({"Content-Type": "application/json"}),
+            body=b'{"level": "1"}',
+        )
+        self.assertEqual(status, 200)
         self.assertEqual(server._diag_requested, "1")
 
         status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
@@ -152,7 +177,13 @@ class TestDiagnosticsEndpoints(ServerHTTPTestBase):
         self.assertNotIn("X-Tracker-Diag", headers)
 
     def test_web_request_does_not_consume_diag_flag(self):
-        _http_get(self.port, "/diag?request=1")
+        _http(
+            method="POST",
+            port=self.port,
+            path="/diag/request",
+            headers=_auth_headers({"Content-Type": "application/json"}),
+            body=b'{"level": "1"}',
+        )
         self.assertEqual(server._diag_requested, "1")
 
         status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1")
@@ -161,7 +192,13 @@ class TestDiagnosticsEndpoints(ServerHTTPTestBase):
         self.assertEqual(server._diag_requested, "1")
 
     def test_diag_full_request_forwarded(self):
-        _http_get(self.port, "/diag?request=full")
+        _http(
+            method="POST",
+            port=self.port,
+            path="/diag/request",
+            headers=_auth_headers({"Content-Type": "application/json"}),
+            body=b'{"level": "full"}',
+        )
         self.assertEqual(server._diag_requested, "full")
         _status, headers, _body = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
         self.assertEqual(headers.get("X-Tracker-Diag"), "full")
@@ -172,7 +209,13 @@ class TestDiagnosticsEndpoints(ServerHTTPTestBase):
         etag = headers.get("ETag")
         self.assertTrue(etag)
 
-        _http_get(self.port, "/diag?request=1")
+        _http(
+            method="POST",
+            port=self.port,
+            path="/diag/request",
+            headers=_auth_headers({"Content-Type": "application/json"}),
+            body=b'{"level": "1"}',
+        )
         self.assertEqual(server._diag_requested, "1")
 
         status, headers, _body = _http_get(
@@ -195,7 +238,7 @@ class TestRunModeEndpoint(ServerHTTPTestBase):
         super().tearDown()
 
     def test_mode_get_reports_valid_and_pending(self):
-        status, headers, body = _http_get(self.port, "/mode")
+        status, headers, body = _http_get(self.port, "/mode", headers=_auth_headers())
         self.assertEqual(status, 200)
         self.assertEqual(headers.get("Content-Type"), "application/json")
         data = json.loads(body)
@@ -206,7 +249,14 @@ class TestRunModeEndpoint(ServerHTTPTestBase):
         self.assertIn("sleep-suspend", data["valid"])
 
     def test_mode_set_and_forwarded_on_kindle_poll(self):
-        _http_get(self.port, "/mode?set=sleep")
+        status, _, _ = _http(
+            method="POST",
+            port=self.port,
+            path="/mode",
+            headers=_auth_headers({"Content-Type": "application/json"}),
+            body=b'{"set": "sleep"}',
+        )
+        self.assertEqual(status, 200)
         self.assertEqual(server._mode_requested, "sleep")
 
         _status, headers_web, _ = _http_get(self.port, "/dashboard.png?mock=1")
@@ -220,7 +270,13 @@ class TestRunModeEndpoint(ServerHTTPTestBase):
         self.assertEqual(headers_k.get("X-Tracker-Mode"), "sleep")
 
     def test_mode_is_sticky_across_client_restarts(self):
-        _http_get(self.port, "/mode?set=sleep")
+        _http(
+            method="POST",
+            port=self.port,
+            path="/mode",
+            headers=_auth_headers({"Content-Type": "application/json"}),
+            body=b'{"set": "sleep"}',
+        )
 
         _s, h1, _ = _http_get(
             self.port,
@@ -245,20 +301,39 @@ class TestRunModeEndpoint(ServerHTTPTestBase):
         self.assertEqual(server._mode_requested, "sleep")
 
     def test_mode_invalid_value_ignored(self):
-        status, _headers, body = _http_get(self.port, "/mode?set=bogus")
+        status, _headers, body = _http(
+            method="POST",
+            port=self.port,
+            path="/mode",
+            headers=_auth_headers({"Content-Type": "application/json"}),
+            body=b'{"set": "bogus"}',
+        )
         self.assertEqual(status, 200)
         data = json.loads(body)
         self.assertEqual(data["pending"], "")
 
     def test_mode_accepts_sleep_suspend(self):
-        _http_get(self.port, "/mode?set=sleep-suspend")
+        status, _, _ = _http(
+            method="POST",
+            port=self.port,
+            path="/mode",
+            headers=_auth_headers({"Content-Type": "application/json"}),
+            body=b'{"set": "sleep-suspend"}',
+        )
+        self.assertEqual(status, 200)
         self.assertEqual(server._mode_requested, "sleep-suspend")
 
     def test_action_queued_and_forwarded_to_kindle(self):
         with server._diag_lock:
             server._device_action = ""
 
-        status, _headers, body = _http_get(self.port, "/action?do=disable-ads")
+        status, _headers, body = _http(
+            method="POST",
+            port=self.port,
+            path="/action",
+            headers=_auth_headers({"Content-Type": "application/json"}),
+            body=b'{"do": "disable-ads"}',
+        )
         self.assertEqual(status, 200)
         self.assertEqual(server._device_action, "disable-ads")
 
@@ -276,7 +351,13 @@ class TestRunModeEndpoint(ServerHTTPTestBase):
         _s, h, _ = _http_get(self.port, "/dashboard.png?mock=1&kindle=pw5")
         etag = h.get("ETag")
 
-        _http_get(self.port, "/mode?set=oneshot")
+        _http(
+            method="POST",
+            port=self.port,
+            path="/mode",
+            headers=_auth_headers({"Content-Type": "application/json"}),
+            body=b'{"set": "oneshot"}',
+        )
 
         s304, h304, _ = _http_get(
             self.port,
@@ -358,14 +439,14 @@ class TestLogEndpoint(ServerHTTPTestBase):
 
     def test_get_log_with_query(self):
         status, _headers, _body = _http_get(self.port, "/log?msg=test-message")
-        self.assertEqual(status, 200)
+        self.assertIn(status, (404, 405))
 
 
 class TestControlEndpoints(ServerHTTPTestBase):
     def setUp(self):
         super().setUp()
         server.tracker_stopped = False
-        server.CONTROL_TOKEN = ""
+        server.CONTROL_TOKEN = "test-token"
 
     def tearDown(self):
         server.tracker_stopped = False
@@ -373,47 +454,50 @@ class TestControlEndpoints(ServerHTTPTestBase):
         super().tearDown()
 
     def test_stop_then_resume_from_loopback(self):
-        status, _headers, body = _http_get(self.port, "/stop")
+        tok = "control123"
+        server.CONTROL_TOKEN = tok
+        status, _headers, body = _http("POST", self.port, "/stop", headers={"X-Tracker-Token": tok})
         self.assertEqual(status, 200)
         self.assertTrue(server.tracker_stopped)
-        self.assertIn(b"Stopping", body)
+        self.assertIn(b"stopped", body)
 
         status, _headers, _body = _http_get(self.port, "/dashboard.png?mock=1")
         self.assertEqual(status, 205)
 
-        status, _headers, _body = _http_get(self.port, "/resume")
+        status, _headers, _body = _http("POST", self.port, "/resume", headers={"X-Tracker-Token": tok})
         self.assertEqual(status, 200)
         self.assertFalse(server.tracker_stopped)
 
     def test_start_alias_resumes(self):
         server.tracker_stopped = True
-        status, _headers, _body = _http_get(self.port, "/start")
+        tok = "control123"
+        server.CONTROL_TOKEN = tok
+        status, _headers, _body = _http("POST", self.port, "/start", headers={"X-Tracker-Token": tok})
         self.assertEqual(status, 200)
         self.assertFalse(server.tracker_stopped)
 
     def test_stop_denied_with_token_configured_and_wrong_token(self):
         server.CONTROL_TOKEN = "topsecret"
-        status, _headers, body = _http_get(self.port, "/stop")
+        status, _headers, body = _http("POST", self.port, "/stop", headers={"X-Tracker-Token": "wrong"})
         self.assertEqual(status, 403)
         self.assertFalse(server.tracker_stopped)
         self.assertIn(b"Forbidden", body)
 
-    def test_stop_allowed_with_correct_token(self):
+    def test_stop_denied_via_get(self):
         server.CONTROL_TOKEN = "topsecret"
-        status, _headers, _body = _http_get(self.port, "/stop?token=topsecret")
-        self.assertEqual(status, 200)
-        self.assertTrue(server.tracker_stopped)
+        status, _headers, _body = _http_get(self.port, "/stop", headers={"X-Tracker-Token": "topsecret"})
+        self.assertEqual(status, 405)
 
     def test_stop_allowed_with_correct_header_token(self):
         server.CONTROL_TOKEN = "topsecret"
-        status, _headers, _body = _http_get(self.port, "/stop", headers={"X-Tracker-Token": "topsecret"})
+        status, _headers, _body = _http("POST", self.port, "/stop", headers={"X-Tracker-Token": "topsecret"})
         self.assertEqual(status, 200)
         self.assertTrue(server.tracker_stopped)
 
     def test_resume_denied_without_token(self):
         server.tracker_stopped = True
         server.CONTROL_TOKEN = "topsecret"
-        status, _headers, _body = _http_get(self.port, "/resume")
+        status, _headers, _body = _http("POST", self.port, "/resume")
         self.assertEqual(status, 403)
         self.assertTrue(server.tracker_stopped)
 
@@ -422,7 +506,8 @@ class TestControlEndpoints(ServerHTTPTestBase):
         server.tracker_stopped = True
         status, _headers, body = _http_get(self.port, "/")
         self.assertEqual(status, 200)
-        self.assertIn(b"resume?token=topsecret", body)
+        self.assertIn(b"STOPPED", body)
+        self.assertNotIn(b"topsecret", body)
 
 
 class TestForbiddenResponse(unittest.TestCase):
@@ -453,7 +538,7 @@ class TestForbiddenResponse(unittest.TestCase):
         h = FakeHandler()
         DashboardHandler._send_forbidden(h)
         self.assertEqual(h.code, 403)
-        self.assertEqual(h.sent_headers["Content-Type"], "text/html")
+        self.assertIn("text/html", h.sent_headers["Content-Type"])
         self.assertIn(b"403 Forbidden", h.wfile.data)
 
 
@@ -496,15 +581,19 @@ class TestServerCoverageAdditions(ServerHTTPTestBase):
             server.OVERNIGHT_END = orig_end
 
     def test_get_presentation_force_fast_poll(self):
-        orig = server.FORCE_FAST_POLL
+        import schedule
+        orig_srv = getattr(server, "FORCE_FAST_POLL", False)
+        orig_sch = schedule.FORCE_FAST_POLL
         try:
+            schedule.FORCE_FAST_POLL = True
             server.FORCE_FAST_POLL = True
             self.assertEqual(server.get_presentation(), "interactive")
         finally:
-            server.FORCE_FAST_POLL = orig
+            schedule.FORCE_FAST_POLL = orig_sch
+            server.FORCE_FAST_POLL = orig_srv
 
     def test_action_endpoint_without_do(self):
-        status, _headers, body = _http_get(self.port, "/action")
+        status, _headers, body = _http_get(self.port, "/action", headers=_auth_headers())
         self.assertEqual(status, 200)
         data = json.loads(body)
         self.assertIn("pending", data)
@@ -547,7 +636,7 @@ class TestServerCoverageAdditions(ServerHTTPTestBase):
 
     def test_send_forbidden_on_head(self):
         with patch("server.check_control_auth", return_value=False):
-            status, _headers, body = _http("HEAD", self.port, "/stop")
+            status, _headers, body = _http("HEAD", self.port, "/mode")
             self.assertEqual(status, 403)
             self.assertEqual(len(body), 0)
 
@@ -562,22 +651,25 @@ class TestServerCoverageAdditions(ServerHTTPTestBase):
         handler._send_empty = MagicMock()
 
         handler.do_POST()
-        handler._send_empty.assert_called_with(200)
+        handler._send_empty.assert_called_with(400)
 
         handler.path = "/diag"
         handler._send_empty.reset_mock()
         handler.do_POST()
-        handler._send_empty.assert_called_with(200)
+        handler._send_empty.assert_called_with(400)
 
     def test_get_fresh_data_live_gtfs_exception_fallback(self):
         mock_gtfs = MagicMock()
         mock_gtfs.get_upcoming.side_effect = Exception("GTFS failure")
         mock_njt = MagicMock()
         mock_njt.get_arrivals_with_status.return_value = ("ok", [])
-        mock_cb = MagicMock()
-        mock_cb.get_station_status.return_value = [
+        mock_snap = MagicMock()
+        mock_snap.status = "ok"
+        mock_snap.stations = [
             {"name": "Mock Station", "ebikes": 2, "classic": 1, "docks": 5, "walk_min": 2, "is_offline": False}
         ]
+        mock_cb = MagicMock()
+        mock_cb.get_snapshot.return_value = mock_snap
         mock_cb.get_mock_data.return_value = []
         orig_gtfs = server.gtfs_tracker
         orig_njt = server.tracker
@@ -602,8 +694,8 @@ class TestServerCoverageAdditions(ServerHTTPTestBase):
             with patch.object(socket.socket, "connect", hermetic_connect):
                 stops, status, cb_data = server.get_fresh_data(use_mock=False)
             mock_njt.get_arrivals_with_status.assert_called()
-            mock_cb.get_station_status.assert_called_once()
-            self.assertEqual(cb_data, mock_cb.get_station_status.return_value)
+            mock_cb.get_snapshot.assert_called_once()
+            self.assertEqual(cb_data, mock_snap.stations)
         finally:
             server.gtfs_tracker = orig_gtfs
             server.tracker = orig_njt

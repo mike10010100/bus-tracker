@@ -1,0 +1,50 @@
+{
+  "cert": {
+    "header": "eyJmb3JtYXQiOiJ0cmFuc2l0LXRyYWNrZXItc2VydmVyLXYxIiwicHVibGljX2tleSI6IjUvRmlvUXZzVlpyK29aWGszT2hMYVZhTlhTeXdsajYwUnNCb1hpc1g4dkE9IiwiaXNzdWVkX2F0IjoxNzAwMDAwMDAwLCJzaWduYXR1cmUiOiI4U1h6SVZkcFB3MmYzejhORit6RTB2QTd4SzJtV2FMcEpzVWJSdytnVUJtdHNkOWFXalh2cGdPMko5dEkzVGdmckJxSVpzSmpZZDJUc0dlWThCRWRDZz09In0=",
+    "issued_at": 1700000000,
+    "json": "{\"format\":\"transit-tracker-server-v1\",\"public_key\":\"5/FioQvsVZr+oZXk3OhLaVaNXSywlj60RsBoXisX8vA=\",\"issued_at\":1700000000,\"signature\":\"8SXzIVdpPw2f3z8NF+zE0vA7xK2mWaLpJsUbRw+gUBmtsd9aWjXvpgO2J9tI3TgfrBqIZsJjYd2TsGeY8BEdCg==\"}",
+    "message": "transit-tracker-server-v1\npublic_key=5/FioQvsVZr+oZXk3OhLaVaNXSywlj60RsBoXisX8vA=\nissued_at=1700000000",
+    "signature": "8SXzIVdpPw2f3z8NF+zE0vA7xK2mWaLpJsUbRw+gUBmtsd9aWjXvpgO2J9tI3TgfrBqIZsJjYd2TsGeY8BEdCg=="
+  },
+  "manifest": {
+    "json": "{\"format\":\"transit-tracker-ota-v1\",\"version\":\"1.2.3\",\"sha256\":\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\",\"size\":5,\"signature\":\"DPxNpfGDeGkS9TH6DoE5+qgWG12pq86C4upgfcPJRHwbl6vaiuyk8T6qvejHCtv3PpFIf4fkitMatrEfA0ZJDg==\"}",
+    "message": "transit-tracker-ota-v1\nversion=1.2.3\nsha256=2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\nsize=5",
+    "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    "signature": "DPxNpfGDeGkS9TH6DoE5+qgWG12pq86C4upgfcPJRHwbl6vaiuyk8T6qvejHCtv3PpFIf4fkitMatrEfA0ZJDg==",
+    "size": 5,
+    "version": "1.2.3"
+  },
+  "release_public_key": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+  "release_seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "response": {
+    "body": "PNG",
+    "headers": {
+      "etag": "\"abc\"",
+      "x-kindle-poll-interval": "60",
+      "x-resolved-view": "evening",
+      "x-tracker-presentation": "interactive",
+      "x-tracker-view": "auto"
+    },
+    "message": "transit-tracker-resp-v1\nnonce=000102030405060708090a0b0c0d0e0f\npath=/dashboard.png\nstatus=200\nbody-sha256=796120837694d3f3f29259cfeb25091698c2a0aa87873658d840b4993ee889b3\netag=\"abc\"\nx-kindle-poll-interval=60\nx-tracker-presentation=interactive\nx-tracker-mode=\nx-tracker-action=\nx-tracker-diag=\nx-kindle-brightness=\nx-kindle-warmth=\nx-tracker-version=\nx-tracker-sha256=\nx-resolved-view=evening\nx-tracker-view=auto",
+    "nonce": "000102030405060708090a0b0c0d0e0f",
+    "path": "/dashboard.png",
+    "signature": "IJclhxV9N4ZonPdHdy1yoMn5tbIcRlL6vx0qyYONslxvoRARn6JTQ5IbPnpEVi+fnIt+DIXGW0XZNN37qNXWDQ==",
+    "signed_headers": [
+      "etag",
+      "x-kindle-poll-interval",
+      "x-tracker-presentation",
+      "x-tracker-mode",
+      "x-tracker-action",
+      "x-tracker-diag",
+      "x-kindle-brightness",
+      "x-kindle-warmth",
+      "x-tracker-version",
+      "x-tracker-sha256",
+      "x-resolved-view",
+      "x-tracker-view"
+    ],
+    "status": 200
+  },
+  "server_public_key": "5/FioQvsVZr+oZXk3OhLaVaNXSywlj60RsBoXisX8vA=",
+  "server_seed_hex": "2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40"
+}

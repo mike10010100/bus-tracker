@@ -212,7 +212,7 @@ var checkNetworkFn = func(ctx context.Context) bool {
 	return strings.Contains(string(out), "default")
 }
 
-// sleepWallClock waits `d`, interruptible by ctx. Returns false if ctx ended.
+// sleepWallClock waits `d`, interruptible by ctx or forced refresh taps. Returns false if ctx ended.
 func (tc *TrackerClient) sleepWallClock(ctx context.Context, d time.Duration) bool {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
@@ -220,6 +220,8 @@ func (tc *TrackerClient) sleepWallClock(ctx context.Context, d time.Duration) bo
 	case <-ctx.Done():
 		return false
 	case <-timer.C:
+		return true
+	case <-tc.refreshCh:
 		return true
 	}
 }

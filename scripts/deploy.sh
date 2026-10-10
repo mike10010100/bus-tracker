@@ -44,9 +44,28 @@ echo "======================================================================"
 echo "🚌 Deploying Transit Tracker (${IMAGE_TAG})"
 echo "======================================================================"
 
-# Docker multi-stage compiles tracker-arm automatically
+# The Kindle binary is signed during the image build with the release key,
+# passed as a BuildKit secret (see docker-compose.yml). Fail early and clearly
+# rather than with an opaque compose "secret file not found" error.
+OTA_SIGNING_KEY_FILE="${OTA_SIGNING_KEY_FILE:-./secrets/ota_ed25519.key}"
+export OTA_SIGNING_KEY_FILE
+if [[ ! -s "${OTA_SIGNING_KEY_FILE}" ]]; then
+    if [[ "${ALLOW_UNSIGNED_OTA:-0}" == "1" ]]; then
+        echo "⚠️  No signing key at ${OTA_SIGNING_KEY_FILE}; building UNSIGNED (devices will not be offered this build)."
+        OTA_SIGNING_KEY_FILE=/dev/null
+        export OTA_SIGNING_KEY_FILE ALLOW_UNSIGNED_OTA
+    else
+        echo "Error: no OTA release signing key at ${OTA_SIGNING_KEY_FILE}." >&2
+        echo "  Create one once with:  make keygen" >&2
+        echo "  (or: mkdir -p secrets && openssl genpkey -algorithm ed25519 -out secrets/ota_ed25519.key)" >&2
+        echo "  Back it up: devices only accept updates signed by this key." >&2
+        exit 1
+    fi
+fi
+
+# Docker multi-stage compiles and signs tracker-arm automatically
 export IMAGE_TAG
-"${COMPOSE_CMD[@]}" build transit-tracker
+DOCKER_BUILDKIT=1 "${COMPOSE_CMD[@]}" build transit-tracker
 
 if docker image inspect "transit-tracker:${IMAGE_TAG}" >/dev/null 2>&1; then
     docker tag "transit-tracker:${IMAGE_TAG}" "transit-tracker:latest" || true

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/binary"
 	"io"
 	"net/http"
@@ -26,14 +27,27 @@ func patchRuntime(t *testing.T) {
 	origGlob := globInputs
 	origOpen := osOpen
 	origReadFile := osReadFile
+	origWriteFile := osWriteFile
 	origGetBattery := GetBatteryInfo
 	origDiscover := autoDiscover
 	origExecCmd := execCommand
 	origExecCmdCtx := execCommandContext
+	origOTAPub := OTAPublicKey
+	origAllowLoopback := allowLoopbackDiscovery
+	origMinPoll := minPollIntervalSec
 
 	// Discovery is disabled by default in tests so a real LAN server cannot
 	// interfere with assertions; individual tests may override it.
 	autoDiscover = func(ctx context.Context) (string, error) { return "", os.ErrNotExist }
+	allowLoopbackDiscovery = true
+	minPollIntervalSec = 1
+
+	execCommand = func(name string, arg ...string) *exec.Cmd {
+		if name == "eips" {
+			return exec.Command("true")
+		}
+		return origExecCmd(name, arg...)
+	}
 
 	t.Cleanup(func() {
 		osOpenFile = origOpenFile
@@ -45,10 +59,22 @@ func patchRuntime(t *testing.T) {
 		globInputs = origGlob
 		osOpen = origOpen
 		osReadFile = origReadFile
+		osWriteFile = origWriteFile
 		GetBatteryInfo = origGetBattery
 		autoDiscover = origDiscover
 		execCommand = origExecCmd
 		execCommandContext = origExecCmdCtx
+		OTAPublicKey = origOTAPub
+		allowLoopbackDiscovery = origAllowLoopback
+		minPollIntervalSec = origMinPoll
+
+		otaBackoffMu.Lock()
+		otaBackoffs = make(map[string]*otaBackoffEntry)
+		otaBackoffMu.Unlock()
+
+		certCacheMu.Lock()
+		certCache = make(map[string]ed25519.PublicKey)
+		certCacheMu.Unlock()
 	})
 }
 
@@ -489,6 +515,8 @@ func TestHandleNetworkError_RediscoveryResetsCounter(t *testing.T) {
 
 	tc := NewTrackerClient("http://127.0.0.1:1", "auto")
 	tc.handleNetworkError(context.Background())
+	tc.handleNetworkError(context.Background())
+	tc.handleNetworkError(context.Background())
 
 	if tc.getServerURL() != "http://10.1.2.3:8000" {
 		t.Errorf("expected rediscovered server URL, got %s", tc.getServerURL())
@@ -614,13 +642,13 @@ func TestMiscMissingBranches(t *testing.T) {
 	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, "sleep", "2")
 	}
-	defer func() { execCommandContext = origCmdCtx }()
 	origTimeout := lipcCallTimeout
 	lipcCallTimeout = 10 * time.Millisecond
-	defer func() { lipcCallTimeout = origTimeout }()
 	if got := lipcGet("prop", "name"); got != "" {
 		t.Errorf("expected empty string on lipc timeout, got %q", got)
 	}
+	execCommandContext = origCmdCtx
+	lipcCallTimeout = origTimeout
 
 	doneCh := make(chan string, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -704,5 +732,99 @@ func TestTrackerClient_Wait(t *testing.T) {
 	tc.Wait()
 	if !completed {
 		t.Fatal("expected tc.Wait to block until background goroutine completes")
+	}
+}
+
+type sizedFileInfo struct {
+	fakeFileInfo
+	size int64
+}
+
+func (s sizedFileInfo) Size() int64 { return s.size }
+
+type symlinkFileInfo struct {
+	fakeFileInfo
+}
+
+func (s symlinkFileInfo) Mode() os.FileMode { return os.ModeSymlink }
+func (s symlinkFileInfo) IsDir() bool       { return false }
+
+func TestSetupStderr_Branches(t *testing.T) {
+	patchRuntime(t)
+	var dupCalls int
+	origDup := syscallDup2
+	syscallDup2 = func(int, int) error {
+		dupCalls++
+		return nil
+	}
+	defer func() { syscallDup2 = origDup }()
+
+	// 1. Regular creation
+	setupStderr()
+	if dupCalls == 0 {
+		t.Error("expected syscallDup2 to be called")
+	}
+
+	// 2. Large file triggers truncation
+	origStat := osStat
+	osStat = func(name string) (os.FileInfo, error) {
+		return sizedFileInfo{size: 300 * 1024}, nil
+	}
+	setupStderr()
+	osStat = origStat
+
+	// 3. Open error triggers fallback to /dev/null
+	origOpen := osOpenFile
+	osOpenFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+		if strings.Contains(name, "client.log") {
+			return nil, os.ErrPermission
+		}
+		return origOpen(name, flag, perm)
+	}
+	setupStderr()
+	osOpenFile = origOpen
+}
+
+func TestEnsurePrivateDir_Branches(t *testing.T) {
+	patchRuntime(t)
+	if err := ensurePrivateDir(); err != nil {
+		t.Fatalf("ensurePrivateDir failed: %v", err)
+	}
+
+	origLstat := osLstat
+	origRemoveAll := osRemoveAll
+	var removed bool
+	osLstat = func(name string) (os.FileInfo, error) {
+		return symlinkFileInfo{}, nil
+	}
+	osRemoveAll = func(path string) error {
+		removed = true
+		return nil
+	}
+	_ = ensurePrivateDir()
+	if !removed {
+		t.Error("expected removeAll when PrivateDir is symlink")
+	}
+	osLstat = origLstat
+	osRemoveAll = origRemoveAll
+
+	origMkdir := osMkdirAll
+	osMkdirAll = func(path string, perm os.FileMode) error {
+		return os.ErrPermission
+	}
+	if err := ensurePrivateDir(); err == nil {
+		t.Error("expected error when osMkdirAll fails")
+	}
+	osMkdirAll = origMkdir
+}
+
+func TestNewTrackerClient_Views(t *testing.T) {
+	tc1 := NewTrackerClient("http://127.0.0.1:8000", "morning")
+	if tc1.getViewMode() != "morning" {
+		t.Errorf("expected morning view, got %s", tc1.getViewMode())
+	}
+	tc2 := NewTrackerClient("http://127.0.0.1:8000", "evening")
+	if tc2.getViewMode() != "evening" {
+		t.Errorf("expected evening view, got %s", tc2.getViewMode())
 	}
 }
