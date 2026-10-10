@@ -564,12 +564,11 @@ func (tc *TrackerClient) configureGestureHandlers(gd *GestureDetector, cancel co
 	gd.OnLog = func(msg string) { tc.logRemote(msg) }
 
 	gd.OnSingleTap = func(x, y int32) {
-		// Screen-only action: cycleFrontlight() arms the lighting hold itself;
-		// do not arm the fast-poll hold (nothing on the wire changed). Still
-		// note the touch so an interaction session doesn't expire under us.
+		// Taps in the main content area are deliberately inert: the frontlight
+		// has its own LIGHT button, and cycling it on every tap was confusing
+		// ("only brightness changed"). Still acknowledge the touch so an awake
+		// interaction session doesn't expire while the user is poking around.
 		tc.noteTouch()
-		tc.logRemote(fmt.Sprintf("Single tap recognized at (%d, %d)", x, y))
-		tc.cycleFrontlight()
 	}
 	gd.OnDoubleTap = func(x, y int32) {
 		// A double tap is trivially easy to trigger accidentally; do NOT exit.
