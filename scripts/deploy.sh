@@ -39,6 +39,11 @@ if [[ -z "${VERSION}" ]]; then
     exit 1
 fi
 
+if [[ "${1:-}" == "--pull" ]] || [[ "${PULL_LATEST:-0}" == "1" ]]; then
+    echo "⬇️  Pulling latest changes from git..."
+    git pull || true
+fi
+
 IMAGE_TAG="v${VERSION}"
 echo "======================================================================"
 echo "🚌 Deploying Transit Tracker (${IMAGE_TAG})"

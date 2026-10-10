@@ -140,10 +140,31 @@ Configured in [`.pre-commit-config.yaml`](file:///home/mike10010100/git/transit-
 
 ### 6.2 GitHub Actions CI
 The CI workflow in [`.github/workflows/ci.yml`](file:///home/mike10010100/git/transit-tracker/.github/workflows/ci.yml):
-- Enforces workflow concurrency (`cancel-in-progress: true`).
+- Enforces workflow concurrency (`cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}`).
 - Uses pinned immutable action SHAs.
-- Runs 4 concurrent validation jobs:
-  1. `go-client`: gofmt, go vet, golangci-lint, race tests, 93% coverage gate, signed build.
-  2. `shell`: check-sh, test-sh (8 integration tests).
-  3. `python-server`: ruff check, ruff format, mypy, pip-audit, unit tests, 92% coverage gate.
-  4. `docker`: hadolint, signed build with BuildKit secret, container smoke test.
+- Runs 5 validation jobs:
+  1. `version-bump-check`: Enforces SemVer bump in `VERSION` and changelog entry on all PRs.
+  2. `go-client`: gofmt, go vet, golangci-lint, race tests, 93% coverage gate, signed build.
+  3. `shell`: check-sh, test-sh (8 integration tests + version bump unit tests).
+  4. `python-server`: ruff check, ruff format, mypy, pip-audit, unit tests, 92% coverage gate.
+  5. `docker`: hadolint, signed build with BuildKit secret, container smoke test.
+- Automatically creates GitHub Releases and tags (`vX.Y.Z`) on merge to `main`.
+
+---
+
+## 7. Release Lifecycle & Continuous Deployment
+
+### 7.1 Semantic Versioning & CHANGELOG
+- All changes must bump [`VERSION`](file:///home/mike10010100/git/transit-tracker/VERSION) per [SemVer 2.0.0](https://semver.org/).
+- Changes must be documented in [`CHANGELOG.md`](file:///home/mike10010100/git/transit-tracker/CHANGELOG.md) under `## [X.Y.Z] - YYYY-MM-DD`.
+- Verified in CI on every PR via [`scripts/check_version_bump.sh`](file:///home/mike10010100/git/transit-tracker/scripts/check_version_bump.sh).
+
+### 7.2 Branch Protection on `main`
+- Direct pushes to `main` are restricted. All modifications require a pull request.
+- Status checks must pass cleanly (`strict: true`).
+- Linear history is enforced (squash or rebase; no merge bubbles).
+
+### 7.3 Automated Host Deployment
+- Local deployments use [`scripts/deploy.sh`](file:///home/mike10010100/git/transit-tracker/scripts/deploy.sh) (or `make deploy`).
+- On server boot, `/home/mike10010100/startup.sh` automatically pulls the latest `main` branch, builds the versioned image, and re-launches the container stack.
+

@@ -1,4 +1,4 @@
-.PHONY: all check test test-go test-py test-sh lint lint-go lint-py vet fmt fmt-go fmt-py fmt-check fmt-go-check fmt-py-check audit audit-go audit-py coverage coverage-go coverage-py check-sh build keygen pubkey verify-release clean
+.PHONY: all check test test-go test-py test-sh lint lint-go lint-py vet fmt fmt-go fmt-py fmt-check fmt-go-check fmt-py-check audit audit-go audit-py coverage coverage-go coverage-py check-sh build keygen pubkey verify-release deploy clean
 
 SHELL := /bin/bash
 
@@ -25,6 +25,7 @@ test-py:
 test-sh:
 	@echo "==> Running Shell test suite..."
 	@bash tests/test_launcher.sh
+	@bash tests/test_version_bump.sh
 
 vet:
 	@echo "==> Running go vet static analysis..."
@@ -179,6 +180,9 @@ build:
 verify-release:
 	@$(OTASIGN) verify -pub "$$($(OTASIGN) pubkey -key "$(abspath $(OTA_SIGNING_KEY))")" \
 		-manifest "$(CURDIR)/tracker-arm.manifest.json" -in "$(CURDIR)/tracker-arm" && echo "OK: release signature valid"
+
+deploy:
+	@bash scripts/deploy.sh
 
 clean:
 	@rm -f tracker-arm tracker-arm.new tracker-arm.manifest.json tracker-arm.manifest.json.new server/tracker-arm client-go/client-go client-go/cover.out server_identity.key server_identity.cert.json

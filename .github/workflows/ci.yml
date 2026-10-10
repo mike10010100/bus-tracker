@@ -8,12 +8,28 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
 
 jobs:
+  version-bump-check:
+    name: Enforce Semantic Version Bump & CHANGELOG on PRs
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout Code with full history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify Semantic Version Bump & CHANGELOG Entry
+        run: |
+          chmod +x ./scripts/check_version_bump.sh
+          ./scripts/check_version_bump.sh
+
   go-client:
     name: Go Client (test, lint, race, signed build)
     runs-on: ubuntu-latest
@@ -147,3 +163,58 @@ jobs:
           curl -fsS -o /dev/null http://localhost:18000/tracker-arm.manifest
           docker top tt | grep 'server.py' | grep -vq '^root'
           docker rm -f tt
+
+  release:
+    name: Auto-Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [go-client, shell, python-server, docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+      checks: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Extract Current Version
+        id: pkg_info
+        run: |
+          VERSION=$(tr -d '[:space:]' < VERSION)
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Detected version: ${VERSION}"
+
+      - name: Check if Version Already Released on GitHub
+        id: check_released
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="v${{ steps.pkg_info.outputs.version }}"
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            echo "released=true" >> $GITHUB_OUTPUT
+            echo "Version ${{ steps.pkg_info.outputs.version }} is already released on GitHub."
+          else
+            echo "released=false" >> $GITHUB_OUTPUT
+            echo "Version ${{ steps.pkg_info.outputs.version }} is NOT released on GitHub yet."
+          fi
+
+      - name: Create or Update GitHub Release Tag
+        if: steps.check_released.outputs.released == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: "v${{ steps.pkg_info.outputs.version }}"
+        run: |
+          echo "Creating GitHub Release ${TAG_NAME}..."
+          if [ -f CHANGELOG.md ]; then
+            gh release create "${TAG_NAME}" \
+              --target "${GITHUB_SHA}" \
+              --title "${TAG_NAME} - Production Release" \
+              --notes-file CHANGELOG.md
+          else
+            gh release create "${TAG_NAME}" \
+              --target "${GITHUB_SHA}" \
+              --title "${TAG_NAME} - Production Release" \
+              --generate-notes
+          fi
